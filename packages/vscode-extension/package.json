@@ -1,0 +1,61 @@
+{
+  "name": "css-blast-radius",
+  "displayName": "CSS Blast Radius",
+  "description": "Shows how many pages/elements a CSS rule change affects, live as you edit, backed by a local blast-radius daemon.",
+  "version": "0.1.0",
+  "publisher": "css-blast-radius",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onLanguage:css"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cssBlastRadius.verifyExactly",
+        "title": "CSS Blast Radius: Verify Exactly"
+      },
+      {
+        "command": "cssBlastRadius.showDrilldown",
+        "title": "CSS Blast Radius: Show Drilldown"
+      },
+      {
+        "command": "cssBlastRadius.restartDaemon",
+        "title": "CSS Blast Radius: Restart Daemon"
+      }
+    ],
+    "configuration": {
+      "title": "CSS Blast Radius",
+      "properties": {
+        "cssBlastRadius.siteRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Path (relative to the workspace root) containing the crawlable HTML site. Defaults to the workspace root."
+        },
+        "cssBlastRadius.daemonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a css-blast-radius-daemon executable/script. Defaults to the bundled backend."
+        },
+        "cssBlastRadius.remoteEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Optional shared/remote index-service endpoint. When unset, the daemon runs fully local (see architecture doc, shared-team mode is descoped from this extension's v1)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "package": "vsce package"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.2"
+  }
+}

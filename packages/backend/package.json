@@ -1,0 +1,33 @@
+{
+  "name": "@css-blast-radius/backend",
+  "version": "0.1.0",
+  "description": "Local daemon / index-service engine for the CSS Blast-Radius tool: crawls a site, builds a cross-page selector-match index, and answers live edit-time impact queries over a JSON-RPC socket.",
+  "type": "module",
+  "bin": {
+    "css-blast-radius-daemon": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "dev:daemon": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "chokidar": "^3.6.0",
+    "fast-glob": "^3.3.2",
+    "jsdom": "^25.0.1",
+    "postcss": "^8.4.47",
+    "postcss-selector-parser": "^6.1.2",
+    "specificity": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
+  }
+}

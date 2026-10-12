@@ -1,0 +1,13 @@
+{
+  "name": "css-blast-radius",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/backend",
+    "packages/vscode-extension"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace packages/backend && npm run build --workspace packages/vscode-extension",
+    "test": "npm run test --workspace packages/backend"
+  }
+}
