@@ -8,6 +8,6 @@
   ],
   "scripts": {
     "build": "npm run build --workspace packages/backend && npm run build --workspace packages/vscode-extension",
-    "test": "npm run test --workspace packages/backend"
+    "test": "npm run test --workspace packages/backend && npm run test --workspace packages/vscode-extension"
   }
 }

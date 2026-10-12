@@ -1,58 +1,129 @@
 {
   "name": "css-blast-radius",
   "displayName": "CSS Blast Radius",
-  "description": "Shows how many pages/elements a CSS rule change affects, live as you edit, backed by a local blast-radius daemon.",
+  "description": "See how many pages of your site a CSS edit reaches, as you type, backed by a local blast-radius daemon.",
   "version": "0.1.0",
   "publisher": "css-blast-radius",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
-    "onLanguage:css"
+    "onLanguage:css",
+    "workspaceContains:cbr.config.json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "cssBlastRadius.verifyExactly",
-        "title": "CSS Blast Radius: Verify Exactly"
+        "command": "cssBlastRadius.showPages",
+        "title": "Show Pages Your Edits Reach",
+        "category": "CSS Blast Radius",
+        "icon": "$(flame)"
       },
       {
-        "command": "cssBlastRadius.showDrilldown",
-        "title": "CSS Blast Radius: Show Drilldown"
+        "command": "cssBlastRadius.showFilePages",
+        "title": "Show Pages This File's Edits Reach",
+        "category": "CSS Blast Radius",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "cssBlastRadius.captureSite",
+        "title": "Capture Site",
+        "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.setDiffBase",
+        "title": "Change Diff Base",
+        "category": "CSS Blast Radius"
       },
       {
         "command": "cssBlastRadius.restartDaemon",
-        "title": "CSS Blast Radius: Restart Daemon"
+        "title": "Restart Daemon",
+        "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.showOutput",
+        "title": "Show Output",
+        "category": "CSS Blast Radius"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "cssBlastRadius.showFilePages",
+          "when": "resourceLangId == css",
+          "group": "navigation@90"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "cssBlastRadius.showFilePages",
+          "when": "editorLangId == css"
+        }
+      ]
+    },
     "configuration": {
       "title": "CSS Blast Radius",
       "properties": {
         "cssBlastRadius.siteRoot": {
           "type": "string",
           "default": "",
-          "description": "Path (relative to the workspace root) containing the crawlable HTML site. Defaults to the workspace root."
+          "description": "Folder with the site's built HTML (relative to the workspace). Overrides cbr.config.json; empty: the config file or the workspace root."
+        },
+        "cssBlastRadius.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL of the deployed site, for the live check (L3) and capture of a served site. Overrides cbr.config.json."
+        },
+        "cssBlastRadius.dataDir": {
+          "type": "string",
+          "default": "",
+          "description": "Where the index is stored. Empty: .css-blast-radius/ in the workspace."
+        },
+        "cssBlastRadius.diffBase": {
+          "type": "string",
+          "enum": [
+            "",
+            "HEAD",
+            "saved",
+            "session",
+            "production"
+          ],
+          "default": "",
+          "description": "What your edits are compared with when the daemon starts. Empty: HEAD (uncommitted changes). Change it at runtime with “CSS Blast Radius: Change Diff Base”."
+        },
+        "cssBlastRadius.warnLostPages": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Warn in Problems when removing a rule or changing a selector stops it from reaching at least this many pages."
+        },
+        "cssBlastRadius.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show page counts above each rule."
+        },
+        "cssBlastRadius.nodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Node.js (≥ 20) used to run the daemon. Empty: “node” on PATH. The editor's own runtime isn't used because the index database is a native module."
         },
         "cssBlastRadius.daemonPath": {
           "type": "string",
           "default": "",
-          "description": "Optional path to a css-blast-radius-daemon executable/script. Defaults to the bundled backend."
-        },
-        "cssBlastRadius.remoteEndpoint": {
-          "type": "string",
-          "default": "",
-          "description": "Optional shared/remote index-service endpoint. When unset, the daemon runs fully local (see architecture doc, shared-team mode is descoped from this extension's v1)."
+          "description": "Path to the backend CLI (cli.js). Empty: the backend next to this extension."
         }
       }
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "vitest run --root .",
     "package": "vsce package"
   },
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.7.5",
     "@types/vscode": "^1.85.0",

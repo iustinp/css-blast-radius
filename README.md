@@ -1,126 +1,113 @@
-# CSS Blast Radius — v1 implementation
+# CSS Blast Radius
 
-A local-only prototype of the architecture described in
-[`css-blast-radius-tool-architecture.md`](./css-blast-radius-tool-architecture.md):
-a backend engine that crawls a static HTML site, indexes CSS selector usage
-across every page, and answers live "how many pages/elements does this CSS
-change affect" queries as you edit — plus a VS Code extension thin client
-that surfaces those answers via CodeLens, hover, the Problems panel, and a
-drilldown webview.
+See how many pages of your site a CSS edit reaches, while you type — so a change
+meant for one page doesn't quietly alter a hundred others. Design:
+[`css-blast-radius-tool-architecture.md`](./css-blast-radius-tool-architecture.md).
+
+Every page is captured once in headless Chromium. At capture time each site
+selector is evaluated natively, and each page is stored as a compact
+"hibernated" element tree. After that, a live edit is answered from memory in
+four levels:
+
+| Level | Answer | When | Measured (401-page fixture) |
+|---|---|---|---|
+| **L0** | Page count (`exact` / `possible` / `unknown`) | every keystroke | bench p95 **6.9 ms** in-process; keystroke → status bar **~17 ms** end to end |
+| **L1** | Page list, refined counts per rule | right after | bench p95 **9.2 ms** (max 104 ms) |
+| **L2** | Before/after render of one page (box diff, screenshots) | on request | ~0.2–0.5 s |
+| **L3** | Same check on the live page | on request | ~0.7 s |
+
+Every page gets its own verdict, so copied pages that drift from their
+template are still counted. `0` is only shown with a reason.
 
 ## Packages
 
-- **`packages/backend`** — the engine. Runs as a local daemon (or, per the
-  architecture doc, could later back a shared index service): crawls a site
-  root, builds an in-memory + SQLite-backed index, watches CSS files, and
-  exposes a JSON-RPC 2.0 API over a Unix domain socket / Windows named pipe.
-- **`packages/vscode-extension`** — the thin IDE client. Owns document
-  lifecycle events, daemon discovery/launch/health, and UI surfacing only;
-  it never crawls, parses CSSOM, or touches a browser.
-- **`fixtures/site`** — a tiny 3-page demo site with shared CSS, used by the
-  backend's test suite and for manual end-to-end runs.
+- **`packages/backend`**: the daemon and CLI.
+  - Chromium capture (Playwright) with a SQLite + blob store.
+  - CSS model and diff: rules, selectors, custom properties, `@keyframes` / `@font-face` / `@layer` and other definitions.
+  - L0 bitmap engine, L1 worker pool (css-select over the hibernated trees), L2/L3 renderer.
+  - Diff bases: `HEAD`, `saved`, `session`, `production`.
+  - JSON-RPC 2.0 over NDJSON on a Unix socket (mode 0600).
+- **`packages/vscode-extension`**: a thin client.
+  - Starts or attaches to the daemon and syncs open CSS buffers incrementally.
+  - Surfaces: end-of-line counts, status-bar session total, Problems (lost pages), CodeLens, hover, and a page-list panel with L1/L2/L3 detail.
+- **`fixtures/generate-large-site.mjs`**: deterministic generator for a large test site (default 400 pages plus index). Includes templates, copy pages that drift from them, legacy CSS, media/container queries, custom properties and animations.
+- **`fixtures/site`**: a 3-page site used by unit tests.
 
-## Running it
+## Try it
 
 ```bash
 npm install
+npm exec --workspace packages/backend -- playwright-core install chromium
 npm run build
 
-# Start the daemon directly against the fixture site:
-node packages/backend/dist/cli.js --root fixtures/site --socket /tmp/css-blast-radius.sock
+# A 401-page site in a git repo (the default diff base is HEAD):
+node fixtures/generate-large-site.mjs /tmp/cbr-ws
+git -C /tmp/cbr-ws init -q && git -C /tmp/cbr-ws add -A && git -C /tmp/cbr-ws commit -qm site
+
+# Capture it once (~35–45 s for 401 pages), then query or serve:
+node packages/backend/dist/cli.js capture --workspace /tmp/cbr-ws --data /tmp/cbr-data
+node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cbr-data --pages
+node packages/backend/dist/cli.js daemon  --workspace /tmp/cbr-ws --data /tmp/cbr-data
 ```
 
-To try the VS Code extension: open this repo in VS Code, set
-`cssBlastRadius.siteRoot` to `fixtures/site` in workspace settings, press
-F5 to launch an Extension Development Host, open
-`fixtures/site/css/main.css`, and edit a rule — a CodeLens with the live
-impact count should appear above it, and hovering shows the full answer
-contract.
+`impact` reports the blast radius of the working tree against the diff base.
+Edit `/tmp/cbr-ws/css/components.css` first to see a non-zero answer.
+
+**VS Code:**
+1. Press F5 in this repo to open an Extension Development Host, then open `/tmp/cbr-ws` in it.
+2. Set `cssBlastRadius.dataDir` to `/tmp/cbr-data`, or run **CSS Blast Radius: Capture Site**.
+3. Edit any rule in `css/`.
+
+Other commands: **Show Pages**, **Change Diff Base**, **Restart Daemon**.
+
+Settings:
+- `siteRoot`, `baseUrl`, `dataDir`, `diffBase`, `warnLostPages`, `codeLens`.
+- `nodePath`: the daemon runs on system Node ≥ 20, not the editor's runtime, because `better-sqlite3` is a native module.
+- `daemonPath`.
+
+**`cbr.config.json`** (optional, in the workspace root):
+- `root`: site folder; defaults to the workspace.
+- `baseUrl`: for a served site.
+- `urls`: defaults to every `*.html`.
+- `profiles`: `"desktop"`, `"mobile"` or custom viewports.
+- `recipes`: click/hover/fill steps captured as extra states.
+- `stylesheets`: `{ urlPrefix, dir }` mappings.
+- `capture`: `{ concurrency, timeoutMs, fidelitySample, matcherSample }`.
+- `dataDir`.
 
 ## Tests
 
 ```bash
-npm run test --workspace packages/backend
+npm test                                         # backend (113) + extension (9) unit tests
+npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
+npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
+node packages/vscode-extension/scripts/e2e.cjs   # extension vs. real daemon, stubbed vscode API (11 checks)
 ```
 
-7 tests cover: crawling/clustering, exact match counts on modified rules,
-zero-match reason codes, loss/fallback detection on removed rules,
-unlinked-stylesheet reason codes, and cascade-win sampling.
+Bench, smoke and e2e need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from
+above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests. The L1
+cross-check test compares the css-select matcher against Chromium on the
+fixture; it currently finds 0 disagreements.
 
-## What's implemented vs. the architecture doc
+## Status
 
-> **Direction change.** The architecture doc describes the target design.
-> Pages are captured once in Chromium, in the background, and every site
-> selector is evaluated on them natively at capture time. Live queries then
-> become set operations on in-memory page bitmaps, which gives four levels:
-> an **instant page count while typing (L0)**, a **fast page list (L1)**, a
-> **before/after browser check of one requested page (L2)** and an optional
-> **live-page check (L3)**. Counts are split into `exact` / `possible` /
-> `unknown` pages, and `0` is only shown with a reason. This prototype
-> predates that design: it implements the daemon/protocol/client plumbing
-> but uses jsdom with a heuristic cascade. See the doc's **§16
-> "Implementation plan (from the current prototype)"** for the ordered
-> steps; the notes below describe the prototype as it stands.
+Implemented: the architecture doc's §16 steps 1–5, plus diff bases and
+stylesheet mapping from step 6.
 
-**Planned speed contract:** warm L0 aims for a first visible answer within
-100 ms of a keystroke, debounce included, measured end to end; L1 aims for a
-first response within 250 ms. These are targets, not measured prototype
-performance. A selector the index hasn't seen yet shows an upper bound
-(`Up to 340 pages`) that is refined in the background instead of delaying
-the count. A matching page is not necessarily a visually changed page; that
-is what the L2 check answers.
+Not yet implemented:
+- Production sync / CI refresh.
+- Shared team index.
+- Source maps and build adapters (Sass, PostCSS, CSS-in-JS).
+- `.vsix` packaging.
 
-This is a working v1 prototype that implements the **local-only mode** end to end:
-crawling and indexing a static site, live lookup on every edit, the
-prototype's answer contract (`matches` / `applies` / `inheritsInto`,
-confidence tags, reason codes, loss reporting — the doc replaces it with
-page counts, §8), the JSON-RPC protocol with an `initialize` handshake,
-daemon lifecycle (launch/attach/health/backoff), file-watching ownership
-(editor buffer vs. disk, with dedup on save), and the VS Code
-CodeLens/hover/diagnostics/webview surfaces.
-
-**Deliberately out of scope for this pass** (the architecture doc's §17
-lists what stays out of the target design itself; these are
-implementation-level follow-ups, not scope disagreements):
-
-- **Shared/team index service and hosted mode.** The protocol and data
-  model were designed to support `SHARED_INDEX` / `VERIFY_PENDING` basis
-  values and a remote endpoint, but no shared-service process, auth, or
-  base-revision-selection logic is implemented — v1 ships local-only.
-- **Real headless-browser capture.** Pages are parsed with jsdom instead of
-  Playwright/Chromium; there is no script execution, no real layout/paint,
-  and no browser-verified before/after comparison. Selectors are matched
-  against static HTML, while cascade "applies" resolution is a
-  specificity/order heuristic rather than a browser-verified winner, and `@media`/`@supports`/
-  `@container` activation is never evaluated (always downgraded to
-  `PARTIAL` with `condition-not-evaluated`).
-- **Hot bitmap/match caches and compact on-disk element trees.** The SQLite
-  store persists index-revision/page metadata for `index/getStatus`, but live
-  queries re-run against the in-memory corpus. Fine at fixture/demo scale;
-  the planned cached L0/L1 paths are not implemented.
-- **NDJSON transport instead of LSP-style `Content-Length` framing.** Same
-  JSON-RPC 2.0 message shapes, simpler framing.
-- **Level-based RPC methods** (`analysis/getPages`; `analysis/getDrilldown`
-  for L1 elements and L2 measurements; `analysis/openLive`;
-  `session/setDiffBase`; the `analysis/refined` notification) **and
-  custom-property (`--var`) fan-out queries.** The daemon advertises
-  `analysis/verifyExactly` and `analysis/getDrilldown` but handles neither,
-  and the extension's "verify exactly" command just re-runs the full
-  analysis; the doc folds `verifyExactly` into `getDrilldown` (L2). The
-  var-decl/var-use graph is parsed and diffed but not yet wired into
-  `analyzeChange`'s selector fan-out.
-- **The L0–L3 model itself** — edit-type classification, selector
-  relaxation, page bitmaps, incremental `document/change` (the extension
-  sends the full text on every change), deploy/CMS sync. None of it is
-  implemented yet. In particular, `skeletonHash` ignores attribute values,
-  so it is **not** sound for match-equivalence. The doc never treats
-  templates or clusters as a correctness unit: every page gets its own
-  verdict (§5.4). Clusters are only recorded, never used, and queries
-  still run against every linking page instead of bitmaps.
-- **While-typing surfaces.** The prototype shows counts in CodeLens, which
-  VS Code refreshes no sooner than 250 ms after an edit. The doc moves the
-  L0 count to an end-of-line decoration and a status-bar total, and keeps
-  CodeLens for settled counts (§7.1).
-- **Compiled-CSS build adapters, faithful Shadow DOM/iframe replay, packaged
-  `.vsix`/binary distribution.** Not implemented. Unsupported replay and
-  pipelines must be reported explicitly as those capabilities are added.
+Known limitations:
+- **Not captured:** Shadow DOM and iframes, and pages added after the last capture (re-run capture).
+- **Selectors:** `:state()` and `:local-link` are treated as interaction states, so they count as `possible`. A new selector using `:dir()` stays `possible` until L2, because the L1 matcher (css-select) can't evaluate it; captured selectors are exact.
+- **Definitions:** uses of a definition (`@keyframes`, `@font-face`, `@property`, …) are counted as exact.
+- **Broken CSS:** a saved file is read the way browsers read it: a statement that doesn't parse, or a rule with an invalid selector, counts as removed (and is flagged in Problems). While typing, the broken part keeps its last valid version, so the rest of the file is still analyzed.
+- **Custom properties at L2:** the render diff compares the properties that consume the variable in the page's stylesheets. If nothing there consumes it (inline styles, scripts), it compares a default property set and reports `inconclusive` rather than `unchanged`.
+- **`session` diff base:** when the site has too much CSS to snapshot at session start, files left out are compared with their content when first opened, and the answer says so.
+- **Daemon and editor:**
+  - No blob garbage collection.
+  - Multi-root workspaces use the first folder.
+  - **Restart Daemon** also stops a daemon started from the CLI.
