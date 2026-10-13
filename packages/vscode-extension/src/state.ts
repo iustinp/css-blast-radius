@@ -50,6 +50,7 @@ export class ImpactState implements vscode.Disposable {
     if (prev) {
       if (rev(r.indexRevision) < rev(prev.indexRevision)) return false;
       if (rev(r.indexRevision) === rev(prev.indexRevision) && r.editRevision < prev.editRevision) return false;
+      if (rev(r.indexRevision) === rev(prev.indexRevision) && r.editRevision === prev.editRevision && r.level < prev.level) return false;
     }
     this.rules.set(r.file, r);
     return true;

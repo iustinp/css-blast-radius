@@ -129,6 +129,10 @@ export const REASON = {
   neverMatches: "selector-never-matches",
   notLinked: "stylesheet-not-linked",
   notMapped: "stylesheet-not-mapped",
+  /** Nothing linked: the project has no page groups to count. */
+  noScope: "no-linked-groups",
+  /** The stylesheet is loaded only by pages outside the linked groups. */
+  outsideScope: "not-in-linked-groups",
   noIndex: "index-missing",
   stale: "index-stale",
   tokenNeverSeen: (t: string) => `token-never-seen:${t}`,

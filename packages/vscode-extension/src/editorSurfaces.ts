@@ -8,9 +8,10 @@ import type { DaemonLifecycle } from "./daemonLifecycle";
 import { isCssDocument, type DocumentSync } from "./documentSync";
 import {
   DIFF_BASE_LABEL,
-  formatChange,
+  changeAtCursor,
   formatCount,
-  freshnessText,
+  formatAge,
+  ghostText,
   isZero,
   reasonText,
   span,
@@ -57,6 +58,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   private readonly lensEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this.lensEmitter.event;
   private readonly subs: vscode.Disposable[] = [];
+  private readonly ruleTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly client: DaemonClient,
@@ -70,16 +72,30 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
       state.onFile((path) => {
         this.decorate(path);
         this.diagnose(path);
+        this.scheduleRules(path);
       }),
       state.onSession(() => this.updateStatus()),
       state.onStatus(() => {
         this.updateStatus();
         this.lensEmitter.fire();
+        for (const ed of vscode.window.visibleTextEditors) this.decorate(ed.document.uri.fsPath);
       }),
       state.onRulesInvalidated(() => this.lensEmitter.fire()),
       life.onState(() => this.updateStatus()),
       vscode.window.onDidChangeVisibleTextEditors(() => {
         for (const p of state.answers.keys()) this.decorate(p);
+      }),
+      vscode.window.onDidChangeTextEditorSelection((e) => this.decorate(e.textEditor.document.uri.fsPath)),
+      vscode.window.onDidChangeActiveTextEditor(() => {
+        for (const ed of vscode.window.visibleTextEditors) this.decorate(ed.document.uri.fsPath);
+      }),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("cssBlastRadius.cursorCount") || e.affectsConfiguration("cssBlastRadius.warnLostPages")) {
+          for (const path of this.state.answers.keys()) {
+            this.decorate(path);
+            this.diagnose(path);
+          }
+        }
       }),
       vscode.languages.registerCodeLensProvider({ language: "css", scheme: "file" }, this),
       vscode.languages.registerHoverProvider({ language: "css", scheme: "file" }, this),
@@ -95,24 +111,40 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
       if (ed.document.uri.fsPath !== path) continue;
       const normal: vscode.DecorationOptions[] = [];
       const attention: vscode.DecorationOptions[] = [];
-      if (a) {
-        const suffix = (a.editing ? " · editing" : "") + (a.freshness?.stale ? " · stale" : "");
-        const seen = new Set<number>();
-        for (const ch of a.changes) {
-          const line = Math.min(Math.max(ch.line - 1, 0), ed.document.lineCount - 1);
-          if (seen.has(line)) continue;
-          seen.add(line);
+      if (a && this.state.status?.scope?.linked && vscode.workspace.getConfiguration("cssBlastRadius", ed.document.uri).get<boolean>("cursorCount") !== false
+        && vscode.window.activeTextEditor === ed && ed.selections.length) {
+        const line = ed.selection.active.line;
+        const ch = changeAtCursor(a.changes, this.rulesFor(a), line + 1);
+        if (ch || a.editing) {
           const end = ed.document.lineAt(line).range.end;
           const opt: vscode.DecorationOptions = {
             range: new vscode.Range(end, end),
-            renderOptions: { after: { contentText: `${formatChange(ch)}${suffix}` } },
+            renderOptions: { after: { contentText: ch ? ghostText(a, ch) : "◀ finish typing…" } },
           };
-          (this.isAttention(ch) ? attention : normal).push(opt);
+          (ch && this.isAttention(ch) ? attention : normal).push(opt);
         }
       }
       ed.setDecorations(this.normal, normal);
       ed.setDecorations(this.attention, attention);
     }
+  }
+
+  private rulesFor(a: FileAnswer): RuleCount[] {
+    const r = this.state.rules.get(a.file);
+    return r?.editRevision === a.editRevision && r.indexRevision === a.indexRevision ? r.rules : [];
+  }
+
+  /** Rule ranges are fetched independently of the instant answer/decorations path. */
+  private scheduleRules(path: string): void {
+    clearTimeout(this.ruleTimers.get(path));
+    const a = this.state.answers.get(path);
+    if (!a || !this.client.connected || !this.sync.isTracked(path)) return;
+    this.ruleTimers.set(path, setTimeout(() => {
+      this.ruleTimers.delete(path);
+      void this.client.call<RulesResult>("analysis/queryImpacts", { path, scope: "rules" }).then((r) => {
+        if (this.state.acceptRules(r) && this.state.answers.get(path)?.editRevision === r.editRevision) this.decorate(path);
+      }).catch(() => {});
+    }, 180));
   }
 
   private lostThreshold(): number {
@@ -154,7 +186,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
       out.push(d);
     }
     if (a.freshness?.stale && a.changes.length) {
-      const d = new vscode.Diagnostic(at(1), "The index is older than this stylesheet or your markup: counts describe the captured site. Recapture for exact numbers.", vscode.DiagnosticSeverity.Information);
+      const d = new vscode.Diagnostic(at(1), "Pages changed since the last scan. Rescan linked groups for exact numbers.", vscode.DiagnosticSeverity.Information);
       d.source = "CSS Blast Radius";
       out.push(d);
     }
@@ -168,60 +200,58 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     const st = this.state.status;
     const life = this.life;
     item.backgroundColor = undefined;
-    item.command = "cssBlastRadius.showPages";
-    if (life.state === "FAILED") {
-      item.text = "$(error) Blast radius";
-      item.tooltip = life.stateDetail;
-      item.command = "cssBlastRadius.showOutput";
-      item.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
-      return;
-    }
-    if (life.state === "STARTING") {
+    item.command = "cssBlastRadius.togglePanel";
+    if (life.state === "STARTING" && !st) {
       item.text = "$(sync~spin) Blast radius";
-      item.tooltip = "Starting the CSS Blast Radius daemon…";
+      item.tooltip = "Connecting to the CSS Blast Radius server…";
       return;
     }
-    if (life.state === "DISCONNECTED") {
-      item.text = "$(debug-disconnect) Blast radius";
-      item.tooltip = `${life.stateDetail} Results shown may be stale.`;
-      item.command = "cssBlastRadius.restartDaemon";
+    if (life.state !== "CONNECTED") {
+      item.text = "$(warning) Blast radius: server offline";
+      item.tooltip = `${life.stateDetail} Click to retry or start the server.`;
+      item.command = "cssBlastRadius.reconnectServer";
+      return;
+    }
+    if (!st?.scope?.linked) {
+      item.text = "$(link) Link page groups";
+      item.tooltip = "Link page groups to this project to see which pages your CSS edits affect.";
+      item.command = "cssBlastRadius.linkGroups";
       return;
     }
     if (st?.capture?.running) {
-      item.text = `$(sync~spin) Capturing ${st.capture.done}/${st.capture.total}`;
-      item.tooltip = "Capturing the site in the background. Answers switch to the new index when it's ready.";
+      item.text = `$(sync~spin) Scanning ${st.capture.done}/${st.capture.total}`;
+      item.tooltip = "Scanning linked groups in the background.";
       return;
     }
     if (st && !st.ready) {
-      item.text = "$(circle-slash) Blast radius: no index";
-      item.tooltip = "No index yet. Click to capture the site.";
-      item.command = "cssBlastRadius.captureSite";
+      item.text = "$(circle-slash) Blast radius: no scanned pages";
+      item.tooltip = "No pages scanned yet. Click to rescan linked groups.";
+      item.command = "cssBlastRadius.rescanGroups";
       item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
       return;
     }
     const s = this.state.session;
     const warn = st?.health === "DEGRADED" || this.state.degraded ? " $(warning)" : "";
-    const stale = st?.markupChanged ? " · stale" : "";
-    if (!s || s.files.length === 0) item.text = `$(pass) No CSS edits${stale}${warn}`;
-    else item.text = `$(flame) Your edits: ${formatCount(s.total, s.reasons)}${stale}${warn}`;
+    item.text = `◎ ${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = true;
-    md.appendMarkdown(`**CSS Blast Radius** — compared with ${DIFF_BASE_LABEL[s?.diffBase ?? st?.diffBase ?? "HEAD"] ?? s?.diffBase}\n\n`);
+    md.isTrusted = { enabledCommands: ["cssBlastRadius.showAllPages", "cssBlastRadius.linkGroups"] };
+    md.appendMarkdown(`**CSS Blast Radius** — compared with ${DIFF_BASE_LABEL[s?.diffBase ?? st?.diffBase ?? "production"] ?? "the live site"}\n\n`);
+    md.appendMarkdown(`Linked groups: ${st.scope.groups.map((g) => g.name.replace(/[\\`*_~\[\]<>]/g, "\\$&") + (g.active ? "" : " (paused)")).join(", ") || "none"} (${st.scope.pages.toLocaleString("en-US")} active pages)\n\n`);
     if (s?.files.length) {
       md.appendMarkdown(`Your edits reach ${countLine(s.total)} pages\n\n`);
       for (const f of s.files.slice(0, 12)) {
         md.appendMarkdown(`- \`${vscode.workspace.asRelativePath(f.file)}\`: ${formatCount(f.pages)} (${f.changes} change${f.changes === 1 ? "" : "s"})\n`);
       }
       if (s.files.length > 12) md.appendMarkdown(`- …and ${s.files.length - 12} more files\n`);
-    } else md.appendMarkdown("No CSS changes against the diff base.\n");
+    } else md.appendMarkdown("No CSS changes compared with the live site.\n");
     if (st) {
-      md.appendMarkdown(`\n\nIndex: ${st.pages.toLocaleString("en-US")} pages`);
-      if (st.capturedAt) md.appendMarkdown(`, captured ${new Date(st.capturedAt).toLocaleString()}`);
+      const scanned = st.capturedAt ? formatAge(Math.max(0, Date.now() - Date.parse(st.capturedAt))) : "not yet";
+      md.appendMarkdown(`\n\n${s?.diffBase === "production" || !s ? "Compared with the live site" : "The live site was scanned"} (${s?.diffBase === "production" || !s ? "scanned " : ""}${scanned})`);
       if (st.failedPages) md.appendMarkdown(` · ${st.failedPages} failed`);
-      if (st.markupChanged) md.appendMarkdown("\n\n$(warning) Markup changed since the capture: counts describe the captured site.");
+      if (st.markupChanged) md.appendMarkdown("\n\n$(warning) Pages changed since the last scan.");
     }
     if (this.state.degraded) md.appendMarkdown(`\n\n$(warning) ${this.state.degraded}`);
-    md.appendMarkdown(`\n\n${commandLink("Show pages", "cssBlastRadius.showPages", {})} · ${commandLink("Change diff base", "cssBlastRadius.setDiffBase", {})} · ${commandLink("Recapture", "cssBlastRadius.captureSite", {})}`);
+    md.appendMarkdown(`\n\n${commandLink("Show all affected pages", "cssBlastRadius.showAllPages", {})} · ${commandLink("Link page groups", "cssBlastRadius.linkGroups", {})}`);
     item.tooltip = md;
   }
 
@@ -229,7 +259,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
 
   async provideCodeLenses(doc: vscode.TextDocument, token: vscode.CancellationToken): Promise<vscode.CodeLens[]> {
     if (!isCssDocument(doc) || !this.client.connected || !this.sync.isTracked(doc.uri.fsPath)) return [];
-    if (vscode.workspace.getConfiguration("cssBlastRadius").get<boolean>("codeLens") === false) return [];
+    if (vscode.workspace.getConfiguration("cssBlastRadius").get<boolean>("codeLens") !== true) return [];
     const path = doc.uri.fsPath;
     await this.sync.whenSynced(path);
     if (token.isCancellationRequested) return [];
@@ -241,6 +271,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     }
     // An older reply than one already shown must not replace it.
     this.state.acceptRules(res);
+    this.decorate(path);
     const rules = this.state.rules.get(res.file) ?? res;
     const lenses: vscode.CodeLens[] = [];
     for (const r of rules.rules) {
@@ -262,18 +293,16 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   // ----------------------------------------------------------------- hover
 
   provideHover(doc: vscode.TextDocument, pos: vscode.Position): vscode.Hover | undefined {
+    if (!this.state.status?.scope?.linked) return undefined;
     const path = doc.uri.fsPath;
     const a = this.state.answers.get(path);
     const line = pos.line + 1;
-    const ch = a?.changes.find((c) => c.line === line);
-    // Only on a changed line or a rule's first line, so typing isn't covered by hovers.
-    const rule = ch ? undefined : this.state.rules.get(path)?.rules.find((r) => r.line === line);
-    if (!ch && !rule) return undefined;
+    const ch = a && changeAtCursor(a.changes, this.rulesFor(a), line);
+    if (!ch || !a) return undefined;
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = true;
+    md.isTrusted = { enabledCommands: ["cssBlastRadius.showPages", "cssBlastRadius.showAllPages"] };
     md.supportHtml = false;
-    if (ch && a) this.hoverChange(md, a, ch);
-    else if (rule) this.hoverRule(md, path, rule);
+    this.hoverChange(md, a, ch);
     return new vscode.Hover(md);
   }
 
@@ -283,42 +312,35 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     if (ch.oldSelector && ch.oldSelector !== ch.selector) md.appendMarkdown(`was \`${ch.oldSelector}\`\n\n`);
     if (ch.definition) md.appendMarkdown(`${ch.definition.kind} \`${ch.definition.name}\` ${ch.definition.change}\n\n`);
     if (ch.changedProps?.length) md.appendMarkdown(`Properties: ${ch.changedProps.map((p) => `\`${p}\``).join(", ")}\n\n`);
-    md.appendMarkdown(`Pages reached: ${countLine(ch.pages)}\n\n`);
+    md.appendMarkdown(`**${formatCount(ch.pages, ch.reasons)}** affected\n\n`);
     if (ch.gained && ch.lost) md.appendMarkdown(`Starts reaching: ${countLine(ch.gained)}  \nStops reaching: ${countLine(ch.lost)}\n\n`);
     else if (ch.kind === "removed" && ch.lost) md.appendMarkdown(`Pages that lose the rule: ${countLine(ch.lost)}\n\n`);
     if (ch.conditions.length) md.appendMarkdown(`Conditions: ${ch.conditions.map((c) => `\`${c}\``).join(", ")}\n\n`);
     for (const r of ch.reasons) md.appendMarkdown(`- ${reasonText(r)}\n`);
     if (ch.hint) md.appendMarkdown(`\n${ch.hint}\n`);
     if (ch.detail) md.appendMarkdown(`\n${ch.detail}\n`);
-    md.appendMarkdown(`\n\n_Matching is not changing: open a page to see what actually changes._\n\n`);
+    md.appendMarkdown(`\n\n_Open a page to see what actually changes._\n\n`);
     md.appendMarkdown(this.footer(a));
     const sides: PagesTarget["sides"] = ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])];
     const base = { path: a.file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined };
     const links = [commandLink("Show pages", "cssBlastRadius.showPages", { ...base, title: ch.selector ?? label } satisfies PagesTarget)];
     if (ch.gained && !isZero(ch.gained)) links.push(commandLink("gained", "cssBlastRadius.showPages", { ...base, side: "gained", title: ch.selector ?? label } satisfies PagesTarget));
     if (ch.lost && !isZero(ch.lost)) links.push(commandLink("lost", "cssBlastRadius.showPages", { ...base, side: "lost", title: ch.selector ?? label } satisfies PagesTarget));
-    md.appendMarkdown(`\n\n${links.join(" · ")}`);
-  }
-
-  private hoverRule(md: vscode.MarkdownString, path: string, r: RuleCount): void {
-    md.appendMarkdown(`**\`${r.selector}\`** reaches ${countLine(r.pages)} pages\n\n`);
-    if (r.conditions.length) md.appendMarkdown(`Conditions: ${r.conditions.map((c) => `\`${c}\``).join(", ")}\n\n`);
-    for (const x of r.reasons) md.appendMarkdown(`- ${reasonText(x)}\n`);
-    const a = this.state.answers.get(path);
-    if (a) md.appendMarkdown(`\n\n${this.footer(a)}`);
-    if (!isZero(r.pages)) md.appendMarkdown(`\n\n${commandLink("Show pages", "cssBlastRadius.showPages", { path, line: r.line, title: r.selector } satisfies PagesTarget)}`);
+    links.push(commandLink("Show all affected pages", "cssBlastRadius.showAllPages", {}));
+    md.appendMarkdown(`\n\n${links.join(" · ")} · ${process.platform === "darwin" ? "⌥B" : "Alt+B"}`);
   }
 
   private footer(a: FileAnswer): string {
-    const parts = [`L${a.level}`, `vs ${DIFF_BASE_LABEL[a.diffBase] ?? a.diffBase}`, freshnessText(a.freshness)];
-    if (!a.mapping.mapped) parts.push("file not mapped to a deployed stylesheet");
-    else parts.push(`linked from ${a.mapping.linkedPages.toLocaleString("en-US")} pages`);
-    if (a.editing) parts.push("mid-edit: last valid version");
+    const parts = [`compared with ${DIFF_BASE_LABEL[a.diffBase] ?? "the live site"}`];
+    if (a.freshness) parts.push(`scanned ${formatAge(a.freshness.ageMs)}`);
+    if (!a.mapping.mapped) parts.push("file not matched to a stylesheet on the live site");
+    if (a.editing) parts.push("finish typing to update");
     return `_${parts.join(" · ")}_`;
   }
 
   dispose(): void {
     for (const s of this.subs) s.dispose();
+    for (const t of this.ruleTimers.values()) clearTimeout(t);
     this.normal.dispose();
     this.attention.dispose();
     this.statusItem.dispose();

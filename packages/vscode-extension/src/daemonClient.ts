@@ -1,6 +1,9 @@
-// JSON-RPC 2.0 client over the daemon's Unix socket / named pipe (NDJSON).
+// JSON-RPC 2.0 over the server's HTTP-upgraded NDJSON socket.
 
+import * as http from "node:http";
 import * as net from "node:net";
+import { StringDecoder } from "node:string_decoder";
+import { serverOrigin } from "./urls";
 
 export class RpcCallError extends Error {
   constructor(
@@ -12,7 +15,7 @@ export class RpcCallError extends Error {
   }
 }
 
-type Pending = { resolve: (v: any) => void; reject: (e: any) => void; timer?: NodeJS.Timeout };
+type Pending = { resolve: (v: any) => void; reject: (e: any) => void; timer: NodeJS.Timeout };
 
 export class DaemonClient {
   private socket?: net.Socket;
@@ -26,32 +29,49 @@ export class DaemonClient {
     return !!this.socket && !this.socket.destroyed;
   }
 
-  connect(socketPath: string, timeoutMs = 2000): Promise<void> {
+  connect(serverUrl: string, timeoutMs = 2000): Promise<void> {
+    const url = serverOrigin(serverUrl);
     this.dispose();
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection(socketPath);
-      const timer = setTimeout(() => {
-        socket.destroy();
-        reject(new Error(`daemon connect timed out: ${socketPath}`));
-      }, timeoutMs);
-      socket.once("connect", () => {
-        clearTimeout(timer);
-        this.socket = socket;
-        this.buffer = "";
-        resolve();
+      const req = http.request({
+        host: url.hostname,
+        port: url.port || 80,
+        path: "/rpc",
+        headers: { Connection: "Upgrade", Upgrade: "cbr-rpc" },
       });
-      socket.once("error", (err) => {
+      const timer = setTimeout(() => req.destroy(new Error("Server connection timed out")), timeoutMs);
+      const fail = (err: Error) => {
         clearTimeout(timer);
         reject(err);
+      };
+      req.once("error", fail);
+      req.once("response", (res) => {
+        res.resume();
+        req.destroy();
+        fail(new Error(`Server did not upgrade the connection (HTTP ${res.statusCode})`));
       });
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk: string) => this.handleData(chunk));
-      socket.on("close", () => {
-        if (this.socket !== socket) return;
-        this.socket = undefined;
-        this.failPending(new Error("daemon connection closed"));
-        for (const h of this.closedHandlers) h();
+      req.once("upgrade", (res, socket, head) => {
+        clearTimeout(timer);
+        if (res.statusCode !== 101 || res.headers.upgrade?.toLowerCase() !== "cbr-rpc") {
+          socket.destroy();
+          reject(new Error("Server returned an unexpected upgrade response"));
+          return;
+        }
+        this.socket = socket;
+        this.buffer = "";
+        const decoder = new StringDecoder("utf8");
+        socket.on("data", (chunk: Buffer) => this.handleData(decoder.write(chunk)));
+        socket.on("error", () => socket.destroy());
+        socket.on("close", () => {
+          if (this.socket !== socket) return;
+          this.socket = undefined;
+          this.failPending(new Error("Server connection closed"));
+          for (const h of this.closedHandlers) h();
+        });
+        if (head.length) this.handleData(decoder.write(head));
+        resolve();
       });
+      req.end();
     });
   }
 
@@ -81,7 +101,7 @@ export class DaemonClient {
         if (!p) continue;
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
-        if (msg.error) p.reject(new RpcCallError(msg.error.code, msg.error.message ?? "daemon error", msg.error.data));
+        if (msg.error) p.reject(new RpcCallError(msg.error.code, msg.error.message ?? "Server error", msg.error.data));
         else p.resolve(msg.result);
       } else if (typeof msg.method === "string") {
         for (const h of this.notificationHandlers) h(msg.method, msg.params);
@@ -91,7 +111,7 @@ export class DaemonClient {
 
   call<T = unknown>(method: string, params?: unknown, timeoutMs = 60_000): Promise<T> {
     const socket = this.socket;
-    if (!socket) return Promise.reject(new Error("not connected to the daemon"));
+    if (!socket || socket.destroyed) return Promise.reject(new Error("Not connected to the server"));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -115,6 +135,6 @@ export class DaemonClient {
     const s = this.socket;
     this.socket = undefined;
     s?.destroy();
-    this.failPending(new Error("daemon connection closed"));
+    this.failPending(new Error("Server connection closed"));
   }
 }

@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diff — CSS Blast Radius</title>
+<style>
+  :root {
+    --bg: #1e1e1e; --panel: #252526; --panel-hover: #2e2e2f; --line: #333333;
+    --text: #cccccc; --text-bright: #ffffff; --muted: #8c8c8c;
+    --accent: #0078d4; --accent-hover: #026ec1; --hl: #f97316;
+    --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text);
+    background: #141414;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input, select { font: inherit; color: inherit; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .sp { flex: 1; }
+  .hidden { display: none !important; }
+
+  /* Top brand bar (for standalone browser tab) */
+  .brand-bar {
+    height: 36px;
+    background: #111111;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    flex: none;
+    font-size: 12.5px;
+  }
+  .brand-bar .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #ff7b72;
+    box-shadow: 0 0 0 3px #ff7b7233;
+  }
+  .brand-bar b { color: #fff; }
+
+  /* Diff toolbar */
+  .dbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    flex: none;
+    flex-wrap: wrap;
+    min-height: 42px;
+  }
+  .dbar .url {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-bright);
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .seg button {
+    border: 0;
+    background: #2b2b2b;
+    padding: 3px 12px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .seg button.on.b { background: #5a5a5a; }
+
+  .kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #333;
+    color: #bbb;
+    border-radius: 3px;
+    border: 1px solid #444;
+  }
+
+  .dbtn {
+    border: 1px solid #3c3c3c;
+    background: #2b2b2b;
+    border-radius: 4px;
+    padding: 3px 9px;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .dbtn:hover { background: #383838; }
+  .dbar select {
+    background: #2b2b2b;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 12px;
+  }
+  .dbar label {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .dpos {
+    color: var(--muted);
+    font-size: 12px;
+    min-width: 90px;
+    text-align: center;
+  }
+
+  /* Subbar / Edits summary */
+  .dmeta {
+    padding: 4px 14px;
+    background: #1c1c1c;
+    border-bottom: 1px solid #292929;
+    font-size: 11.5px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    flex-wrap: wrap;
+  }
+  .dmeta .bright { color: #ddd; }
+  .dmeta .dwarn { color: #e0c27a; flex-basis: 100%; }
+  .dmeta .updated-flash {
+    display: inline-block;
+    color: var(--ok);
+    font-weight: 600;
+    transition: opacity .5s;
+  }
+
+  /* Stage / Scroll View */
+  .dview {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    background: #181818;
+    overflow: hidden;
+  }
+  .dscroll {
+    position: absolute;
+    inset: 0;
+    right: 14px; /* Room for marks */
+    overflow: auto;
+    scroll-behavior: smooth;
+  }
+  .dstage {
+    position: relative;
+    margin: 20px auto 40px;
+    background: #fff;
+    box-shadow: 0 4px 24px #000c;
+  }
+  .ver {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: block;
+  }
+  .ver.hide {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .ver img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  /* Zone Outlines */
+  .ol {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .ol i {
+    position: absolute;
+    border: 2px solid var(--hl);
+    background: #f9731614;
+    border-radius: 3px;
+    pointer-events: auto;
+    cursor: default;
+  }
+  .ol i.flash {
+    animation: flash 1s ease-out;
+  }
+  @keyframes flash {
+    0%, 40% { box-shadow: 0 0 0 6px #f9731688; }
+    100% { box-shadow: 0 0 0 0 #f9731600; }
+  }
+  .dstage.no-ol .ol { display: none !important; }
+
+  /* Floating outline tooltip */
+  .tip {
+    position: fixed;
+    z-index: 50;
+    background: #1f2328;
+    color: #fff;
+    border: 1px solid #444c56;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    max-width: 320px;
+    pointer-events: none;
+    box-shadow: 0 6px 18px #0008;
+    line-height: 1.4;
+  }
+  .tip .tip-label { font-weight: 700; color: #58a6ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 3px; }
+  .tip .tip-prop { display: flex; gap: 6px; }
+
+  /* Scrollbar marks */
+  .marks {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 14px;
+    background: #1a1a1a;
+    border-left: 1px solid #2e2e2e;
+    z-index: 10;
+  }
+  .marks i {
+    position: absolute;
+    left: 3px;
+    right: 3px;
+    min-height: 4px;
+    background: var(--hl);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .marks b {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: #ffffff22;
+    pointer-events: none;
+  }
+
+  /* Before/After bottom badge */
+  .vbadge {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    padding: 5px 12px;
+    border-radius: 5px;
+    font-weight: 700;
+    font-size: 12.5px;
+    letter-spacing: .06em;
+    background: var(--accent);
+    color: #fff;
+    box-shadow: 0 4px 14px #000a;
+    pointer-events: none;
+  }
+  .vbadge.b { background: #5a5a5a; }
+  .vbadge span {
+    font-weight: 400;
+    letter-spacing: 0;
+    opacity: .85;
+    margin-left: 8px;
+    font-size: 11px;
+  }
+  .vbadge.pop { animation: pop .25s ease-out; }
+  @keyframes pop {
+    from { transform: translateX(-50%) scale(1.18); }
+    to { transform: translateX(-50%); }
+  }
+
+  /* Status banners in view */
+  .dempty {
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 25;
+    background: #2b2518;
+    border: 1px solid #6b5a2a;
+    color: #ecdab9;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    box-shadow: 0 4px 12px #0008;
+    pointer-events: none;
+  }
+  .dloading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: 100%;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .derror {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: 100%;
+    padding: 24px;
+    text-align: center;
+    color: var(--bad);
+  }
+  .derror h2 { font-size: 16px; margin: 0; color: #fff; }
+  .derror p { margin: 0; color: var(--bad); max-width: 500px; font-size: 13px; }
+
+  .spin {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #555;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="brand-bar" id="brandBar">
+  <span class="dot"></span>
+  <b>CSS Blast Radius</b>
+  <span class="muted">/ diff</span>
+  <span class="sp"></span>
+  <span class="muted" style="font-size:11.5px">Visual page comparison</span>
+</div>
+
+<div class="dbar" id="dbar">
+  <span class="url" id="dUrl"></span>
+  <span class="seg">
+    <button data-v="before" tabindex="-1">Before</button>
+    <button data-v="after" class="on" tabindex="-1">After</button>
+  </span>
+  <span class="kbd" title="Press Space to flip between before and after">Space</span>
+  <button class="dbtn" data-jump="-1" tabindex="-1" title="Previous change (Shift+N)">↑</button>
+  <span class="dpos" id="dPos"></span>
+  <button class="dbtn" data-jump="1" tabindex="-1" title="Next change (N)">↓</button>
+  <span class="kbd">N</span>
+  <label><input type="checkbox" id="dOutl" checked tabindex="-1"> Outlines</label>
+  <select id="dDevice" tabindex="-1"></select>
+  <span class="sp"></span>
+  <button class="dbtn" id="dLive" tabindex="-1">Check on the live page</button>
+  <button class="dbtn hidden" id="dBrowser" tabindex="-1">Open in browser ↗</button>
+</div>
+
+<div class="dmeta" id="dmeta">
+  <span id="dEdits" class="bright"></span>
+  <span class="sp"></span>
+  <span id="dTime"></span>
+  <span class="updated-flash hidden" id="dUpdated">● Updated</span>
+  <span class="dwarn hidden" id="dWarn"></span>
+</div>
+
+<div class="dview" id="dview">
+  <div class="vbadge" id="vbadge">AFTER<span>Space to flip</span></div>
+  <div class="dempty hidden" id="dEmpty">This page uses the rule, but nothing visible changed.</div>
+  <div class="dscroll" id="dscroll">
+    <div class="dstage" id="dstage">
+      <div class="ver" id="verB">
+        <img id="imgB" alt="Before edit">
+        <div class="ol" id="olB"></div>
+      </div>
+      <div class="ver" id="verA">
+        <img id="imgA" alt="After edit">
+        <div class="ol" id="olA"></div>
+      </div>
+    </div>
+  </div>
+  <div class="marks" id="marks"></div>
+</div>
+
+<div class="tip hidden" id="tip"></div>
+
+<script>
+// ---------------------------------------------------------------- query params & state
+const params = new URLSearchParams(window.location.search);
+const s = params.get("s") || "";
+const pageUrl = params.get("url") || "";
+let device = params.get("device") || "";
+let live = params.get("live") === "1";
+const embed = params.get("embed") === "1";
+
+const D = {
+  v: "after",
+  outlines: true,
+  data: null,
+  zi: -1,
+  stageH: 0
+};
+
+let inFlight = null;
+let editDebounce = null;
+
+const $ = (sel) => document.querySelector(sel);
+const esc = (str) => String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const plural = (n, w) => `${(n || 0).toLocaleString("en-US")} ${w}${n === 1 ? "" : "s"}`;
+
+function timeAgo(iso) {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms)) return esc(iso);
+  const sec = Math.round(ms / 1000);
+  if (sec < 45) return "just now";
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.round(h / 24);
+  if (d === 1) return "yesterday";
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ---------------------------------------------------------------- setup UI based on embed/params
+if (embed) {
+  $("#brandBar").classList.add("hidden");
+  $("#dBrowser").classList.remove("hidden");
+}
+
+document.title = `Diff · ${pageUrl || "page"} — CSS Blast Radius`;
+$("#dUrl").textContent = pageUrl || "Diff viewer";
+$("#dUrl").title = pageUrl || "";
+
+// Focus window on load for keyboard navigation in iframe
+window.addEventListener("load", () => window.focus());
+
+// ---------------------------------------------------------------- fetch diff
+async function fetchDiff(keepScroll = false) {
+  if (!pageUrl) {
+    showError("Missing page URL in query parameters (?url=...).");
+    return;
+  }
+
+  if (inFlight) inFlight.abort();
+  inFlight = new AbortController();
+
+  const prevScroll = keepScroll ? $("#dscroll").scrollTop : 0;
+  if (!keepScroll && !D.data) {
+    showLoading();
+  }
+
+  const query = new URLSearchParams({
+    s,
+    url: pageUrl,
+    device,
+    live: live ? "1" : "0"
+  });
+
+  try {
+    const res = await fetch(`/api/diff?${query.toString()}`, { signal: inFlight.signal });
+    const data = await res.json();
+    if (!res.ok) {
+      showError(data.error || `Failed to load diff (${res.status})`);
+      return;
+    }
+    inFlight = null;
+    applyDiffData(data, keepScroll, prevScroll);
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    showError(err.message || "Failed to load visual diff.");
+  }
+}
+
+function showLoading() {
+  $("#dscroll").innerHTML = `<div class="dloading"><span class="spin"></span> Rendering the page with and without your edits…</div>`;
+}
+
+function showError(msg) {
+  $("#dscroll").innerHTML = `<div class="derror"><h2>Unable to load visual diff</h2><p>${esc(msg)}</p></div>`;
+  $("#dPos").textContent = "Error";
+}
+
+// ---------------------------------------------------------------- render diff
+function applyDiffData(data, keepScroll, prevScroll) {
+  D.data = data;
+  device = data.device || device;
+
+  // Restore DOM structure if replaced by loading/error
+  if (!$("#dstage")) {
+    $("#dscroll").innerHTML = `
+      <div class="dstage" id="dstage">
+        <div class="ver" id="verB"><img id="imgB" alt="Before"><div class="ol" id="olB"></div></div>
+        <div class="ver" id="verA"><img id="imgA" alt="After"><div class="ol" id="olA"></div></div>
+      </div>`;
+  }
+
+  // Populate device selector
+  const devSelect = $("#dDevice");
+  const devices = data.devices || [data.device];
+  devSelect.innerHTML = devices.map((d) => `<option value="${esc(d)}"${d === data.device ? " selected" : ""}>${esc(d.charAt(0).toUpperCase() + d.slice(1))}</option>`).join("");
+
+  // Update URL and status
+  $("#dUrl").textContent = data.url || pageUrl;
+  $("#dUrl").title = data.url || pageUrl;
+
+  // Live button label
+  const liveBtn = $("#dLive");
+  if (data.live) {
+    liveBtn.textContent = "Use stored copy";
+    liveBtn.title = "Switch back to the stored copy of this page";
+  } else {
+    liveBtn.textContent = "Check on the live page";
+    liveBtn.title = "Re-render directly from the live site";
+  }
+
+  // Header meta summary
+  const edits = data.edits || [];
+  if (edits.length) {
+    $("#dEdits").textContent = `Showing all your current edits: ${edits.map((e) => `${e.file} (${plural(e.changes, "change")})`).join(", ")}`;
+  } else {
+    $("#dEdits").textContent = "Showing current edits";
+  }
+
+  const timeText = data.live
+    ? `Live page (checked just now${data.timingMs ? `, ${data.timingMs}ms` : ""})`
+    : `Stored copy · scanned ${timeAgo(data.scannedAt)}${data.timingMs ? ` (${data.timingMs}ms)` : ""}`;
+  $("#dTime").textContent = timeText;
+  const warn = $("#dWarn");
+  warn.textContent = (data.warnings || []).map((w) => `⚠ ${w}`).join("  ");
+  warn.classList.toggle("hidden", !(data.warnings || []).length);
+
+  // Width and images
+  const stage = $("#dstage");
+  const cssWidth = data.width || 1200;
+  stage.style.width = cssWidth + "px";
+
+  const imgB = $("#imgB"), imgA = $("#imgA");
+  imgB.src = data.before;
+  imgA.src = data.after;
+
+  // Outlines
+  const olB = $("#olB"), olA = $("#olA");
+  const zones = data.zones || [];
+
+  const renderBoxes = (key) => zones.map((z, idx) => {
+    const box = z[key];
+    if (!box) return "";
+    const [x, y, w, h] = box;
+    return `<i data-zi="${idx}" style="left:${x - 2}px;top:${y - 2}px;width:${w + 4}px;height:${h + 4}px"></i>`;
+  }).join("");
+
+  olB.innerHTML = renderBoxes("before");
+  olA.innerHTML = renderBoxes("after");
+
+  // Determine stage height based on image load or bounding boxes
+  const maxHeight = Math.max(
+    ...zones.flatMap((z) => [
+      z.before ? z.before[1] + z.before[3] : 0,
+      z.after ? z.after[1] + z.after[3] : 0
+    ]),
+    800
+  );
+
+  const onImgLoaded = () => {
+    D.stageH = Math.max(imgB.naturalHeight / (data.scale || 1), imgA.naturalHeight / (data.scale || 1), maxHeight);
+    stage.style.height = D.stageH + "px";
+    drawMarks();
+    drawViewport();
+  };
+
+  if (imgA.complete) onImgLoaded();
+  else imgA.onload = onImgLoaded;
+
+  // Empty / Inconclusive banners
+  const emptyBanner = $("#dEmpty");
+  if (data.status === "inconclusive") {
+    emptyBanner.textContent = `Can't compare this page: ${data.reason || "unknown reason"}`;
+    emptyBanner.classList.remove("hidden");
+  } else if (data.status === "unchanged" || zones.length === 0) {
+    emptyBanner.textContent = data.reason || "This page uses the rule, but nothing visible changed.";
+    emptyBanner.classList.remove("hidden");
+  } else {
+    emptyBanner.classList.add("hidden");
+  }
+
+  applyView(false);
+  updatePos();
+
+  if (keepScroll) {
+    $("#dscroll").scrollTop = prevScroll;
+    flashUpdated();
+  } else {
+    if (zones.length) jump(1, true);
+    else { $("#dscroll").scrollTop = 0; updatePos(); }
+  }
+}
+
+function flashUpdated() {
+  const el = $("#dUpdated");
+  el.classList.remove("hidden");
+  setTimeout(() => el.classList.add("hidden"), 1800);
+}
+
+// ---------------------------------------------------------------- view flipping & controls
+function applyView(pop = true) {
+  const vb = $("#verB"), va = $("#verA");
+  if (!vb || !va) return;
+
+  vb.classList.toggle("hide", D.v !== "before");
+  va.classList.toggle("hide", D.v !== "after");
+  $("#dstage").classList.toggle("no-ol", !D.outlines);
+  $("#dOutl").checked = D.outlines;
+
+  document.querySelectorAll(".seg button").forEach((b) => {
+    const isThis = b.dataset.v === D.v;
+    b.classList.toggle("on", isThis);
+    b.classList.toggle("b", isThis && D.v === "before");
+  });
+
+  const badge = $("#vbadge");
+  badge.className = "vbadge" + (D.v === "before" ? " b" : "");
+  badge.innerHTML = `${D.v === "before" ? "BEFORE" : "AFTER"}<span>Space to flip</span>`;
+  if (pop) {
+    void badge.offsetWidth;
+    badge.classList.add("pop");
+  }
+}
+
+function flip() {
+  D.v = D.v === "after" ? "before" : "after";
+  applyView(true);
+}
+
+// ---------------------------------------------------------------- scrollbar marks
+function drawMarks() {
+  const strip = $("#marks");
+  if (!strip) return;
+  const H = strip.clientHeight;
+  const total = Math.max(D.stageH || 1, 1);
+  const zones = D.data?.zones || [];
+
+  strip.innerHTML = zones.map((z, k) => {
+    const box = z.after || z.before;
+    if (!box) return "";
+    const top = (box[1] / total) * H;
+    const h = Math.max(4, (box[3] / total) * H);
+    return `<i data-zi="${k}" style="top:${top}px;height:${h}px" title="${esc(z.label || `Change ${k + 1}`)}"></i>`;
+  }).join("") + `<b id="vp"></b>`;
+
+  drawViewport();
+}
+
+function drawViewport() {
+  const sc = $("#dscroll"), vp = $("#vp");
+  if (!sc || !vp) return;
+  const H = $("#marks").clientHeight;
+  const scrollH = sc.scrollHeight || 1;
+  vp.style.top = ((sc.scrollTop / scrollH) * H) + "px";
+  vp.style.height = Math.max(10, (sc.clientHeight / scrollH) * H) + "px";
+}
+
+// ---------------------------------------------------------------- zone navigation
+function jump(dir, initial = false) {
+  const zones = D.data?.zones || [];
+  if (!zones.length) return;
+
+  const n = zones.length;
+  D.zi = initial ? 0 : (D.zi + dir + n) % n;
+  const z = zones[D.zi];
+  const box = (D.v === "before" ? z.before : z.after) || z.after || z.before;
+  if (!box) return;
+
+  const sc = $("#dscroll");
+  const [, y, , h] = box;
+  const targetY = y - Math.max(30, (sc.clientHeight - h) / 2);
+  sc.scrollTo({ top: Math.max(0, targetY), behavior: initial ? "auto" : "smooth" });
+
+  document.querySelectorAll(".ol i").forEach((el) => {
+    el.classList.remove("flash");
+    if (+el.dataset.zi === D.zi) {
+      void el.offsetWidth;
+      el.classList.add("flash");
+    }
+  });
+
+  updatePos();
+}
+
+function updatePos() {
+  const zones = D.data?.zones || [];
+  const pos = $("#dPos");
+  if (!pos) return;
+  if (!zones.length) {
+    pos.textContent = D.data?.status === "inconclusive" ? "Inconclusive" : "No visible change";
+  } else if (D.zi < 0) {
+    pos.textContent = plural(zones.length, "changed area");
+  } else {
+    pos.textContent = `Change ${D.zi + 1} of ${zones.length}`;
+  }
+}
+
+// ---------------------------------------------------------------- tooltips
+const tip = $("#tip");
+document.addEventListener("mouseover", (e) => {
+  const o = e.target.closest(".ol i");
+  if (!o) { tip.classList.add("hidden"); return; }
+  const zi = +o.dataset.zi;
+  const z = D.data?.zones?.[zi];
+  if (!z) return;
+
+  const propsHtml = (z.props || []).map((p) =>
+    `<div class="tip-prop"><span style="color:#8b949e">${esc(p.prop)}:</span> <span style="color:#ff7b72">${esc(p.before)}</span> → <b style="color:#7ee787">${esc(p.after)}</b></div>`
+  ).join("");
+
+  tip.innerHTML = `<div class="tip-label">${esc(z.label || "Element")}</div>${propsHtml || '<span style="color:#8b949e">layout or appearance change</span>'}`;
+  tip.classList.remove("hidden");
+
+  const rect = o.getBoundingClientRect();
+  const tipX = Math.min(window.innerWidth - 340, Math.max(10, rect.left));
+  const tipY = rect.bottom + 8 < window.innerHeight - 80 ? rect.bottom + 8 : Math.max(10, rect.top - 60);
+  tip.style.left = tipX + "px";
+  tip.style.top = tipY + "px";
+});
+
+document.addEventListener("mouseout", (e) => {
+  if (e.target.closest(".ol i")) tip.classList.add("hidden");
+});
+
+// ---------------------------------------------------------------- event listeners
+$("#dscroll").addEventListener("scroll", drawViewport);
+window.addEventListener("resize", () => {
+  drawMarks();
+  drawViewport();
+});
+
+// Click handlers
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button, [data-jump], [data-v], [data-zi]");
+  if (!t) return;
+
+  if (t.dataset.v) {
+    D.v = t.dataset.v;
+    applyView(true);
+  } else if (t.dataset.jump) {
+    jump(+t.dataset.jump);
+  } else if (t.dataset.zi && t.closest(".marks")) {
+    D.zi = +t.dataset.zi - 1;
+    jump(1);
+  } else if (t.id === "dLive") {
+    live = !live;
+    fetchDiff(false);
+  } else if (t.id === "dBrowser") {
+    const u = new URL(window.location.href);
+    u.searchParams.delete("embed");
+    window.parent.postMessage({ type: "cbr-open-external", url: u.href }, "*");
+  }
+
+  // Prevent buttons from stealing keyboard Space
+  if (t.matches("button")) t.blur();
+});
+
+$("#dOutl").addEventListener("change", (e) => {
+  D.outlines = e.target.checked;
+  applyView(false);
+  e.target.blur();
+});
+
+$("#dDevice").addEventListener("change", (e) => {
+  device = e.target.value;
+  e.target.blur();
+  fetchDiff(false);
+});
+
+// Keyboard shortcuts
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input[type=text], textarea, select")) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (e.code === "Space") {
+    e.preventDefault();
+    flip();
+  } else if (e.key === "n" || e.key === "N") {
+    e.preventDefault();
+    jump(e.shiftKey ? -1 : 1);
+  } else if (e.key === "o" || e.key === "O") {
+    e.preventDefault();
+    D.outlines = !D.outlines;
+    applyView(false);
+  }
+});
+
+// ---------------------------------------------------------------- SSE auto-refresh
+function connectSSE() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("edit", (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.s === s) {
+        clearTimeout(editDebounce);
+        editDebounce = setTimeout(() => {
+          fetchDiff(true); // keepScroll = true
+        }, 800);
+      }
+    } catch {}
+  });
+}
+
+// Initial fetch
+fetchDiff(false);
+connectSSE();
+</script>
+</body>
+</html>

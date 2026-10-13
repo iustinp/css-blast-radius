@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSS Blast Radius — Setup</title>
+<style>
+  :root {
+    --bg: #f6f8fa; --panel: #fff; --line: #d0d7de; --line-soft: #eaeef2; --text: #1f2328; --muted: #656d76;
+    --accent: #0969da; --accent-soft: #ddf4ff; --ok: #1a7f37; --ok-soft: #dafbe1; --warn: #9a6700; --warn-soft: #fff8c5;
+    --bad: #cf222e; --bad-soft: #ffebe9;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); }
+  button { font: inherit; cursor: pointer; }
+  input, select, textarea { font: inherit; color: inherit; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a:hover { text-decoration: underline; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+
+  header.top { background: #1f2328; color: #e6edf3; display: flex; align-items: center; gap: 14px; padding: 0 24px; height: 52px; }
+  .brand { font-weight: 700; display: flex; gap: 10px; align-items: center; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: #ff7b72; box-shadow: 0 0 0 4px #ff7b7233, 0 0 0 8px #ff7b7218; }
+  header.top .live { color: #3fb950; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  header.top .sp { flex: 1; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 24px 80px; }
+
+  .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 5px 12px; color: var(--text); white-space: nowrap; }
+  .btn:hover { background: #f3f4f6; }
+  .btn.primary { background: #1f883d; border-color: #1a7f37; color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: #1a7f37; }
+  .btn.danger { color: var(--bad); }
+  .btn.small { padding: 2px 8px; font-size: 12.5px; }
+  .btn.link { border: 0; background: none; color: var(--accent); padding: 0; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  input[type=text], input[type=url], textarea, select { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; background: #fff; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .card + .card { margin-top: 16px; }
+  .card-h { padding: 12px 16px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .card-h h2 { font-size: 15px; margin: 0; }
+  .card-b { padding: 16px; }
+  .sp { flex: 1; }
+
+  .site { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; padding: 12px 16px; }
+  .site .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; display: block; }
+  .form { display: grid; grid-template-columns: 190px 1fr; gap: 14px 20px; align-items: start; padding: 16px; border-top: 1px solid var(--line-soft); }
+  .form .lab { font-weight: 600; padding-top: 5px; }
+  .form .hint { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; background: #fff; cursor: pointer; user-select: none; }
+  .chip.on { background: var(--accent-soft); border-color: #54aeff; color: var(--accent); }
+
+  .sheets-sec { border-top: 1px solid var(--line-soft); padding: 12px 16px; }
+  .sheets-summary { cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; user-select: none; }
+  .sheets-summary::-webkit-details-marker { color: var(--muted); }
+  .sheets-list { margin-top: 10px; border-top: 1px solid var(--line-soft); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--line-soft); vertical-align: middle; }
+  th { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; border-top: 0; background: #fafbfc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.actions { white-space: nowrap; text-align: right; }
+  tr.paused td { color: var(--muted); }
+  .gname { font-weight: 600; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; background: var(--line-soft); color: var(--muted); white-space: nowrap; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.blue { background: var(--accent-soft); color: var(--accent); }
+  .totals { display: flex; gap: 24px; padding: 10px 16px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+
+  .switch { position: relative; width: 36px; height: 20px; display: inline-block; vertical-align: middle; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: #afb8c1; border-radius: 20px; transition: .2s; cursor: pointer; }
+  .switch span::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + span { background: #1f883d; }
+  .switch input:checked + span::before { transform: translateX(16px); }
+  .progress { height: 6px; background: var(--line-soft); border-radius: 3px; overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; margin-right: 6px; }
+  .progress i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .back { display: inline-block; margin-bottom: 12px; }
+  .ghead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .ghead h1 { font-size: 22px; margin: 0; }
+  .filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .fbtn { border: 1px solid var(--line); background: #fff; border-radius: 14px; padding: 1px 10px; font-size: 13px; }
+  .fbtn.on { background: var(--accent-soft); border-color: #54aeff; color: var(--accent); }
+  .reason { color: var(--bad); font-size: 12px; }
+  .url { word-break: break-all; }
+
+  .backdrop { position: fixed; inset: 0; background: #1f232866; display: none; align-items: flex-start; justify-content: center; padding-top: 8vh; z-index: 30; }
+  .backdrop.open { display: flex; }
+  .modal { width: min(620px, 94vw); background: #fff; border-radius: 10px; box-shadow: 0 12px 40px #1f232840; overflow: hidden; }
+  .modal .mh { padding: 14px 18px; border-bottom: 1px solid var(--line); font-weight: 600; display: flex; justify-content: space-between; }
+  .modal .mb { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .modal .mf { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: none; padding: 8px 12px; border-bottom: 2px solid transparent; color: var(--muted); }
+  .tabs button.on { border-color: #fd8c73; color: var(--text); font-weight: 600; }
+  label.f { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 13px; }
+  label.f .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 8px; padding: 22px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .preview { background: var(--bg); border: 1px solid var(--line-soft); border-radius: 6px; padding: 10px 12px; font-size: 13px; }
+  .preview ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+  .modal-err { color: var(--bad); background: var(--bad-soft); padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(120px); background: #1f2328; color: #fff; padding: 10px 16px; border-radius: 8px; max-width: 600px; transition: transform .25s; z-index: 40; display: flex; gap: 12px; align-items: center; }
+  .toast.show { transform: translateX(-50%); }
+  .toast.err { background: #cf222e; }
+  .toast .btn { background: #ffffff1a; color: #fff; border-color: #ffffff33; }
+  .toast .btn:hover { background: #ffffff2d; }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand"><span class="dot"></span>CSS Blast Radius</span>
+  <span class="live" id="serverStat">● Running on this computer · localhost:4317</span>
+  <span class="sp"></span>
+</header>
+<main id="view">
+  <div style="padding:40px;text-align:center"><span class="spinner"></span> Loading site status…</div>
+</main>
+
+<div class="backdrop" id="modal">
+  <div class="modal">
+    <div class="mh"><span id="mTitle">Add a page group</span><button class="btn link" data-close>✕</button></div>
+    <div class="mb">
+      <div class="modal-err hidden" id="modalErr"></div>
+      <label class="f" id="gNameWrap">Group name<input type="text" id="gName" placeholder="e.g. Blog"></label>
+      <div class="tabs" id="srcTabs">
+        <button data-src="sitemap" class="on">Sitemap</button>
+        <button data-src="csv">CSV file</button>
+        <button data-src="paste">Paste URLs</button>
+      </div>
+      <div data-pane="sitemap">
+        <label class="f">Sitemap URL<input type="url" id="smUrl" value=""></label>
+        <label class="f" style="margin-top:10px">Only pages matching <span class="hint">Optional. Use * as a wildcard, e.g. /stories/*</span><input type="text" id="smFilter" placeholder="/stories/*"></label>
+        <div style="margin-top:10px"><button class="btn" id="smPreview">Read sitemap</button></div>
+        <p class="muted small" style="margin:8px 0 0">The sitemap is read again on every rescan: new pages join the group, removed pages leave it.</p>
+      </div>
+      <div data-pane="csv" class="hidden">
+        <div class="drop" id="drop">Drop a .csv file here or <label class="btn link" style="cursor:pointer">choose one<input type="file" id="csvFile" accept=".csv,text/csv" hidden></label>
+          <div class="small" style="margin-top:6px">Any CSV with a column of URLs or paths.</div>
+        </div>
+      </div>
+      <div data-pane="paste" class="hidden">
+        <label class="f">URLs or paths, one per line<textarea id="pasteBox" rows="6" placeholder="https://www.example.com/pricing&#10;/about&#10;/contact"></textarea></label>
+      </div>
+      <div class="preview hidden" id="srcPreview"></div>
+    </div>
+    <div class="mf">
+      <label class="small muted" style="margin-right:auto"><input type="checkbox" id="captureNow" checked> Scan now</label>
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn primary" id="mOk" disabled>Add group</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toastText"></span><span id="toastAct"></span></div>
+
+<script>
+// ---------------------------------------------------------------- helpers
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (n) => (n || 0).toLocaleString("en-US");
+const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? "" : "s"}`;
+const isUrl = (v) => /^(https?:\/\/|\/)/i.test((v || "").trim());
+// A bare path such as "about.html" or "blog/post-1" (no spaces, no scheme).
+const isBarePath = (v) => /^[\w%~.-]+(\/\S*)?$/.test((v || "").trim()) && !/^[a-z][a-z0-9+.-]*:/i.test((v || "").trim());
+
+// Same-site addresses become paths; other sites' addresses are sent as is (the server skips them).
+function toPagePath(v, origin) {
+  v = v.trim();
+  if (/^https?:\/\//i.test(v)) {
+    try {
+      const u = new URL(v);
+      const host = (h) => h.replace(/^www\./, "");
+      if (!origin || host(u.hostname) === host(new URL(origin).hostname)) return (u.pathname || "/") + u.search;
+    } catch {}
+    return v;
+  }
+  return v.startsWith("/") ? v : "/" + v;
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1000) return Math.round(mb) + " MB";
+  return (mb / 1024).toFixed(1) + " GB";
+}
+
+function timeAgo(iso) {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms)) return esc(iso);
+  const s = Math.round(ms / 1000);
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.round(h / 24);
+  if (d === 1) return "yesterday";
+  if (d < 30) return `${d} days ago`;
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ---------------------------------------------------------------- state
+let state = null;
+let lastResultId = null;
+let currentGroupPages = null;
+let pageFetchTimer = null;
+
+const S = {
+  view: "list",        // "list" or groupId
+  status: "all",       // "all" | "ok" | "failed" | "new" | "excluded"
+  search: "",
+  limit: 50,
+  siteEditing: false,
+  src: "sitemap",
+  pending: null,
+  modalMode: "group"   // "group" or "pages"
+};
+
+const G = (id) => state?.groups?.find((g) => g.id === id);
+
+// ---------------------------------------------------------------- API calls
+async function api(path, options = {}) {
+  const opts = { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } };
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+async function loadState() {
+  try {
+    const s = await api("/api/state");
+    applyState(s);
+  } catch (err) {
+    $("#view").innerHTML = `<div class="card"><div class="card-b"><p class="reason">Failed to connect to server: ${esc(err.message)}</p><button class="btn" onclick="loadState()">Retry</button></div></div>`;
+  }
+}
+
+function applyState(newState) {
+  const oldVer = state ? state.version : null;
+  state = newState;
+  if (state.server?.url) {
+    $("#serverStat").textContent = `● Running on this computer · ${state.server.url.replace(/^https?:\/\//, "")}`;
+  }
+  if (state.lastResult && state.lastResult.id !== lastResultId) {
+    lastResultId = state.lastResult.id;
+    toast(state.lastResult.message, null, null, !state.lastResult.ok);
+  }
+  if (S.view !== "list") {
+    if (oldVer !== state.version) {
+      debounceFetchPages(G(S.view));
+    }
+  }
+  render();
+}
+
+function connectEvents() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("state", (e) => {
+    try {
+      const s = JSON.parse(e.data);
+      applyState(s);
+    } catch {}
+  });
+}
+
+function debounceFetchPages(g) {
+  clearTimeout(pageFetchTimer);
+  pageFetchTimer = setTimeout(() => {
+    if (g && S.view === g.id) fetchPages(g.id);
+  }, 300);
+}
+
+async function fetchPages(groupId) {
+  if (!groupId) return;
+  try {
+    const q = encodeURIComponent(S.search);
+    const data = await api(`/api/groups/${groupId}/pages?status=${S.status}&q=${q}&offset=0&limit=${S.limit}`);
+    currentGroupPages = data;
+    if (S.view === groupId) renderGroup(G(groupId));
+  } catch (err) {
+    // Keep existing group pages on transient error
+  }
+}
+
+// ---------------------------------------------------------------- rendering
+function render() {
+  if (!state) return;
+  if (!state.configured) {
+    renderWelcome();
+  } else if (S.view === "list") {
+    renderList();
+  } else {
+    renderGroup(G(S.view));
+  }
+}
+
+function renderWelcome() {
+  $("#view").innerHTML = `
+    <div class="card">
+      <div class="card-h"><h2>Welcome to CSS Blast Radius</h2></div>
+      <div class="card-b">
+        <p>Tell us where your website is running to get started. You can use a live site address or a built folder on this computer.</p>
+        <div style="display:flex;flex-direction:column;gap:14px;max-width:540px;margin-top:16px">
+          <label class="f">Site address
+            <input type="text" id="welcomeAddr" placeholder="https://www.example.com or /Users/me/site/dist">
+            <span class="hint">Enter an http(s) URL, or an absolute folder path on this computer.</span>
+          </label>
+          <label class="f">Devices to scan
+            <div class="chips" id="welcomeDevs">
+              <span class="chip on" data-dev="desktop">Desktop 1366×768</span>
+              <span class="chip on" data-dev="mobile">Mobile 390×844</span>
+              <span class="chip" data-dev="tablet">Tablet 820×1180</span>
+            </div>
+            <span class="hint">At least one device required.</span>
+          </label>
+          <div style="margin-top:6px">
+            <button class="btn primary" id="welcomeSave">Save and continue</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="opacity:0.65">
+      <div class="card-h"><h2>Page groups</h2></div>
+      <div class="card-b"><p class="muted">Configure your site address above to start adding page groups.</p></div>
+    </div>`;
+}
+
+function sourceText(g) {
+  if (!g || !g.source) return "";
+  if (g.source.type === "sitemap") {
+    let u = g.source.url;
+    if (state?.site?.siteUrl && u.startsWith(state.site.siteUrl)) {
+      u = u.slice(state.site.siteUrl.length) || "/";
+    }
+    return `Sitemap <span class="mono">${esc(u)}</span>${g.source.filter ? ` · only <span class="mono">${esc(g.source.filter)}</span>` : ""}`;
+  }
+  if (g.source.type === "csv") return `CSV <span class="mono">${esc(g.source.file)}</span>`;
+  return "Pasted list";
+}
+
+function statusCell(g) {
+  if (g.job) {
+    if (g.job.phase === "sitemap") {
+      return `<span class="spinner"></span><span class="small">Reading sitemap…</span>`;
+    }
+    if (g.job.phase === "queued") {
+      return `<span class="small muted">Waiting…</span>`;
+    }
+    const pct = Math.round((100 * (g.job.done || 0)) / Math.max(1, g.job.total || 1));
+    return `<span class="progress"><i style="width:${pct}%"></i></span><span class="small">Scanning ${fmt(g.job.done)} / ${fmt(g.job.total)}</span>`;
+  }
+  if (!g.active) {
+    return `<span class="pill">Paused</span> <span class="small muted">copy from ${timeAgo(g.scannedAt)} kept</span>`;
+  }
+  if (!g.scannedAt) {
+    return `<span class="pill warn">Never scanned</span>`;
+  }
+  return `<span class="small">Scanned ${timeAgo(g.scannedAt)}</span>` +
+    (g.failed ? ` <span class="pill bad">${fmt(g.failed)} failed</span>` : "") +
+    (g.fresh ? ` <span class="pill warn">${fmt(g.fresh)} new</span>` : "");
+}
+
+function siteCard() {
+  const s = state.site || { siteUrl: "", siteFolder: "", devices: ["desktop"] };
+  const addr = s.siteUrl || s.siteFolder || "Not configured";
+  const devs = (s.devices || []).map((d) => d.charAt(0).toUpperCase() + d.slice(1)).join(", ");
+
+  const sheets = state.stylesheets || [];
+  const matched = sheets.filter((sh) => sh.matches && sh.matches.length > 0).length;
+
+  const summary = `<div class="site">
+    <div><span class="k">Site address</span><span class="mono">${esc(addr)}</span></div>
+    <div><span class="k">Devices</span>${esc(devs)}</div>
+    <span class="sp"></span>
+    ${S.siteEditing ? "" : `<button class="btn small" id="editSite">Edit</button>`}
+  </div>`;
+
+  const sheetsSection = `
+    <div class="sheets-sec">
+      <details class="sheets-detail">
+        <summary class="sheets-summary">
+          <span>Stylesheets on the site</span>
+          <span class="muted small">(${fmt(sheets.length)} stylesheets · ${fmt(matched)} matched to your project files)</span>
+        </summary>
+        <div class="small muted" style="margin:8px 0 10px">Your CSS files are matched to these by file name.</div>
+        ${sheets.length ? `
+          <table class="sheets-list">
+            <thead><tr><th>Stylesheet</th><th class="num">Pages</th><th>Matched project file</th></tr></thead>
+            <tbody>
+              ${sheets.map((sh) => {
+                let matchHtml = "";
+                if (!sh.sameSite) {
+                  matchHtml = `<span class="muted small">other site (fonts, widgets) — ignored</span>`;
+                } else if (sh.matches && sh.matches.length > 0) {
+                  matchHtml = sh.matches.map((m) => `<span class="pill ok mono">${esc(m.project)}/${esc(m.file)}</span>`).join(" ");
+                } else {
+                  matchHtml = `<span class="muted small">not matched</span>`;
+                }
+                return `<tr>
+                  <td class="mono url">${esc(sh.url)}</td>
+                  <td class="num">${fmt(sh.pages)}</td>
+                  <td>${matchHtml}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>` : `<p class="muted small" style="margin:6px 0">No stylesheets detected yet.</p>`}
+      </details>
+    </div>`;
+
+  if (!S.siteEditing) {
+    return `<div class="card">${summary}${sheetsSection}</div>`;
+  }
+
+  const allDevs = [
+    { id: "desktop", label: "Desktop 1366×768" },
+    { id: "mobile", label: "Mobile 390×844" },
+    { id: "tablet", label: "Tablet 820×1180" }
+  ];
+
+  return `<div class="card">${summary}
+    <div class="form">
+      <div class="lab">Site address</div>
+      <div>
+        <input type="text" id="siteAddrInput" value="${esc(addr)}" style="width:420px;max-width:100%">
+        <div class="hint">Pages are captured from here. Use an http(s) URL, or an absolute folder path on this computer.</div>
+      </div>
+      <div class="lab">Devices</div>
+      <div class="chips" id="siteDevChips">
+        ${allDevs.map((d) => `<span class="chip${(s.devices || []).includes(d.id) ? " on" : ""}" data-dev="${d.id}">${esc(d.label)}</span>`).join("")}
+      </div>
+      <div></div>
+      <div>
+        <button class="btn primary" id="saveSite">Save</button>
+        <button class="btn" id="cancelSite">Cancel</button>
+        <span class="muted small" style="margin-left:8px">Changing the address or devices means a rescan of active groups.</span>
+      </div>
+    </div>
+    ${sheetsSection}
+  </div>`;
+}
+
+function renderList() {
+  const groups = state.groups || [];
+  const totals = state.totals || { pages: 0, activeGroups: 0, pausedGroups: 0, pausedPages: 0, diskBytes: 0 };
+
+  const rows = groups.map((g) => {
+    return `<tr class="${g.active ? "" : "paused"}">
+      <td><label class="switch" title="${g.active ? "Pause" : "Activate"}"><input type="checkbox" data-toggle="${g.id}" ${g.active ? "checked" : ""}><span></span></label></td>
+      <td>
+        <a class="gname" data-open="${g.id}">${esc(g.name)}</a>
+        ${g.sharedPages ? `<div class="small muted">${fmt(g.sharedPages)} also in other groups</div>` : ""}
+      </td>
+      <td class="small">${sourceText(g)}</td>
+      <td class="num">${fmt(g.pages)}</td>
+      <td>${statusCell(g)}</td>
+      <td class="actions">
+        <button class="btn small" data-rescan="${g.id}" ${g.job ? "disabled" : ""}>Rescan</button>
+        <button class="btn small danger" data-del="${g.id}">Delete</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  const projects = state.projects || [];
+  let projHtml = "";
+  if (projects.length > 0) {
+    const pItems = projects.map((p) => {
+      const linked = (p.groups || []).map((gid) => G(gid)?.name || gid);
+      const grpStr = linked.length ? `linked to ${linked.map(esc).join(", ")}` : "no groups linked";
+      return `<b>${esc(p.name)}</b> (${grpStr})`;
+    }).join(" · ");
+    projHtml = `<div class="small muted" style="margin-top:14px">Projects connected: ${pItems}</div>`;
+  } else {
+    projHtml = `<div class="small muted" style="margin-top:14px">No VS Code project connected yet. Open a project in VS Code with the CSS Blast Radius extension, then link it to groups from the status bar.</div>`;
+  }
+
+  $("#view").innerHTML = siteCard() + `
+    <div class="card">
+      <div class="card-h">
+        <h2>Page groups</h2>
+        <span class="muted small">Paused groups aren't rescanned or counted. A page in several groups is captured once.</span>
+        <span class="sp"></span>
+        <button class="btn primary" id="openAdd">+ Add group</button>
+      </div>
+      ${groups.length ? `
+        <table class="groups-table" id="groupsTable">
+          <thead>
+            <tr><th style="width:60px">Active</th><th>Name</th><th>Source</th><th class="num">Pages</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>` : `<p class="muted" style="padding:24px 16px;margin:0">No page groups added yet. Click "+ Add group" to start scanning your site.</p>`}
+      <div class="totals">
+        <span><b>${fmt(totals.pages)}</b> pages watched in ${plural(totals.activeGroups, "active group")} · ${formatBytes(totals.diskBytes)} on this computer</span>
+        ${totals.pausedGroups ? `<span>Paused: ${plural(totals.pausedPages, "page")} in ${plural(totals.pausedGroups, "group")}</span>` : ""}
+      </div>
+    </div>
+    ${projHtml}`;
+}
+
+function renderGroup(g) {
+  if (!g) {
+    S.view = "list";
+    return render();
+  }
+
+  const sitemap = g.source && g.source.type === "sitemap";
+  const data = currentGroupPages || { counts: { all: g.pages, ok: g.ok, failed: g.failed, new: g.fresh, excluded: g.excluded }, total: 0, pages: [] };
+  const c = data.counts || { all: g.pages, ok: g.ok, failed: g.failed, new: g.fresh, excluded: g.excluded };
+
+  const stPill = (p) => {
+    if (p.status === "excluded") return `<span class="pill">Excluded</span>`;
+    if (p.status === "ok") return `<span class="pill ok">OK</span>`;
+    if (p.status === "capturing") return `<span class="spinner"></span><span class="small">Scanning…</span>`;
+    if (p.status === "new") return `<span class="pill warn">Not scanned yet</span>`;
+    return `<span class="pill bad">Failed</span> ${p.reason ? `<span class="reason">${esc(p.reason)}</span>` : ""}`;
+  };
+
+  const rows = (data.pages || []).map((p) => {
+    const isEx = p.status === "excluded";
+    const others = (p.alsoIn || []).map((name) => {
+      const o = state.groups.find((x) => x.name === name);
+      return o ? `<a data-open="${o.id}">${esc(name)}</a>` : esc(name);
+    }).join(", ");
+
+    return `<tr>
+      <td class="mono url">${esc(p.url)}</td>
+      <td>${stPill(p)}</td>
+      <td class="small muted">${isEx ? "" : timeAgo(p.scannedAt)}</td>
+      <td class="small">${others}</td>
+      <td class="actions">
+        ${isEx ? `<button class="btn small" data-include="${esc(p.url)}">Include again</button>` : `
+          <button class="btn small" data-rescanpage="${esc(p.url)}" ${p.status === "capturing" ? "disabled" : ""}>Rescan</button>
+          <button class="btn small danger" data-remove="${esc(p.url)}">${sitemap ? "Exclude" : "Remove"}</button>
+        `}
+      </td>
+    </tr>`;
+  }).join("");
+
+  const f = (k, label, count) => `<button class="fbtn${S.status === k ? " on" : ""}" data-status="${k}">${label} ${fmt(count)}</button>`;
+
+  const pos = document.activeElement && document.activeElement.id === "search" ? document.activeElement.selectionStart : null;
+
+  $("#view").innerHTML = `
+    <a class="back" data-open="list">← All groups</a>
+    <div class="ghead">
+      <h1>${esc(g.name)}</h1>
+      <label class="switch" title="${g.active ? "Pause" : "Activate"}"><input type="checkbox" data-toggle="${g.id}" ${g.active ? "checked" : ""}><span></span></label>
+      <span class="muted small">${g.active ? "Active" : "Paused"}</span>
+      <span class="sp"></span>
+      <button class="btn" data-rescan="${g.id}" ${g.job ? "disabled" : ""}>Rescan group</button>
+      <button class="btn danger" data-del="${g.id}">Delete group</button>
+    </div>
+    <p style="margin:-6px 0 14px">${sourceText(g)}${sitemap ? ` <span class="muted small">· read again on every rescan</span>` : ""} · ${statusCell(g)}</p>
+    <div class="card">
+      <div class="card-h">
+        <div class="filters">
+          ${f("all", "All", c.all)}
+          ${f("ok", "OK", c.ok)}
+          ${f("failed", "Failed", c.failed)}
+          ${f("new", "Not scanned yet", c.new)}
+          ${sitemap || c.excluded ? f("excluded", "Excluded", c.excluded) : ""}
+        </div>
+        <span class="sp"></span>
+        <input type="text" id="search" placeholder="Filter by URL" value="${esc(S.search)}" style="width:220px">
+        ${sitemap ? "" : `<button class="btn primary" id="openAddPages">+ Add pages</button>`}
+      </div>
+      ${data.pages && data.pages.length ? `
+        <table>
+          <thead><tr><th>Page</th><th>Status</th><th>Scanned</th><th>Also in</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>` : `<p class="muted" style="padding:16px;margin:0">No pages match the filter.</p>`}
+      ${data.total > data.pages.length ? `
+        <div style="padding:10px 16px;border-top:1px solid var(--line-soft)">
+          <button class="btn small" id="more">Show more (${fmt(data.pages.length)} of ${fmt(data.total)})</button>
+        </div>` : ""}
+    </div>`;
+
+  if (pos != null) {
+    const i = $("#search");
+    if (i) { i.focus(); i.setSelectionRange(pos, pos); }
+  }
+}
+
+// ---------------------------------------------------------------- modal handling
+function openModal(mode) {
+  S.modalMode = mode;
+  S.pending = null;
+  $("#modalErr").classList.add("hidden");
+  $("#modalErr").textContent = "";
+  $("#gName").value = "";
+  $("#smFilter").value = "";
+  $("#pasteBox").value = "";
+  $("#csvFile").value = "";
+  $("#captureNow").checked = true;
+
+  const currentG = G(S.view);
+  const isGroup = mode === "group";
+  $("#mTitle").textContent = isGroup ? "Add a page group" : `Add pages to ${currentG ? currentG.name : ""}`;
+  $("#mOk").textContent = isGroup ? "Add group" : "Add pages";
+  $("#gNameWrap").classList.toggle("hidden", !isGroup);
+  $('[data-src="sitemap"]').classList.toggle("hidden", !isGroup);
+
+  if (state?.site?.siteUrl) {
+    $("#smUrl").value = state.site.siteUrl.replace(/\/$/, "") + "/sitemap.xml";
+  } else {
+    $("#smUrl").value = "sitemap.xml"; // read from inside the site folder
+  }
+
+  setSrc(isGroup ? "sitemap" : "paste");
+  $("#modal").classList.add("open");
+  (isGroup ? $("#gName") : $("#pasteBox")).focus();
+}
+
+function closeModal() {
+  $("#modal").classList.remove("open");
+  $("#modalErr").classList.add("hidden");
+  $("#modalErr").textContent = "";
+}
+
+function setSrc(src) {
+  S.src = src;
+  S.pending = null;
+  document.querySelectorAll("#srcTabs button").forEach((b) => b.classList.toggle("on", b.dataset.src === src));
+  document.querySelectorAll("[data-pane]").forEach((p) => p.classList.toggle("hidden", p.dataset.pane !== src));
+  showPreview();
+}
+
+function showPreview(html) {
+  const p = $("#srcPreview");
+  p.classList.toggle("hidden", !html);
+  p.innerHTML = html || "";
+  updateOk();
+}
+
+function updateOk() {
+  const isGroup = S.modalMode === "group";
+  const hasName = !isGroup || $("#gName").value.trim().length > 0;
+  const hasPending = S.pending && (S.pending.urls ? S.pending.urls.length > 0 : true);
+  $("#mOk").disabled = !(hasName && hasPending);
+}
+
+function setPending(urls, source, extra = "") {
+  S.pending = { urls, source };
+  const count = urls.length;
+  const secs = Math.max(5, Math.round(count * 0.12));
+  showPreview(`<b>${plural(count, "page")}</b>${extra} · scanning takes about ${secs < 90 ? secs + " s" : Math.round(secs / 60) + " min"}<ul>${urls.slice(0, 4).map((u) => `<li class="mono">${esc(u)}</li>`).join("")}${count > 4 ? `<li>… and ${fmt(count - 4)} more</li>` : ""}</ul>`);
+}
+
+function parseCsv(text, file) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (!lines.length) {
+    showPreview(`CSV file <b>${esc(file)}</b> is empty.`);
+    return;
+  }
+
+  // Parse CSV rows taking care of quotes
+  const rows = lines.map((line) => {
+    const cells = [];
+    let cur = "", inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (c === ',' && !inQuotes) {
+        cells.push(cur.trim());
+        cur = "";
+      } else {
+        cur += c;
+      }
+    }
+    cells.push(cur.trim());
+    return cells;
+  });
+
+  const width = Math.max(...rows.map((r) => r.length));
+  let bestCol = 0, bestCount = -1;
+  const headers = rows[0].map((h) => h.toLowerCase());
+
+  // First try header names: url, link, path, address, page
+  const targetCols = ["url", "link", "path", "address", "page"];
+  for (let i = 0; i < headers.length; i++) {
+    if (targetCols.includes(headers[i])) {
+      bestCol = i;
+      bestCount = 999999;
+      break;
+    }
+  }
+
+  if (bestCount < 0) {
+    for (let i = 0; i < width; i++) {
+      const count = rows.filter((r) => isUrl(r[i])).length;
+      if (count > bestCount) { bestCount = count; bestCol = i; }
+    }
+  }
+
+  const origin = state?.site?.siteUrl ? new URL(state.site.siteUrl).origin : "";
+  const rawVals = rows.map((r) => r[bestCol]).filter(Boolean);
+  const byHeader = bestCount === 999999;
+  const urls = [...new Set(rawVals.slice(byHeader ? 1 : 0).filter((v) => isUrl(v) || (byHeader && isBarePath(v))).map((v) => toPagePath(v, origin)))];
+
+  if (!urls.length) {
+    S.pending = null;
+    showPreview(`No column of URLs or paths found in <b>${esc(file)}</b>.`);
+    return;
+  }
+
+  const head = rows[0][bestCol];
+  if (S.modalMode === "group" && !$("#gName").value) {
+    $("#gName").value = file.replace(/\.csv$/i, "").replace(/[-_]/g, " ");
+  }
+
+  setPending(urls, { type: "csv", file }, ` from column <b>${esc(isUrl(head) ? `#${bestCol + 1}` : head)}</b> of ${esc(file)}`);
+}
+
+function parsePasted(text) {
+  const origin = state?.site?.siteUrl ? new URL(state.site.siteUrl).origin : "";
+  const tokens = text.split(/[\r\n]+/).map((t) => t.trim()).filter(Boolean);
+  const urls = [...new Set(tokens.filter((v) => isUrl(v) || isBarePath(v)).map((v) => toPagePath(v, origin)))];
+
+  if (urls.length) {
+    setPending(urls, { type: "paste" });
+  } else {
+    S.pending = null;
+    showPreview();
+  }
+}
+
+// ---------------------------------------------------------------- toast
+let toastTimer;
+function toast(html, action, fn, isError = false) {
+  const t = $("#toast");
+  t.classList.toggle("err", !!isError);
+  $("#toastText").innerHTML = html;
+  $("#toastAct").innerHTML = action ? `<button class="btn small">${esc(action)}</button>` : "";
+  if (action && fn) {
+    $("#toastAct button").onclick = (e) => {
+      e.stopPropagation();
+      fn();
+      t.classList.remove("show");
+    };
+  }
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 6000);
+}
+
+// ---------------------------------------------------------------- event listeners
+document.addEventListener("click", async (e) => {
+  const chip = e.target.closest(".chip[data-dev]");
+  if (chip) {
+    chip.classList.toggle("on");
+    return;
+  }
+
+  const t = e.target.closest("button, a[data-open]");
+  if (!t) return;
+  const d = t.dataset;
+
+  if (d.open) {
+    S.view = d.open;
+    S.status = "all";
+    S.search = "";
+    S.limit = 50;
+    currentGroupPages = null;
+    render();
+    window.scrollTo(0, 0);
+    if (S.view !== "list") fetchPages(S.view);
+  }
+  else if (t.id === "editSite") {
+    S.siteEditing = true;
+    render();
+  }
+  else if (t.id === "cancelSite") {
+    S.siteEditing = false;
+    render();
+  }
+  else if (t.id === "welcomeSave" || t.id === "saveSite") {
+    const isWelcome = t.id === "welcomeSave";
+    const input = $(isWelcome ? "#welcomeAddr" : "#siteAddrInput");
+    const container = $(isWelcome ? "#welcomeDevs" : "#siteDevChips");
+    const addr = input.value.trim();
+    if (!addr) {
+      alert("Please enter a site address or folder path.");
+      input.focus();
+      return;
+    }
+    const devs = [...container.querySelectorAll(".chip.on")].map((c) => c.dataset.dev);
+    if (!devs.length) {
+      alert("Please select at least one device.");
+      return;
+    }
+
+    const isHttp = /^https?:\/\//i.test(addr);
+    const body = {
+      siteUrl: isHttp ? addr : "",
+      siteFolder: isHttp ? "" : addr,
+      devices: devs
+    };
+
+    try {
+      const res = await api("/api/site", { method: "PUT", body: JSON.stringify(body) });
+      S.siteEditing = false;
+      applyState(res.state || state);
+      if (res.needsRescan) {
+        toast("Site settings saved. The active groups need a rescan.", "Rescan all", async () => {
+          try { await api("/api/rescan-all", { method: "POST" }); } catch (err) { toast(err.message, null, null, true); }
+        });
+      } else {
+        toast("Site settings saved.");
+      }
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (t.id === "openAdd") {
+    openModal("group");
+  }
+  else if (t.id === "openAddPages") {
+    openModal("pages");
+  }
+  else if (t.hasAttribute("data-close")) {
+    closeModal();
+  }
+  else if (d.src) {
+    setSrc(d.src);
+  }
+  else if (t.id === "smPreview") {
+    const smUrl = $("#smUrl").value.trim();
+    if (!smUrl) return;
+    const filter = $("#smFilter").value.trim();
+    showPreview(`<span class="spinner"></span> Reading ${esc(smUrl)}…`);
+    try {
+      const res = await api("/api/sitemap/preview", {
+        method: "POST",
+        body: JSON.stringify({ url: smUrl, filter: filter || undefined })
+      });
+      const urls = res.urls || [];
+      const total = res.total || urls.length;
+      if (!urls.length) {
+        S.pending = null;
+        showPreview(`No page in the sitemap matches <span class="mono">${esc(filter || "*")}</span>.`);
+        return;
+      }
+      setPending(urls, { type: "sitemap", url: smUrl, filter: filter || undefined }, filter ? ` match <span class="mono">${esc(filter)}</span> (of ${fmt(total)} in the sitemap)` : ` (of ${fmt(total)} in the sitemap)`);
+    } catch (err) {
+      S.pending = null;
+      showPreview(`<span class="reason">Failed to read sitemap: ${esc(err.message)}</span>`);
+    }
+  }
+  else if (t.id === "mOk") {
+    const isGroup = S.modalMode === "group";
+    const scan = $("#captureNow").checked;
+    const errBox = $("#modalErr");
+    errBox.classList.add("hidden");
+
+    try {
+      if (isGroup) {
+        const name = $("#gName").value.trim();
+        const payload = {
+          name,
+          source: S.pending.source,
+          urls: S.pending.source.type === "sitemap" ? undefined : S.pending.urls,
+          scan
+        };
+        const res = await api("/api/groups", { method: "POST", body: JSON.stringify(payload) });
+        closeModal();
+        toast(`Added <b>${esc(res.name || name)}</b> with ${plural(res.pages || S.pending.urls?.length || 0, "page")}.`);
+        await loadState();
+      } else {
+        const gid = S.view;
+        const g = G(gid);
+        const res = await api(`/api/groups/${gid}/pages`, { method: "POST", body: JSON.stringify({ urls: S.pending.urls, scan }) });
+        closeModal();
+        toast(`Added ${plural(res.added, "page")} to <b>${esc(g ? g.name : "")}</b>${res.already ? ` (${fmt(res.already)} were already in it)` : ""}.`);
+        fetchPages(gid);
+      }
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.classList.remove("hidden");
+    }
+  }
+  else if (d.rescan) {
+    const gid = d.rescan;
+    try {
+      await api(`/api/groups/${gid}/rescan`, { method: "POST" });
+      toast(`Rescan queued for <b>${esc(G(gid)?.name || "group")}</b>.`);
+      await loadState();
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (d.del) {
+    const gid = d.del;
+    const g = G(gid);
+    try {
+      await api(`/api/groups/${gid}`, { method: "DELETE" });
+      if (S.view === gid) S.view = "list";
+      await loadState();
+      toast(`Deleted <b>${esc(g?.name || "group")}</b>.`, "Undo", async () => {
+        try {
+          await api(`/api/groups/${gid}/restore`, { method: "POST" });
+          await loadState();
+        } catch (err) {
+          toast(err.message, null, null, true);
+        }
+      });
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (d.status) {
+    S.status = d.status;
+    S.limit = 50;
+    fetchPages(S.view);
+  }
+  else if (t.id === "more") {
+    S.limit += 50;
+    fetchPages(S.view);
+  }
+  else if (d.rescanpage) {
+    const url = d.rescanpage;
+    try {
+      await api("/api/rescan", { method: "POST", body: JSON.stringify({ urls: [url] }) });
+      toast(`Rescan queued for <span class="mono">${esc(url)}</span>.`);
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (d.remove) {
+    const url = d.remove;
+    const gid = S.view;
+    const g = G(gid);
+    try {
+      const res = await api(`/api/groups/${gid}/remove`, { method: "POST", body: JSON.stringify({ url }) });
+      fetchPages(gid);
+      if (res.excluded) {
+        toast(`Excluded <span class="mono">${esc(url)}</span>. It stays out even though the sitemap lists it.`, "Undo", async () => {
+          try {
+            await api(`/api/groups/${gid}/include`, { method: "POST", body: JSON.stringify({ url }) });
+            fetchPages(gid);
+          } catch (err) {
+            toast(err.message, null, null, true);
+          }
+        });
+      } else {
+        toast(`Removed <span class="mono">${esc(url)}</span> from <b>${esc(g?.name || "")}</b>.`, "Undo", async () => {
+          try {
+            await api(`/api/groups/${gid}/pages`, { method: "POST", body: JSON.stringify({ urls: [url], scan: false }) });
+            fetchPages(gid);
+          } catch (err) {
+            toast(err.message, null, null, true);
+          }
+        });
+      }
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (d.include) {
+    const url = d.include;
+    const gid = S.view;
+    try {
+      await api(`/api/groups/${gid}/include`, { method: "POST", body: JSON.stringify({ url }) });
+      fetchPages(gid);
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
+});
+
+document.addEventListener("change", async (e) => {
+  const t = e.target;
+  if (t.dataset.toggle) {
+    const gid = t.dataset.toggle;
+    const active = t.checked;
+    const g = G(gid);
+    try {
+      await api(`/api/groups/${gid}`, { method: "PATCH", body: JSON.stringify({ active }) });
+      if (!active) {
+        toast(`<b>${esc(g?.name || "")}</b> paused. It won't be rescanned or counted; its copy from ${timeAgo(g?.scannedAt)} is kept.`);
+      } else {
+        toast(`<b>${esc(g?.name || "")}</b> is active again, using its copy from ${timeAgo(g?.scannedAt)}.`, "Rescan now", async () => {
+          try { await api(`/api/groups/${gid}/rescan`, { method: "POST" }); } catch (err) { toast(err.message, null, null, true); }
+        });
+      }
+      await loadState();
+    } catch (err) {
+      t.checked = !active;
+      toast(err.message, null, null, true);
+    }
+  }
+  else if (t.id === "csvFile" && t.files[0]) {
+    const f = t.files[0];
+    f.text().then((txt) => parseCsv(txt, f.name));
+  }
+});
+
+let searchDebounce;
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.id === "search") {
+    S.search = t.value.trim();
+    S.limit = 50;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => fetchPages(S.view), 250);
+  }
+  else if (t.id === "gName") {
+    updateOk();
+  }
+  else if (t.id === "pasteBox") {
+    parsePasted(t.value);
+  }
+});
+
+const drop = $("#drop");
+if (drop) {
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    const f = e.dataTransfer.files[0];
+    if (f) f.text().then((txt) => parseCsv(txt, f.name));
+  });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+});
+
+// Initial boot
+loadState();
+connectEvents();
+</script>
+</body>
+</html>

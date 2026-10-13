@@ -2,6 +2,7 @@
 // incremental ranges; while a request is in flight, new edits are coalesced
 // into the next one, so there is no fixed debounce and no queue build-up.
 
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import { ERR, type DocResult, type SessionTotal } from "./protocol";
@@ -21,10 +22,17 @@ interface Tracked {
   inFlight: number;
   opening?: Promise<void>;
   idle: Array<() => void>;
+  savedAt?: number;
+  reloaded?: boolean;
 }
 
+/** A CSS file inside the project (the first workspace folder): files from elsewhere would be matched by name and miscounted. */
 export function isCssDocument(doc: vscode.TextDocument): boolean {
-  return doc.uri.scheme === "file" && (doc.languageId === "css" || doc.uri.fsPath.toLowerCase().endsWith(".css"));
+  if (doc.uri.scheme !== "file" || !(doc.languageId === "css" || doc.uri.fsPath.toLowerCase().endsWith(".css"))) return false;
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return false;
+  const rel = path.relative(root, doc.uri.fsPath);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 export class DocumentSync implements vscode.Disposable {
@@ -35,6 +43,7 @@ export class DocumentSync implements vscode.Disposable {
     private readonly client: DaemonClient,
     private readonly state: ImpactState,
     private readonly log: (msg: string) => void,
+    private readonly onReload: (path: string, session: SessionTotal) => void,
   ) {
     this.subs.push(
       vscode.workspace.onDidOpenTextDocument((d) => this.open(d)),
@@ -64,6 +73,11 @@ export class DocumentSync implements vscode.Disposable {
   private accept(r: DocResult): void {
     this.state.acceptAnswer(r.answer);
     this.state.acceptSession(r.session);
+    const tracked = this.docs.get(r.answer.file);
+    if (tracked?.reloaded) {
+      tracked.reloaded = false;
+      this.onReload(r.answer.file, this.state.session ?? r.session);
+    }
   }
 
   private open(doc: vscode.TextDocument): Promise<void> {
@@ -71,6 +85,7 @@ export class DocumentSync implements vscode.Disposable {
     const path = doc.uri.fsPath;
     const t: Tracked = this.docs.get(path) ?? { doc, version: 0, queue: [], inFlight: 0, idle: [] };
     t.doc = doc;
+    t.reloaded = false;
     this.docs.set(path, t);
     t.queue = [];
     t.version = 1;
@@ -89,6 +104,7 @@ export class DocumentSync implements vscode.Disposable {
   private change(e: vscode.TextDocumentChangeEvent): void {
     const t = this.docs.get(e.document.uri.fsPath);
     if (!t || e.contentChanges.length === 0) return;
+    if (!e.document.isDirty && Date.now() - (t.savedAt ?? 0) > 1000) t.reloaded = true;
     for (const c of e.contentChanges) {
       t.queue.push({
         range: {
@@ -130,6 +146,8 @@ export class DocumentSync implements vscode.Disposable {
   private async save(doc: vscode.TextDocument): Promise<void> {
     const t = this.docs.get(doc.uri.fsPath);
     if (!t) return;
+    t.savedAt = Date.now();
+    t.reloaded = false;
     while (t.opening) await t.opening;
     // Edits made before the save must reach the daemon first; the daemon
     // handles document events strictly in arrival order.

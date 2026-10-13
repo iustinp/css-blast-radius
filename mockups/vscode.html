@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSS Blast Radius — VS Code mockup</title>
+<style>
+  :root { --bg: #1f1f1f; --bar: #181818; --line: #2b2b2b; --text: #cccccc; --muted: #9d9d9d; --accent: #0078d4;
+    --ghost: #8a8f98; --warn: #e2c08d; --hl: #f97316; --mono: Menlo, Monaco, Consolas, "Courier New", monospace; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: #4daafc; cursor: pointer; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+  .kbd { display: inline-block; border: 1px solid #555; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; line-height: 16px; color: #bbb; background: #2a2a2a; }
+
+  .win { display: grid; grid-template-rows: 30px minmax(0, 1fr) 22px; height: 100vh; }
+  .titlebar { background: var(--bar); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; position: relative; }
+  .titlebar .dots { position: absolute; left: 12px; display: flex; gap: 8px; }
+  .titlebar .dots i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; }
+  .titlebar .dots i:nth-child(2) { background: #febc2e; } .titlebar .dots i:nth-child(3) { background: #28c840; }
+  .main { display: grid; grid-template-columns: 48px 230px minmax(0, 1fr) auto; min-height: 0; }
+
+  .activity { background: var(--bar); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
+  .activity span { width: 48px; height: 46px; display: grid; place-items: center; color: #6e6e6e; font-size: 20px; border-left: 2px solid transparent; }
+  .activity span.on { color: #e7e7e7; border-left-color: #e7e7e7; }
+  .activity span.click { cursor: pointer; } .activity span.click:hover { color: #e7e7e7; }
+  .explorer { background: var(--bar); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  .explorer h6 { margin: 0; padding: 10px 12px 6px 20px; font-size: 11px; font-weight: 400; letter-spacing: .05em; color: var(--muted); }
+  .tree div { padding: 1px 8px 1px calc(10px + var(--d) * 12px); white-space: nowrap; display: flex; }
+  .tree div.sel { background: #37373d; }
+  .tree .m { margin-left: auto; color: #e2c08d; font-size: 12px; }
+  .guide { margin: auto 10px 10px; background: #3b3320; border: 1px solid #6b5a2a; border-radius: 6px; padding: 10px; font-size: 12px; color: #e8dcc0; }
+  .guide b { display: block; margin-bottom: 4px; color: #ffd76a; }
+  .guide p { margin: 6px 0; line-height: 1.45; }
+  .guide button { display: block; width: 100%; text-align: left; margin-top: 4px; border: 1px solid #6b5a2a; background: #2a2416; border-radius: 4px; padding: 3px 7px; font-size: 12px; }
+  .guide button:hover { background: #4a3f22; }
+
+  .editor-area { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .tabs { display: flex; background: var(--bar); height: 35px; border-bottom: 1px solid var(--line); flex: none; overflow: hidden; }
+  .tab { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; border-right: 1px solid var(--line); color: var(--muted); cursor: pointer; white-space: nowrap; border-top: 1px solid transparent; }
+  .tab.on { background: var(--bg); color: #fff; border-top-color: var(--accent); }
+  .tab .x { width: 18px; text-align: center; border-radius: 4px; opacity: .7; }
+  .tab .x:hover { background: #ffffff1f; opacity: 1; }
+  .tab .ic { color: var(--hl); }
+  .tab .ic.css { color: #42a5f5; font-weight: 700; font-size: 11px; }
+  .pane { flex: 1; min-height: 0; position: relative; }
+
+  /* editor */
+  .crumbs { height: 22px; padding: 0 16px; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  .scroller { position: absolute; inset: 22px 0 0 0; overflow: auto; }
+  .code { display: flex; min-height: 100%; font: 13px/19px var(--mono); font-variant-ligatures: none; padding-bottom: 240px; }
+  .gutter { flex: none; width: 60px; text-align: right; padding: 4px 18px 0 0; color: #6e7681; user-select: none; }
+  .gutter div { height: 19px; position: relative; }
+  .gutter div.cur { color: #ccc; }
+  .gutter div.mod::after { content: ""; position: absolute; right: -12px; top: 0; bottom: 0; width: 3px; background: #1b81a8; }
+  .textwrap { position: relative; flex: 1; min-width: 0; }
+  .mirror, #ta { margin: 0; padding: 4px 0 0 4px; font: inherit; font-variant-ligatures: none; white-space: pre; tab-size: 2; letter-spacing: 0; }
+  .mirror { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
+  .mirror .ln { height: 19px; }
+  .mirror .ln.cur { box-shadow: inset 0 0 0 1px #2c2c2c; background: #ffffff06; }
+  #ta { position: relative; display: block; width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: transparent; caret-color: #aeafad; overflow: hidden; }
+  #ta::selection { background: #264f78; color: transparent; }
+  .ts { color: #d7ba7d; } .tp { color: #9cdcfe; } .tv { color: #ce9178; } .tc { color: #6a9955; } .tn { color: #cccccc; }
+  .ghost { color: var(--ghost); font-style: italic; margin-left: 3ch; font-family: system-ui, -apple-system, sans-serif; font-size: 12px; }
+  .ghost b { color: #c5c9d0; font-weight: 600; }
+  .ghost.warn, .ghost.warn b { color: var(--warn); }
+  .ghost.stale { opacity: .55; }
+
+  /* hover */
+  .hover { position: fixed; z-index: 50; width: 360px; background: #202020; border: 1px solid #454545; border-radius: 4px; box-shadow: 0 4px 14px #0009; font-size: 13px; }
+  .hover > div { padding: 6px 10px; }
+  .hover .hv-h code { color: #d7ba7d; font-family: var(--mono); font-size: 12.5px; }
+  .hover .hv-d { color: var(--muted); font-family: var(--mono); font-size: 12px; padding-top: 0; }
+  .hover .hv-n { border-top: 1px solid #333; }
+  .hover .hv-n .w { color: var(--warn); display: block; margin-top: 2px; }
+  .hover .hv-l { border-top: 1px solid #333; display: flex; gap: 12px; align-items: center; }
+
+  /* status bar */
+  .status { background: var(--bar); border-top: 1px solid var(--line); display: flex; align-items: center; font-size: 12px; color: var(--muted); padding: 0 6px; }
+  .status > span { padding: 0 8px; height: 22px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .status .sp { flex: 1; }
+  .status .click { cursor: pointer; }
+  .status .click:hover { background: #ffffff1f; color: #fff; }
+  .status .cbr.on { color: #fdba74; }
+  .status .cbr.warn { color: var(--warn); }
+
+  /* side panel */
+  .panel { width: 340px; background: var(--bar); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .ph { height: 35px; display: flex; align-items: center; padding: 0 8px 0 16px; font-size: 11px; letter-spacing: .05em; color: var(--muted); flex: none; }
+  .ph .sp { flex: 1; }
+  .ph .x { padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+  .ph .x:hover { background: #ffffff1f; }
+  .psum { padding: 4px 16px 10px; flex: none; }
+  .pnum { font-size: 34px; font-weight: 600; color: #fff; line-height: 1.1; }
+  .pmeta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .pwarn { color: var(--warn); font-size: 12.5px; margin-top: 6px; }
+  .pchips { display: flex; gap: 4px; flex-wrap: wrap; padding: 0 16px 8px; flex: none; }
+  .pchips button { border: 1px solid #3c3c3c; background: #252526; border-radius: 10px; padding: 0 8px; font-size: 12px; font-family: var(--mono); }
+  .pchips button.on { background: #04395e; border-color: #0078d4; color: #fff; }
+  .pchips button .n { color: var(--muted); font-family: system-ui, sans-serif; margin-left: 4px; }
+  .pchips button.on .n { color: #bcd; }
+  .psearch { margin: 0 16px 8px; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 3px 6px; flex: none; outline: none; }
+  .psearch:focus { border-color: var(--accent); }
+  .plist { flex: 1; overflow: auto; min-height: 0; border-top: 1px solid var(--line); }
+  .row { padding: 5px 16px; cursor: pointer; border-left: 2px solid transparent; }
+  .row:hover { background: #2a2d2e; }
+  .row.sel { background: #04395e; border-left-color: var(--accent); }
+  .row .u { font-family: var(--mono); font-size: 12px; color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .m { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .w { font-size: 11.5px; color: var(--warn); }
+  .pempty { padding: 24px 16px; color: var(--muted); text-align: center; line-height: 1.5; }
+  .more { margin: 8px 16px 14px; background: none; border: 1px solid #3c3c3c; border-radius: 3px; padding: 3px 8px; width: calc(100% - 32px); }
+
+  /* diff tab */
+  #paneDiff { display: flex; flex-direction: column; }
+  .dbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
+  .dbar .url { font-family: var(--mono); font-size: 12px; color: #e0e0e0; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dbar .sp { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid #3c3c3c; border-radius: 4px; overflow: hidden; }
+  .seg button { border: 0; background: #252526; padding: 2px 12px; }
+  .seg button.on { background: #0078d4; color: #fff; }
+  .seg button.on.b { background: #5a5a5a; }
+  .dbtn { border: 1px solid #3c3c3c; background: #252526; border-radius: 4px; padding: 2px 8px; }
+  .dbtn:hover { background: #333; }
+  .dbar select { background: #252526; border: 1px solid #3c3c3c; border-radius: 4px; padding: 1px 4px; }
+  .dbar label { display: flex; gap: 4px; align-items: center; color: var(--muted); }
+  .dpos { color: var(--muted); font-size: 12px; min-width: 92px; text-align: center; }
+  .dview { position: relative; flex: 1; min-height: 0; background: #2b2b2b; }
+  .dscroll { position: absolute; top: 0; left: 0; bottom: 0; right: 14px; overflow: auto; }
+  .dstage { position: relative; margin: 16px auto; width: min(1100px, calc(100% - 40px)); background: #fff; box-shadow: 0 2px 14px #0008; }
+  .ver { position: absolute; top: 0; left: 0; right: 0; }
+  .ver.hide { visibility: hidden; }
+  .ol { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+  .ol i { position: absolute; border: 2px solid var(--hl); background: #f9731612; border-radius: 3px; }
+  .ol i.flash { animation: flash 1s ease-out; }
+  @keyframes flash { 0%, 40% { box-shadow: 0 0 0 6px #f9731666; } 100% { box-shadow: 0 0 0 0 #f9731600; } }
+  .dstage.no-ol .ol { display: none; }
+  .marks { position: absolute; top: 0; right: 0; bottom: 0; width: 14px; background: #1e1e1e; border-left: 1px solid #333; }
+  .marks i { position: absolute; left: 3px; right: 3px; min-height: 4px; background: var(--hl); border-radius: 2px; cursor: pointer; }
+  .marks b { position: absolute; left: 0; right: 0; background: #ffffff1c; pointer-events: none; }
+  .vbadge { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 12px; letter-spacing: .06em; background: #0078d4; color: #fff; box-shadow: 0 2px 8px #0008; pointer-events: none; }
+  .vbadge.b { background: #5a5a5a; }
+  .vbadge span { font-weight: 400; letter-spacing: 0; opacity: .8; margin-left: 6px; }
+  .vbadge.pop { animation: pop .25s; }
+  @keyframes pop { from { transform: translateX(-50%) scale(1.18); } to { transform: translateX(-50%); } }
+  .dempty { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 5; background: #3b3320; border: 1px solid #6b5a2a; color: #e8dcc0; padding: 6px 12px; border-radius: 4px; }
+  .dfoot { padding: 5px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; flex: none; display: flex; gap: 8px; align-items: center; }
+  .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid #555; border-top-color: #4daafc; border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* "open in browser" mode */
+  body.browser .win { display: none; }
+  #browserWrap { display: none; }
+  body.browser #browserWrap { display: flex; flex-direction: column; height: 100vh; }
+  .btop { height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: #111; border-bottom: 1px solid #333; flex: none; }
+  .btop .dot { width: 10px; height: 10px; border-radius: 50%; background: #ff7b72; box-shadow: 0 0 0 4px #ff7b7233; }
+  body.browser #paneDiff { flex: 1; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div>components.css — example-site</div>
+  <div class="main">
+    <div class="activity">
+      <span class="on" title="Explorer">⧉</span><span title="Search">⌕</span><span title="Source control">⑂</span>
+      <span class="click" id="actCbr" title="CSS Blast Radius (⌥B)">◎</span>
+    </div>
+    <div class="explorer">
+      <h6>EXPLORER</h6>
+      <div class="tree">
+        <div style="--d:0">▾ EXAMPLE-SITE</div>
+        <div style="--d:1">▾ src</div>
+        <div style="--d:2">▾ css</div>
+        <div style="--d:3">base.css</div>
+        <div style="--d:3" class="sel">components.css <span class="m" id="treeMod"></span></div>
+        <div style="--d:3">landing-copies.css</div>
+        <div style="--d:2">› templates</div>
+        <div style="--d:1">› public</div>
+        <div style="--d:1">package.json</div>
+      </div>
+      <div class="guide">
+        <b>Mockup: try it</b>
+        <p>Edit the CSS anywhere. The page count shows up next to your cursor as you type. No need to save.</p>
+        <button data-demo="banner">▶ Type: bigger .promo-banner padding</button>
+        <button data-demo="typo">▶ Type: typo in .card--featured</button>
+        <button data-demo="btn">▶ Type: new .btn--primary color</button>
+        <button data-demo="reset">↺ Undo all edits</button>
+        <p>Then hover the rule, click <b style="display:inline;color:inherit">◎</b> in the status bar, or press <span class="kbd">⌥B</span> to see the pages. Click a page for the visual diff.</p>
+        <a href="setup.html" target="_blank">Setup web UI mockup ↗</a>
+      </div>
+    </div>
+
+    <div class="editor-area">
+      <div class="tabs" id="tabs"></div>
+      <div class="pane" id="paneEditor">
+        <div class="crumbs">src › css › components.css <span id="crumbSel"></span></div>
+        <div class="scroller" id="scroller">
+          <div class="code">
+            <div class="gutter" id="gutter"></div>
+            <div class="textwrap">
+              <div class="mirror" id="mirror"></div>
+              <textarea id="ta" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pane hidden" id="paneDiff">
+        <div class="dbar">
+          <span class="url" id="dUrl"></span>
+          <span class="seg"><button data-v="before" tabindex="-1">Before</button><button data-v="after" tabindex="-1">After</button></span>
+          <span class="kbd" title="Press Space to flip between before and after">Space</span>
+          <button class="dbtn" data-jump="-1" tabindex="-1" title="Previous change (Shift+N)">↑</button><span class="dpos" id="dPos"></span><button class="dbtn" data-jump="1" tabindex="-1" title="Next change (N)">↓</button>
+          <span class="kbd">N</span>
+          <label><input type="checkbox" id="dOutl" checked tabindex="-1"> Outlines</label>
+          <select id="dDevice" tabindex="-1"><option value="desktop">Desktop</option><option value="mobile">Mobile</option></select>
+          <span class="sp"></span>
+          <button class="dbtn" id="dBrowser" tabindex="-1">Open in browser ↗</button>
+        </div>
+        <div class="dview">
+          <div class="vbadge" id="vbadge"></div>
+          <div class="dempty hidden" id="dEmpty">This page uses the rule, but nothing visible changed.</div>
+          <div class="dscroll" id="dscroll">
+            <div class="dstage" id="dstage">
+              <div class="ver" id="verB"><div class="host"></div><div class="ol"></div></div>
+              <div class="ver" id="verA"><div class="host"></div><div class="ol"></div></div>
+            </div>
+          </div>
+          <div class="marks" id="marks"></div>
+        </div>
+        <div class="dfoot" id="dFoot"></div>
+      </div>
+    </div>
+
+    <aside class="panel hidden" id="panel">
+      <div class="ph">BLAST RADIUS <span class="sp"></span><span class="x" id="pClose" title="Close (⌥B)">✕</span></div>
+      <div class="psum">
+        <div class="pnum" id="pNum">0</div>
+        <div id="pOf"></div>
+        <div class="pmeta" id="pMeta"></div>
+        <div class="pwarn" id="pWarn"></div>
+      </div>
+      <div class="pchips" id="pChips"></div>
+      <input class="psearch" id="pSearch" placeholder="Filter pages by URL">
+      <div class="plist" id="pList"></div>
+    </aside>
+  </div>
+  <div class="status">
+    <span>⎇ main*</span><span>⊗ 0 ⚠ 0</span><span class="sp"></span>
+    <span class="click cbr" id="sbCbr"></span>
+    <span id="sbPos">Ln 1, Col 1</span><span>Spaces: 2</span><span>UTF-8</span><span>CSS</span>
+  </div>
+</div>
+
+<div class="hover hidden" id="hover"></div>
+
+<div id="browserWrap">
+  <div class="btop"><span class="dot"></span><b>CSS Blast Radius</b><span class="muted">localhost:4317 / diff</span><span class="muted" style="margin-left:auto;font-size:12px">Same view as the VS Code tab, in your browser</span></div>
+</div>
+<script>
+// ============================================================ fake site
+const ORIGINAL = `/* components.css
+   Shared by every page on www.example.com */
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 32px;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.site-header .logo {
+  font-weight: 700;
+  font-size: 20px;
+  color: #111827;
+}
+
+.nav a {
+  margin-left: 20px;
+  color: #374151;
+}
+
+.hero {
+  padding: 64px 32px;
+  background: #eef2ff;
+  text-align: center;
+}
+
+.hero h1 {
+  font-size: 40px;
+  margin: 0 0 12px;
+  color: #1e1b4b;
+}
+
+.promo-banner {
+  margin: 24px 0;
+  padding: 16px 24px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.btn {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.btn--primary {
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.card {
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.card--featured {
+  border-color: #6366f1;
+  background: #eef2ff;
+}
+
+.price {
+  font-size: 28px;
+  font-weight: 700;
+  color: #047857;
+}
+
+.callout {
+  margin: 16px 0;
+  padding: 12px 16px;
+  border-left: 4px solid #0ea5e9;
+  background: #f0f9ff;
+}
+
+.site-footer {
+  margin-top: 48px;
+  padding: 32px;
+  background: #111827;
+  color: #9ca3af;
+}
+`;
+
+// Other stylesheets of the fake site (not editable in the mockup).
+const BASE = `
+.page { font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2937; background: #fff; container-type: inline-size; }
+.page * { box-sizing: border-box; }
+.container { max-width: 860px; margin: 0 auto; padding: 24px 32px; }
+.crumbs, .meta { color: #6b7280; font-size: 13px; margin: 0 0 8px; }
+h1 { font-size: 32px; line-height: 1.2; margin: 8px 0 12px; }
+h2 { font-size: 22px; margin: 36px 0 14px; }
+.card h3 { margin: 0 0 6px; font-size: 16px; }
+.card p { margin: 0; color: #6b7280; font-size: 13px; }
+.product { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 8px; }
+.gallery { min-height: 300px; background: linear-gradient(135deg, #e5e7eb, #f3f4f6); border-radius: 10px; }
+.hero p { max-width: 560px; margin: 0 auto 20px; color: #4338ca; }
+.btn--cta { background: #4338ca; color: #fff; }
+.site-footer .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; max-width: 860px; margin: 0 auto 16px; }
+.site-footer p { max-width: 860px; margin: 0 auto; }
+.nav a:first-child { margin-left: 0; }
+`;
+const MOBILE = `
+@container (max-width: 600px) {
+  .card-grid, .product, .site-footer .cols { grid-template-columns: 1fr; }
+  .site-header { flex-direction: column; gap: 6px; }
+  .hero { padding: 40px 20px; }
+  .container { padding: 16px 20px; }
+}`;
+
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6d2b79f5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+const R = rng(7);
+const pick = (a, r = R) => a[Math.floor(r() * a.length)];
+const W1 = ["quick", "modern", "simple", "better", "hidden", "smart", "small", "bold", "green", "remote", "daily", "honest"];
+const W2 = ["guide", "tips", "habits", "kitchen", "garden", "budget", "travel", "teams", "design", "coffee", "office", "weekend"];
+const slug = (i) => `${pick(W1)}-${pick(W2)}-${i}`;
+
+const PAGES = [];
+const mk = (url, tpl, o) => PAGES.push(Object.assign({ url, tpl, banner: false, featured: [], cta: "btn--primary" }, o));
+for (let i = 0; i < 620; i++) mk(`/blog/${slug(i)}`, "article", { banner: R() < 0.3, featured: R() < 0.4 ? [Math.floor(R() * 3)] : [] });
+for (let i = 0; i < 380; i++) mk(`/products/${pick(W1)}-${pick(["chair", "lamp", "desk", "mug", "shelf", "rug"])}-${i}`, "product", { banner: R() < 0.1, featured: R() < 0.6 ? [Math.floor(R() * 6)] : [] });
+for (let i = 0; i < 192; i++) mk(`/lp/${slug(i)}`, "landing", { banner: R() < 0.7, featured: R() < 0.8 ? [1, 4] : [], cta: R() < 0.15 ? "btn--cta" : "btn--primary" });
+for (let i = 0; i < 92; i++) mk(`/help/${pick(W2)}-${pick(["setup", "billing", "account", "faq"])}-${i}`, "help", {});
+
+// What each page contains (the captured "usage" the L0/L1 levels look at).
+for (const p of PAGES) {
+  const c = new Map(), add = (k, n = 1) => c.set(k, (c.get(k) || 0) + n);
+  const tags = new Set(["html", "body", "header", "nav", "a", "main", "footer", "h1", "p", "div", "b", "span"]);
+  const tc = { a: 4 };
+  ["site-header", "logo", "nav", "site-footer", "cols", "container"].forEach((k) => add(k));
+  if (p.tpl !== "help") { add("card-grid"); add("card", p.tpl === "article" ? 3 : 6); tags.add("h2"); tags.add("h3"); tc.h3 = p.tpl === "article" ? 3 : 6; }
+  if (p.featured.length) add("card--featured", p.featured.length);
+  if (p.banner) add("promo-banner");
+  if (p.tpl !== "landing") add("crumbs");
+  if (p.tpl === "article") add("meta");
+  if (p.tpl === "product") { ["product", "gallery", "price", "btn", "btn--primary"].forEach((k) => add(k)); tc.a += 1; }
+  if (p.tpl === "landing") { add("hero"); tags.add("section"); add("btn", 2); add(p.cta, 2); tc.a += 2; }
+  if (p.tpl === "help") add("callout", 2);
+  p.cls = c; p.tags = tags; p.tc = tc;
+}
+
+const LOREM = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua enim ad minim veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea commodo consequat".split(" ");
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+const sentence = (r, n) => cap(Array.from({ length: n }, () => pick(LOREM, r)).join(" ")) + ".";
+const titleOf = (url) => cap(url.split("/").pop().replace(/-\d+$/, "").replace(/-/g, " "));
+
+function pageHtml(p) {
+  const r = rng(hash(p.url));
+  const paras = (k) => Array.from({ length: k }, () => `<p>${sentence(r, 38 + Math.floor(r() * 20))}</p>`).join("");
+  const cards = (n) => `<div class="card-grid">${Array.from({ length: n }, (_, i) => `<div class="card${p.featured.includes(i) ? " card--featured" : ""}"><h3>${cap(pick(W1, r))} ${pick(W2, r)}</h3><p>${sentence(r, 12)}</p></div>`).join("")}</div>`;
+  const banner = p.banner ? `<div class="promo-banner"><b>Spring sale:</b> 20% off everything until Sunday.</div>` : "";
+  const header = `<header class="site-header"><span class="logo">Example</span><nav class="nav"><a>Blog</a><a>Products</a><a>Help</a><a>Contact</a></nav></header>`;
+  const footer = `<footer class="site-footer"><div class="cols"><div><b>Company</b><br>About<br>Careers</div><div><b>Support</b><br>Help center<br>Contact</div><div><b>Legal</b><br>Privacy<br>Terms</div></div><p>© 2026 Example Inc.</p></footer>`;
+  const t = titleOf(p.url);
+  let body;
+  if (p.tpl === "article") body = `<main class="container"><p class="crumbs">Blog › ${cap(pick(W2, r))}</p><h1>${t}</h1><p class="meta">By Alex Doe · 6 min read</p>${paras(3)}${banner}${paras(4)}<h2>Related posts</h2>${cards(3)}</main>`;
+  else if (p.tpl === "product") body = `<main class="container"><p class="crumbs">Products › ${cap(pick(W2, r))}</p><div class="product"><div class="gallery"></div><div><h1>${t}</h1><p class="price">$${49 + Math.floor(r() * 300)}</p><p>${sentence(r, 30)}</p><a class="btn btn--primary">Add to cart</a></div></div>${paras(2)}${banner}<h2>You may also like</h2>${cards(6)}</main>`;
+  else if (p.tpl === "landing") body = `<section class="hero"><h1>${t}</h1><p>${sentence(r, 18)}</p><a class="btn ${p.cta}">Get started</a></section><main class="container">${banner}<h2>Why teams choose us</h2>${cards(6)}${paras(3)}<h2>Ready?</h2><p><a class="btn ${p.cta}">Start free trial</a></p></main>`;
+  else body = `<main class="container"><p class="crumbs">Help › ${cap(pick(W2, r))}</p><h1>${t}</h1>${paras(2)}<div class="callout"><b>Tip:</b> ${sentence(r, 16)}</div>${paras(3)}<div class="callout"><b>Note:</b> ${sentence(r, 14)}</div>${paras(2)}</main>`;
+  return header + body + footer;
+}
+
+// ============================================================ CSS parsing + analysis
+function lineIndex(t) { const a = new Int32Array(t.length + 1); let l = 0; for (let i = 0; i < t.length; i++) { a[i] = l; if (t[i] === "\n") l++; } a[t.length] = l; return a; }
+function normBody(b) {
+  return b.split(";").map((d) => d.trim()).filter(Boolean).map((d) => {
+    const k = d.indexOf(":");
+    return k < 0 ? d.replace(/\s+/g, " ") : d.slice(0, k).trim().toLowerCase() + ": " + d.slice(k + 1).trim().replace(/\s+/g, " ");
+  });
+}
+function parseCss(text) {
+  const t = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  if (t.includes("/*")) return { ok: false };
+  const L = lineIndex(t), rules = [];
+  let depth = 0, start = 0, selStart = 0, bodyStart = 0, isAt = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === "{") {
+      if (depth === 0) {
+        const seg = t.slice(start, i);
+        selStart = start + (seg.length - seg.trimStart().length);
+        isAt = seg.trim().startsWith("@");
+        bodyStart = i + 1;
+      }
+      depth++;
+    } else if (ch === "}") {
+      if (depth === 0) return { ok: false };
+      depth--;
+      if (depth === 0) {
+        const sel = t.slice(selStart, bodyStart - 1).trim().replace(/\s+/g, " ");
+        if (!isAt && sel) {
+          const decls = normBody(t.slice(bodyStart, i));
+          rules.push({ sel, decls, norm: decls.join("; "), startLine: L[selStart], endLine: L[i] });
+        }
+        start = i + 1;
+      }
+    }
+  }
+  if (depth !== 0) return { ok: false };
+  return { ok: true, rules };
+}
+const ORIG = parseCss(ORIGINAL).rules;
+
+function compileSel(sel) {
+  return sel.split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
+    const clean = s.replace(/::?[\w-]+(\([^)]*\))?/g, "").replace(/\[[^\]]*\]/g, "").trim();
+    const classes = [...clean.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+    const tags = [...clean.matchAll(/(?:^|[\s>+~])([a-z][\w-]*)/gi)].map((m) => m[1].toLowerCase());
+    const comps = clean.split(/[\s>+~]+/).filter(Boolean);
+    const last = comps[comps.length - 1] || "";
+    const lc = (last.match(/\.[\w-]+/g) || []).pop();
+    const lt = (last.match(/^[a-z][\w-]*/i) || [])[0];
+    return { classes, tags, id: /#[\w-]/.test(clean), lastClass: lc && lc.slice(1), lastTag: lt && lt.toLowerCase(), all: clean === "*" || (!clean && /:root/.test(s)) };
+  });
+}
+const matchCache = new Map();
+// page index -> number of elements the selector reaches on that page
+function matchSel(sel) {
+  if (matchCache.has(sel)) return matchCache.get(sel);
+  const parts = compileSel(sel), out = new Map();
+  PAGES.forEach((p, i) => {
+    let els = 0;
+    for (const q of parts) {
+      if (q.all) { els = Math.max(els, 1); continue; }
+      if (q.id || (!q.classes.length && !q.tags.length)) continue;
+      if (!q.classes.every((c) => p.cls.has(c)) || !q.tags.every((t) => p.tags.has(t))) continue;
+      els = Math.max(els, q.lastClass ? p.cls.get(q.lastClass) : q.lastTag ? (p.tc[q.lastTag] || 1) : 1);
+    }
+    if (els) out.set(i, els);
+  });
+  matchCache.set(sel, out);
+  return out;
+}
+
+function describe(o, c) {
+  const m = (r) => new Map(r.decls.map((d) => { const k = d.indexOf(":"); return k < 0 ? [d, ""] : [d.slice(0, k), d.slice(k + 2)]; }));
+  const a = m(o), b = m(c), out = [];
+  for (const [k, v] of b) if (!a.has(k)) out.push(`+ ${k}: ${v}`); else if (a.get(k) !== v) out.push(`${k}: ${a.get(k)} → ${v}`);
+  for (const [k, v] of a) if (!b.has(k)) out.push(`− ${k}: ${v}`);
+  return out;
+}
+
+function analyze(rules) {
+  const changes = [], usedO = new Set(), loneC = [];
+  for (const r of rules) {
+    const o = ORIG.find((x) => !usedO.has(x) && x.sel === r.sel);
+    if (o) { usedO.add(o); if (o.norm !== r.norm) changes.push({ kind: "changed", sel: r.sel, oldSel: r.sel, rule: r, what: describe(o, r) }); }
+    else loneC.push(r);
+  }
+  const loneO = ORIG.filter((o) => !usedO.has(o));
+  for (const r of loneC) {
+    const o = loneO.shift();
+    if (o) changes.push({ kind: "renamed", sel: r.sel, oldSel: o.sel, rule: r, what: [`selector: ${o.sel} → ${r.sel}`, ...describe(o, r)] });
+    else changes.push({ kind: "added", sel: r.sel, oldSel: null, rule: r, what: ["new rule"] });
+  }
+  for (const o of loneO) changes.push({ kind: "removed", sel: null, oldSel: o.sel, rule: null, what: ["rule deleted"] });
+
+  const per = new Map(), byRule = new Map();
+  changes.forEach((c, k) => {
+    c.id = "c" + k;
+    c.label = c.kind === "renamed" ? `${c.oldSel} → ${c.sel}` : c.kind === "removed" ? `− ${c.oldSel}` : c.kind === "added" ? `+ ${c.sel}` : c.sel;
+    const now = c.sel ? matchSel(c.sel) : new Map(), was = c.oldSel ? matchSel(c.oldSel) : new Map();
+    c.pages = new Set([...now.keys(), ...was.keys()]);
+    c.lost = new Set([...was.keys()].filter((i) => !now.has(i)));
+    for (const i of c.pages) {
+      let e = per.get(i);
+      if (!e) per.set(i, (e = { ch: new Set(), labels: new Set(), els: 0, lost: [] }));
+      e.ch.add(c.id); e.labels.add(now.has(i) ? c.sel : c.oldSel);
+      e.els += Math.max(now.get(i) || 0, was.get(i) || 0);
+      if (c.lost.has(i)) e.lost.push(c.oldSel);
+    }
+    if (c.rule) byRule.set(c.rule, c);
+  });
+  let lostTotal = 0;
+  for (const e of per.values()) if (e.lost.length) lostTotal++;
+  return { changes, per, byRule, total: per.size, lostTotal };
+}
+
+// ============================================================ UI state
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (n) => n.toLocaleString("en-US");
+const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? "" : "s"}`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const LH = 19, PADTOP = 4;
+
+const S = { good: { text: ORIGINAL, rules: ORIG }, an: analyze(ORIG), ms: 0, incomplete: false, hl: [], line: 0, col: 0,
+  panel: false, filter: "all", search: "", limit: 100, tab: "editor", diffPage: null, diffDirty: true };
+const ta = $("#ta"), mirror = $("#mirror"), gutter = $("#gutter"), scroller = $("#scroller");
+
+// ------------------------------------------------------------ syntax colouring
+function highlight(text) {
+  const lines = [];
+  let cur = [], depth = 0, mode = "s", inC = false;
+  const push = (cls, ch) => { const l = cur[cur.length - 1]; if (l && l[0] === cls) l[1] += ch; else cur.push([cls, ch]); };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\n") { lines.push(cur); cur = []; continue; }
+    if (inC) { push("c", ch); if (ch === "/" && text[i - 1] === "*") inC = false; continue; }
+    if (ch === "/" && text[i + 1] === "*") { inC = true; push("c", ch); continue; }
+    if (ch === "{") { depth++; mode = "p"; push("n", ch); continue; }
+    if (ch === "}") { depth = Math.max(0, depth - 1); mode = depth ? "p" : "s"; push("n", ch); continue; }
+    if (depth === 0) { push("s", ch); continue; }
+    if (mode === "p") { if (ch === ":") { push("n", ch); mode = "v"; } else push(ch === ";" ? "n" : "p", ch); continue; }
+    if (ch === ";") { push("n", ch); mode = "p"; } else push("v", ch);
+  }
+  lines.push(cur);
+  return lines.map((segs) => segs.map(([c, s]) => `<span class="t${c}">${esc(s)}</span>`).join(""));
+}
+
+// ------------------------------------------------------------ analysis on every keystroke
+function onInput() {
+  const t0 = performance.now();
+  const text = ta.value;
+  const parsed = parseCss(text);
+  S.incomplete = !parsed.ok;
+  if (parsed.ok) { S.good = { text, rules: parsed.rules }; S.an = analyze(parsed.rules); S.diffDirty = true; }
+  S.ms = performance.now() - t0;
+  S.hl = highlight(text);
+  ta.style.height = S.hl.length * LH + PADTOP + "px";
+  hideHover();
+  updateCursor();
+  renderStatus();
+  renderTabs();
+  renderPanel();
+}
+
+function updateCursor() {
+  const pos = ta.selectionStart, before = ta.value.slice(0, pos);
+  S.line = before.split("\n").length - 1;
+  S.col = pos - before.lastIndexOf("\n");
+  renderEditor();
+  $("#sbPos").textContent = `Ln ${S.line + 1}, Col ${S.col}`;
+  const r = ruleAt(S.line);
+  $("#crumbSel").textContent = r ? "› " + r.sel : "";
+}
+
+const ruleAt = (line) => S.good.rules.find((r) => line >= r.startLine && line <= r.endLine);
+
+function ghostFor(line) {
+  const r = ruleAt(line), c = r && S.an.byRule.get(r);
+  if (!c) return "";
+  const n = c.pages.size, lost = c.lost.size, many = S.an.changes.length > 1;
+  let html, warn = false;
+  if (!n) html = c.kind === "added" ? "no page uses this yet" : "reaches no page";
+  else if (lost && lost === n && !matchSel(c.sel).size) { html = `matches no page now · <b>${fmt(lost)}</b> lose this style ⚠`; warn = true; }
+  else { html = `<b>${fmt(n)}</b> ${n === 1 ? "page" : "pages"}`; if (lost) { html += ` · ${fmt(lost)} lose this style ⚠`; warn = true; } }
+  if (many) html += `  (${fmt(S.an.total)} total)`;
+  if (S.incomplete) html += " · finish typing…";
+  return `<span class="ghost${warn ? " warn" : ""}${S.incomplete ? " stale" : ""}">◀ ${html}</span>`;
+}
+
+function renderEditor() {
+  const mod = new Set();
+  for (const c of S.an.changes) if (c.rule) for (let l = c.rule.startLine; l <= c.rule.endLine; l++) mod.add(l);
+  const ghost = ghostFor(S.line);
+  mirror.innerHTML = S.hl.map((h, i) => `<div class="ln${i === S.line ? " cur" : ""}">${h}${i === S.line ? ghost : ""}</div>`).join("");
+  gutter.innerHTML = S.hl.map((_, i) => `<div class="${i === S.line ? "cur " : ""}${mod.has(i) ? "mod" : ""}">${i + 1}</div>`).join("");
+  const y = PADTOP + S.line * LH;
+  if (y < scroller.scrollTop) scroller.scrollTop = y - LH;
+  else if (y + LH > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = y + 3 * LH - scroller.clientHeight;
+}
+
+function renderStatus() {
+  const A = S.an, el = $("#sbCbr");
+  el.className = "click cbr" + (A.lostTotal ? " warn" : A.total ? " on" : "");
+  el.textContent = A.total ? `◎ ${plural(A.total, "page")}${A.lostTotal ? " ⚠" : ""}` : "◎ No pages affected";
+  el.title = A.total ? `CSS Blast Radius: your unsaved edits reach ${fmt(A.total)} of ${fmt(PAGES.length)} pages${A.lostTotal ? `; ${fmt(A.lostTotal)} lose a style` : ""}. Click to show them (⌥B).` : "CSS Blast Radius: no edits yet. Click to open the page list (⌥B).";
+  $("#treeMod").textContent = ta.value !== ORIGINAL ? "M" : "";
+}
+
+// ------------------------------------------------------------ hover
+let hvTimer, hideTimer, hvRule = null;
+const hover = $("#hover");
+function showHover(c, x, y) {
+  hvRule = c.rule;
+  const lost = c.lost.size;
+  hover.innerHTML = `<div class="hv-h"><code>${esc(c.label)}</code> <span class="muted">${c.kind === "changed" ? "changed" : c.kind}</span></div>
+    <div class="hv-d">${c.what.slice(0, 3).map(esc).join("<br>")}</div>
+    <div class="hv-n"><b>${plural(c.pages.size, "page")}</b> affected${S.an.changes.length > 1 ? ` <span class="muted">(${fmt(S.an.total)} by all your edits)</span>` : ""}${lost ? `<span class="w">⚠ ${plural(lost, "page")} lose this style</span>` : ""}</div>
+    <div class="hv-l"><a data-show="${c.id}">Show pages</a><span class="kbd">⌥B</span></div>`;
+  hover.classList.remove("hidden");
+  hover.style.left = Math.min(x, innerWidth - 380) + "px";
+  hover.style.top = Math.min(y + 4, innerHeight - hover.offsetHeight - 30) + "px";
+}
+function hideHover() { clearTimeout(hvTimer); hover.classList.add("hidden"); hvRule = null; }
+ta.addEventListener("mousemove", (e) => {
+  const r = ta.getBoundingClientRect();
+  const line = Math.floor((e.clientY - r.top - PADTOP) / LH);
+  const rule = ruleAt(line), c = rule && S.an.byRule.get(rule);
+  if (!c) { clearTimeout(hvTimer); hideTimer = setTimeout(hideHover, 250); return; }
+  clearTimeout(hideTimer);
+  if (hvRule === rule) return;
+  clearTimeout(hvTimer);
+  hvTimer = setTimeout(() => showHover(c, e.clientX, r.top + PADTOP + (line + 1) * LH), 350);
+});
+ta.addEventListener("mouseleave", () => { clearTimeout(hvTimer); hideTimer = setTimeout(hideHover, 250); });
+hover.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+hover.addEventListener("mouseleave", () => { hideTimer = setTimeout(hideHover, 250); });
+
+// ------------------------------------------------------------ tabs
+function renderTabs() {
+  const dirty = ta.value !== ORIGINAL;
+  let h = `<div class="tab${S.tab === "editor" ? " on" : ""}" data-tab="editor"><span class="ic css">#</span>components.css<span class="x">${dirty ? "●" : ""}</span></div>`;
+  if (S.diffPage != null) h += `<div class="tab${S.tab === "diff" ? " on" : ""}" data-tab="diff"><span class="ic">◎</span><i>${esc(PAGES[S.diffPage].url)}</i><span class="x" data-closediff>✕</span></div>`;
+  $("#tabs").innerHTML = h;
+}
+function showTab(tab) {
+  S.tab = tab;
+  $("#paneEditor").classList.toggle("hidden", tab !== "editor");
+  $("#paneDiff").classList.toggle("hidden", tab !== "diff");
+  renderTabs();
+  if (tab === "editor") { ta.focus(); updateCursor(); }
+  else { ta.blur(); hideHover(); if (S.diffDirty || D.page !== S.diffPage) renderDiff(); }
+}
+
+// ------------------------------------------------------------ side panel (page list)
+function togglePanel(force) {
+  S.panel = force ?? !S.panel;
+  $("#panel").classList.toggle("hidden", !S.panel);
+  renderPanel();
+  if (S.tab === "diff") requestAnimationFrame(renderDiff);
+}
+function renderPanel() {
+  if (!S.panel) return;
+  const A = S.an;
+  if (S.filter !== "all" && !A.changes.some((c) => c.id === S.filter)) S.filter = "all";
+  $("#pNum").textContent = fmt(A.total);
+  $("#pOf").innerHTML = `${A.total === 1 ? "page" : "pages"} affected <span class="muted">of ${fmt(PAGES.length)}</span>`;
+  $("#pMeta").textContent = A.changes.length ? `${plural(A.changes.length, "edit")} in components.css · checked in ${S.ms.toFixed(1)} ms${S.incomplete ? " · waiting for valid CSS" : ""}` : "";
+  $("#pWarn").textContent = A.lostTotal ? `⚠ ${plural(A.lostTotal, "page")} lose a style they had` : "";
+  $("#pChips").innerHTML = A.changes.length > 1 ? [`<button data-filter="all" class="${S.filter === "all" ? "on" : ""}">All<span class="n">${fmt(A.total)}</span></button>`,
+    ...A.changes.map((c) => `<button data-filter="${c.id}" class="${S.filter === c.id ? "on" : ""}">${esc(c.label)}<span class="n">${fmt(c.pages.size)}</span></button>`)].join("") : "";
+  const list = $("#pList");
+  if (!A.changes.length) { list.innerHTML = `<div class="pempty">Edit a CSS rule. The pages it reaches show up here while you type.</div>`; return; }
+  let rows = [...A.per.entries()];
+  if (S.filter !== "all") rows = rows.filter(([, e]) => e.ch.has(S.filter));
+  if (S.search) rows = rows.filter(([i]) => PAGES[i].url.includes(S.search));
+  rows.sort((x, y) => (y[1].lost.length > 0) - (x[1].lost.length > 0) || y[1].els - x[1].els || PAGES[x[0]].url.localeCompare(PAGES[y[0]].url));
+  if (!rows.length) { list.innerHTML = `<div class="pempty">No affected page matches.</div>`; return; }
+  const top = list.scrollTop;
+  list.innerHTML = rows.slice(0, S.limit).map(([i, e]) => `<div class="row${i === S.diffPage ? " sel" : ""}" data-p="${i}">
+      <div class="u">${esc(PAGES[i].url)}</div>
+      <div class="m">${[...e.labels].map(esc).join(" · ")} · ${plural(e.els, "element")}</div>
+      ${e.lost.length ? `<div class="w">⚠ loses ${e.lost.map(esc).join(", ")}</div>` : ""}</div>`).join("")
+    + (rows.length > S.limit ? `<button class="more" id="pMore">Show ${fmt(Math.min(100, rows.length - S.limit))} more of ${fmt(rows.length - S.limit)}</button>` : "");
+  list.scrollTop = top;
+}
+
+// ============================================================ visual diff (full page, before/after)
+const D = { v: "after", outlines: true, device: "desktop", zones: [], zi: -1, boxes: [], page: null, stageH: 0 };
+const SKIP = new Set(["width", "height", "inline-size", "block-size", "perspective-origin", "transform-origin"]);
+const afterCss = () => S.good.text;
+
+function mount(ver, html, css) {
+  const host = ver.querySelector(".host");
+  const root = host.shadowRoot || host.attachShadow({ mode: "open" });
+  root.innerHTML = `<style>${BASE}\n${css}\n${MOBILE}</style><div class="page">${html}</div>`;
+  return root;
+}
+
+function openDiff(i) {
+  S.diffPage = i; D.v = "after"; D.page = null;
+  renderPanel();
+  showTab("diff");
+}
+
+function renderDiff() {
+  const p = PAGES[S.diffPage];
+  if (!p) return;
+  D.page = S.diffPage; S.diffDirty = false;
+  $("#dUrl").textContent = "https://www.example.com" + p.url;
+  $("#dUrl").title = $("#dUrl").textContent;
+  const stage = $("#dstage"), vb = $("#verB"), va = $("#verA");
+  stage.style.width = D.device === "mobile" ? "390px" : "";
+  const html = pageHtml(p);
+  vb.classList.remove("hide"); va.classList.remove("hide");
+  const rb = mount(vb, html, ORIGINAL), ra = mount(va, html, afterCss());
+  const eb = [...rb.querySelectorAll(".page *")], ea = [...ra.querySelectorAll(".page *")];
+  const idx = new Map(ea.map((e, i) => [e, i]));
+  const changed = new Set();
+  for (let i = 0; i < ea.length; i++) {
+    const sb = getComputedStyle(eb[i]), sa = getComputedStyle(ea[i]);
+    for (let k = 0; k < sa.length; k++) {
+      const pn = sa[k];
+      if (!SKIP.has(pn) && sa.getPropertyValue(pn) !== sb.getPropertyValue(pn)) { changed.add(i); break; }
+    }
+  }
+  // Outline only the outermost changed element (a colour change on a footer also "changes" every child).
+  const outer = [...changed].filter((i) => { for (let e = ea[i].parentElement; e && !e.classList.contains("page"); e = e.parentElement) if (changed.has(idx.get(e))) return false; return true; });
+  const rel = (el, ver) => { const r = el.getBoundingClientRect(), v = ver.getBoundingClientRect(); return r.width || r.height ? { x: r.left - v.left, y: r.top - v.top, w: r.width, h: r.height } : null; };
+  D.boxes = outer.map((i) => ({ b: rel(eb[i], vb), a: rel(ea[i], va) }));
+  D.stageH = Math.max(rb.querySelector(".page").offsetHeight, ra.querySelector(".page").offsetHeight);
+  stage.style.height = D.stageH + "px";
+  for (const [ver, key] of [[vb, "b"], [va, "a"]]) {
+    ver.querySelector(".ol").innerHTML = D.boxes.map((bx, j) => { const r = bx[key]; return r ? `<i data-j="${j}" style="left:${r.x - 3}px;top:${r.y - 3}px;width:${r.w + 6}px;height:${r.h + 6}px"></i>` : ""; }).join("");
+  }
+  const spans = D.boxes.map((bx, j) => { const rs = [bx.a, bx.b].filter(Boolean); return { top: Math.min(...rs.map((r) => r.y)), bottom: Math.max(...rs.map((r) => r.y + r.h)), js: [j] }; })
+    .filter((z) => isFinite(z.top)).sort((x, y) => x.top - y.top);
+  D.zones = [];
+  for (const z of spans) { const l = D.zones[D.zones.length - 1]; if (l && z.top <= l.bottom + 40) { l.bottom = Math.max(l.bottom, z.bottom); l.js.push(...z.js); } else D.zones.push({ ...z }); }
+  D.zi = -1;
+  $("#dEmpty").classList.toggle("hidden", D.zones.length > 0);
+  $("#dFoot").innerHTML = `Drawn from the stored copy of this page (captured 2 hours ago) with your current, unsaved CSS. <a id="dLive">Check on the live page</a>`;
+  applyView(false);
+  drawMarks();
+  if (D.zones.length) jump(1, true); else { $("#dscroll").scrollTop = 0; updatePos(); }
+}
+
+function applyView(pop = true) {
+  $("#verB").classList.toggle("hide", D.v !== "before");
+  $("#verA").classList.toggle("hide", D.v !== "after");
+  $("#dstage").classList.toggle("no-ol", !D.outlines);
+  $("#dOutl").checked = D.outlines;
+  document.querySelectorAll(".seg button").forEach((b) => { b.classList.toggle("on", b.dataset.v === D.v); b.classList.toggle("b", b.dataset.v === "before"); });
+  const badge = $("#vbadge");
+  badge.className = "vbadge" + (D.v === "before" ? " b" : "");
+  badge.innerHTML = `${D.v === "before" ? "BEFORE" : "AFTER"}<span>Space to flip</span>`;
+  if (pop) { void badge.offsetWidth; badge.classList.add("pop"); }
+}
+function flip() { D.v = D.v === "after" ? "before" : "after"; applyView(); }
+
+function drawMarks() {
+  const strip = $("#marks"), H = strip.clientHeight, total = D.stageH + 32;
+  strip.innerHTML = D.zones.map((z, k) => `<i data-zone="${k}" style="top:${((16 + z.top) / total) * H}px;height:${Math.max(4, ((z.bottom - z.top) / total) * H)}px" title="Change ${k + 1}"></i>`).join("") + `<b id="vp"></b>`;
+  drawViewport();
+}
+function drawViewport() {
+  const sc = $("#dscroll"), vp = $("#vp");
+  if (!vp) return;
+  const H = $("#marks").clientHeight;
+  vp.style.top = (sc.scrollTop / sc.scrollHeight) * H + "px";
+  vp.style.height = (sc.clientHeight / sc.scrollHeight) * H + "px";
+}
+function jump(dir, initial) {
+  if (!D.zones.length) return;
+  const n = D.zones.length;
+  D.zi = initial ? 0 : (D.zi + dir + n) % n;
+  const z = D.zones[D.zi], sc = $("#dscroll");
+  const fits = 16 + z.bottom < sc.clientHeight - 20;
+  const y = initial && fits ? 0 : 16 + z.top - Math.max(40, (sc.clientHeight - (z.bottom - z.top)) / 3);
+  sc.scrollTo({ top: Math.max(0, y), behavior: initial ? "auto" : "smooth" });
+  document.querySelectorAll(".ol i").forEach((o) => {
+    o.classList.remove("flash");
+    if (z.js.includes(+o.dataset.j)) { void o.offsetWidth; o.classList.add("flash"); }
+  });
+  updatePos();
+}
+function updatePos() {
+  $("#dPos").textContent = D.zones.length ? (D.zi < 0 ? `${plural(D.zones.length, "change")}` : `Change ${D.zi + 1} of ${D.zones.length}`) : "No visible change";
+}
+$("#dscroll").addEventListener("scroll", drawViewport);
+
+// ------------------------------------------------------------ "Open in browser"
+const BROWSER = location.hash === "#browser";
+function openInBrowser() {
+  try { localStorage.setItem("cbr-mock-diff", JSON.stringify({ url: PAGES[S.diffPage].url, css: afterCss(), v: D.v, device: D.device })); } catch {}
+  window.open(location.pathname + "#browser", "_blank");
+}
+function initBrowser() {
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem("cbr-mock-diff") || "null"); } catch {}
+  const css = d?.css || ORIGINAL.replace("padding: 16px 24px;", "padding: 32px 40px;");
+  const i = Math.max(0, PAGES.findIndex((p) => (d ? p.url === d.url : p.banner)));
+  const parsed = parseCss(css);
+  if (parsed.ok) S.good = { text: css, rules: parsed.rules };
+  D.v = d?.v || "after"; D.device = d?.device || "desktop";
+  $("#dDevice").value = D.device;
+  document.body.classList.add("browser");
+  $("#browserWrap").appendChild($("#paneDiff"));
+  $("#paneDiff").classList.remove("hidden");
+  $("#dBrowser").classList.add("hidden");
+  S.diffPage = i; S.tab = "diff";
+  document.title = "Diff · " + PAGES[i].url + " — CSS Blast Radius";
+  renderDiff();
+}
+
+// ============================================================ events
+ta.addEventListener("input", onInput);
+for (const ev of ["keyup", "mouseup", "focus", "select"]) ta.addEventListener(ev, () => requestAnimationFrame(updateCursor));
+document.addEventListener("selectionchange", () => { if (document.activeElement === ta) requestAnimationFrame(updateCursor); });
+ta.addEventListener("keydown", (e) => {
+  hideHover();
+  if (e.key === "Tab") { e.preventDefault(); ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end"); onInput(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.altKey && e.code === "KeyB" && !BROWSER) { e.preventDefault(); togglePanel(); return; }
+  if (S.tab !== "diff") return;
+  if (e.target.matches && e.target.matches("input[type=text], input:not([type]), textarea, select")) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === "Space") { e.preventDefault(); flip(); }
+  else if (e.key === "n" || e.key === "N") { e.preventDefault(); jump(e.shiftKey ? -1 : 1); }
+  else if (e.key === "o" || e.key === "O") { D.outlines = !D.outlines; applyView(false); }
+});
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-tab], [data-closediff], [data-show], [data-p], [data-filter], [data-v], [data-jump], [data-zone], [data-demo], #pMore, #pClose, #sbCbr, #actCbr, #dBrowser, #dLive");
+  if (!t) return;
+  if (t.matches("[data-closediff]")) { e.stopPropagation(); S.diffPage = null; D.page = null; renderPanel(); showTab("editor"); }
+  else if (t.dataset.tab) showTab(t.dataset.tab);
+  else if (t.dataset.show) { S.filter = t.dataset.show; S.limit = 100; hideHover(); togglePanel(true); }
+  else if (t.dataset.p) openDiff(+t.dataset.p);
+  else if (t.dataset.filter) { S.filter = t.dataset.filter; S.limit = 100; renderPanel(); }
+  else if (t.dataset.v) { D.v = t.dataset.v; applyView(); }
+  else if (t.dataset.jump) jump(+t.dataset.jump);
+  else if (t.dataset.zone) { D.zi = +t.dataset.zone - 1; jump(1); }
+  else if (t.dataset.demo) demo(t.dataset.demo);
+  else if (t.id === "pMore") { S.limit += 100; renderPanel(); }
+  else if (t.id === "pClose" || t.id === "sbCbr" || t.id === "actCbr") togglePanel();
+  else if (t.id === "dBrowser") openInBrowser();
+  else if (t.id === "dLive") {
+    const f = $("#dFoot");
+    f.innerHTML = `<span class="spin"></span> Loading the live page with your CSS…`;
+    setTimeout(() => { if (S.tab === "diff") f.innerHTML = `✓ The live page shows the same change. <span class="muted">(Checked just now, 1.4 s)</span>`; }, 1400);
+  }
+  if (t.matches("button")) t.blur();
+});
+$("#pSearch").addEventListener("input", (e) => { S.search = e.target.value.trim(); S.limit = 100; renderPanel(); });
+$("#dOutl").addEventListener("change", (e) => { D.outlines = e.target.checked; applyView(false); e.target.blur(); });
+$("#dDevice").addEventListener("change", (e) => { D.device = e.target.value; e.target.blur(); renderDiff(); });
+let rsz;
+addEventListener("resize", () => { clearTimeout(rsz); rsz = setTimeout(() => { if (S.tab === "diff") renderDiff(); }, 150); });
+
+// ------------------------------------------------------------ guided demos (types like a person)
+let typing = 0;
+async function typeAt(ruleSel, find, text) {
+  const run = ++typing;
+  if (S.tab !== "editor") showTab("editor");
+  const v = ta.value, ri = v.indexOf(ruleSel + " {"), at = ri < 0 ? -1 : v.indexOf(find, ri);
+  if (at < 0) { ta.focus(); return; }
+  ta.focus();
+  ta.setSelectionRange(at, at + find.length);
+  updateCursor();
+  await sleep(500);
+  for (const ch of text) {
+    if (run !== typing) return;
+    ta.setRangeText(ch, ta.selectionStart, ta.selectionEnd, "end");
+    onInput();
+    await sleep(110 + Math.random() * 90);
+  }
+}
+function demo(kind) {
+  if (kind === "reset") { typing++; ta.value = ORIGINAL; onInput(); ta.focus(); ta.setSelectionRange(0, 0); updateCursor(); return; }
+  if (kind === "banner") typeAt(".promo-banner", "16px 24px", "32px 40px");
+  if (kind === "typo") typeAt(".card--featured", "featured", "featurd");
+  if (kind === "btn") typeAt(".btn--primary", "#4f46e5", "#dc2626");
+}
+
+// ------------------------------------------------------------ start
+if (BROWSER) initBrowser();
+else {
+  ta.value = ORIGINAL;
+  onInput();
+  ta.focus();
+  ta.setSelectionRange(0, 0);
+  updateCursor();
+}
+</script>
+</body>
+</html>

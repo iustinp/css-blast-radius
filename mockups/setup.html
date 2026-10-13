@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSS Blast Radius — setup mockup</title>
+<style>
+  :root { --bg: #f6f8fa; --panel: #fff; --line: #d0d7de; --line-soft: #eaeef2; --text: #1f2328; --muted: #656d76;
+    --accent: #0969da; --accent-soft: #ddf4ff; --ok: #1a7f37; --ok-soft: #dafbe1; --warn: #9a6700; --warn-soft: #fff8c5;
+    --bad: #cf222e; --bad-soft: #ffebe9; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); background: var(--bg); }
+  button { font: inherit; cursor: pointer; }
+  input, select, textarea { font: inherit; color: inherit; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a:hover { text-decoration: underline; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+
+  header.top { background: #1f2328; color: #e6edf3; display: flex; align-items: center; gap: 14px; padding: 0 24px; height: 52px; }
+  .brand { font-weight: 700; display: flex; gap: 10px; align-items: center; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: #ff7b72; box-shadow: 0 0 0 4px #ff7b7233, 0 0 0 8px #ff7b7218; }
+  header.top .live { color: #3fb950; font-size: 13px; }
+  header.top .sp { flex: 1; }
+  header.top a { color: #9ecbff; font-size: 13px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 24px 80px; }
+
+  .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 5px 12px; color: var(--text); white-space: nowrap; }
+  .btn:hover { background: #f3f4f6; }
+  .btn.primary { background: #1f883d; border-color: #1a7f37; color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: #1a7f37; }
+  .btn.danger { color: var(--bad); }
+  .btn.small { padding: 2px 8px; font-size: 12.5px; }
+  .btn.link { border: 0; background: none; color: var(--accent); padding: 0; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  input[type=text], input[type=url], textarea, select { border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; background: #fff; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .card + .card { margin-top: 16px; }
+  .card-h { padding: 12px 16px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .card-h h2 { font-size: 15px; margin: 0; }
+  .card-b { padding: 16px; }
+  .sp { flex: 1; }
+
+  .site { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; padding: 12px 16px; }
+  .site .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; display: block; }
+  .form { display: grid; grid-template-columns: 190px 1fr; gap: 14px 20px; align-items: start; padding: 16px; border-top: 1px solid var(--line-soft); }
+  .form .lab { font-weight: 600; padding-top: 5px; }
+  .form .hint { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+  .map-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; background: #fff; cursor: pointer; user-select: none; }
+  .chip.on { background: var(--accent-soft); border-color: #54aeff; color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 12px; border-top: 1px solid var(--line-soft); vertical-align: middle; }
+  th { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; border-top: 0; background: #fafbfc; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.actions { white-space: nowrap; text-align: right; }
+  tr.paused td { color: var(--muted); }
+  .gname { font-weight: 600; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; background: var(--line-soft); color: var(--muted); white-space: nowrap; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.blue { background: var(--accent-soft); color: var(--accent); }
+  .totals { display: flex; gap: 24px; padding: 10px 16px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+
+  .switch { position: relative; width: 36px; height: 20px; display: inline-block; vertical-align: middle; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: #afb8c1; border-radius: 20px; transition: .2s; cursor: pointer; }
+  .switch span::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + span { background: #1f883d; }
+  .switch input:checked + span::before { transform: translateX(16px); }
+  .progress { height: 6px; background: var(--line-soft); border-radius: 3px; overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; margin-right: 6px; }
+  .progress i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .back { display: inline-block; margin-bottom: 12px; }
+  .ghead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .ghead h1 { font-size: 22px; margin: 0; }
+  .filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .fbtn { border: 1px solid var(--line); background: #fff; border-radius: 14px; padding: 1px 10px; font-size: 13px; }
+  .fbtn.on { background: var(--accent-soft); border-color: #54aeff; color: var(--accent); }
+  .reason { color: var(--bad); font-size: 12px; }
+  .url { word-break: break-all; }
+
+  .backdrop { position: fixed; inset: 0; background: #1f232866; display: none; align-items: flex-start; justify-content: center; padding-top: 8vh; z-index: 30; }
+  .backdrop.open { display: flex; }
+  .modal { width: min(620px, 94vw); background: #fff; border-radius: 10px; box-shadow: 0 12px 40px #1f232840; overflow: hidden; }
+  .modal .mh { padding: 14px 18px; border-bottom: 1px solid var(--line); font-weight: 600; display: flex; justify-content: space-between; }
+  .modal .mb { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .modal .mf { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: none; padding: 8px 12px; border-bottom: 2px solid transparent; color: var(--muted); }
+  .tabs button.on { border-color: #fd8c73; color: var(--text); font-weight: 600; }
+  label.f { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 13px; }
+  label.f .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 8px; padding: 22px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .preview { background: var(--bg); border: 1px solid var(--line-soft); border-radius: 6px; padding: 10px 12px; font-size: 13px; }
+  .preview ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(120px); background: #1f2328; color: #fff; padding: 10px 16px; border-radius: 8px; max-width: 600px; transition: transform .25s; z-index: 40; display: flex; gap: 12px; align-items: center; }
+  .toast.show { transform: translateX(-50%); }
+  .toast .btn { background: #ffffff1a; color: #fff; border-color: #ffffff33; }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand"><span class="dot"></span>CSS Blast Radius</span>
+  <span class="live">● Running on this computer · localhost:4317</span>
+  <span class="sp"></span>
+  <a href="vscode.html" target="_blank">VS Code mockup ↗</a>
+</header>
+<main id="view"></main>
+
+<div class="backdrop" id="modal">
+  <div class="modal">
+    <div class="mh"><span id="mTitle">Add a page group</span><button class="btn link" data-close>✕</button></div>
+    <div class="mb">
+      <label class="f" id="gNameWrap">Group name<input type="text" id="gName" placeholder="e.g. Blog"></label>
+      <div class="tabs" id="srcTabs">
+        <button data-src="sitemap" class="on">Sitemap</button>
+        <button data-src="csv">CSV file</button>
+        <button data-src="paste">Paste URLs</button>
+      </div>
+      <div data-pane="sitemap">
+        <label class="f">Sitemap URL<input type="url" id="smUrl" value="https://www.example.com/sitemap.xml"></label>
+        <label class="f" style="margin-top:10px">Only pages matching <span class="hint">Optional. Use * as a wildcard, e.g. /stories/*</span><input type="text" id="smFilter" placeholder="/stories/*"></label>
+        <div style="margin-top:10px"><button class="btn" id="smPreview">Read sitemap</button></div>
+        <p class="muted small" style="margin:8px 0 0">The sitemap is read again on every rescan: new pages join the group, removed pages leave it.</p>
+      </div>
+      <div data-pane="csv" class="hidden">
+        <div class="drop" id="drop">Drop a .csv file here or <label class="btn link" style="cursor:pointer">choose one<input type="file" id="csvFile" accept=".csv,text/csv" hidden></label>
+          <div class="small" style="margin-top:6px">Any CSV with a column of URLs or paths. <button class="btn link small" id="csvSample">Use a sample file</button></div>
+        </div>
+      </div>
+      <div data-pane="paste" class="hidden">
+        <label class="f">URLs, one per line<textarea id="pasteBox" rows="6" placeholder="https://www.example.com/pricing&#10;/about&#10;/contact"></textarea></label>
+      </div>
+      <div class="preview hidden" id="srcPreview"></div>
+    </div>
+    <div class="mf">
+      <label class="small muted" style="margin-right:auto"><input type="checkbox" id="captureNow" checked> Capture now</label>
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn primary" id="mOk" disabled>Add group</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toastText"></span><span id="toastAct"></span></div>
+
+<script>
+// ---------------------------------------------------------------- fake data
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6d2b79f5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const R = rng(42);
+const pick = (a) => a[Math.floor(R() * a.length)];
+const W1 = ["quick", "modern", "simple", "better", "hidden", "smart", "small", "bold", "green", "remote", "daily", "honest"];
+const W2 = ["guide", "tips", "habits", "kitchen", "garden", "budget", "travel", "teams", "design", "coffee", "office", "weekend"];
+const slug = (i) => `${pick(W1)}-${pick(W2)}-${i}`;
+const HOST = "https://www.example.com";
+
+const groups = [
+  { id: "blog", name: "Blog", active: true, source: { type: "sitemap", url: HOST + "/sitemap.xml", filter: "/blog/*" }, captured: "2 hours ago" },
+  { id: "product", name: "Product pages", active: true, source: { type: "sitemap", url: HOST + "/sitemap-products.xml" }, captured: "2 hours ago" },
+  { id: "landing", name: "Landing pages (copies)", active: true, source: { type: "csv", file: "landing-pages.csv" }, captured: "2 hours ago" },
+  { id: "help", name: "Help center", active: true, source: { type: "paste" }, captured: "yesterday" },
+  { id: "campaign", name: "Campaign 2024", active: false, source: { type: "csv", file: "campaign-2024.csv" }, captured: "12 May" },
+];
+for (const g of groups) g.excluded = new Set();
+const pages = new Map();
+function addPage(url, gid, captured) {
+  let p = pages.get(url);
+  if (!p) pages.set(url, (p = { url, groups: new Set(), status: captured ? "ok" : "new", captured: captured || "" }));
+  p.groups.add(gid);
+  return p;
+}
+const blogUrls = [];
+for (let i = 0; i < 620; i++) { const u = `/blog/${slug(i)}`; blogUrls.push(u); addPage(u, "blog", "2 hours ago"); }
+for (let i = 0; i < 380; i++) addPage(`/products/${pick(W1)}-${pick(["chair", "lamp", "desk", "mug", "shelf", "rug"])}-${i}`, "product", "2 hours ago");
+for (let i = 0; i < 174; i++) addPage(`/lp/${slug(i)}`, "landing", "2 hours ago");
+for (let i = 0; i < 18; i++) addPage(blogUrls[i * 7], "landing", "2 hours ago");
+for (let i = 0; i < 92; i++) addPage(`/help/${pick(W2)}-${pick(["setup", "billing", "account", "faq"])}-${i}`, "help", "yesterday");
+for (let i = 0; i < 130; i++) addPage(`/campaign-2024/${slug(i)}`, "campaign", "12 May");
+const fail = (url, reason) => Object.assign(pages.get(url), { status: "failed", reason });
+fail(blogUrls[40], "Timed out after 30 s");
+fail(blogUrls[311], "404 Not found");
+fail([...pages.keys()].find((u) => u.startsWith("/lp/")), "500 Server error");
+
+// ---------------------------------------------------------------- state + helpers
+const S = { view: "list", site: { url: HOST, maps: [{ path: "/assets/css/", dir: "src/css" }], devices: ["Desktop 1366×768", "Mobile 390×844"], editing: false },
+  status: "all", search: "", limit: 50, src: "sitemap", pending: null, modalMode: "group" };
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (n) => n.toLocaleString("en-US");
+const plural = (n, w) => `${fmt(n)} ${w}${n === 1 ? "" : "s"}`;
+const G = (id) => groups.find((g) => g.id === id);
+const pagesOf = (g, withExcluded) => [...pages.values()].filter((p) => p.groups.has(g.id) && (withExcluded || !g.excluded.has(p.url)));
+const counts = (g) => {
+  const c = { all: 0, ok: 0, failed: 0, new: 0, excluded: g.excluded.size };
+  for (const p of pagesOf(g)) { c.all++; c[p.status === "capturing" ? "ok" : p.status]++; }
+  return c;
+};
+const sourceText = (g) => g.source.type === "sitemap"
+  ? `Sitemap <span class="mono">${esc(g.source.url.replace(HOST, ""))}</span>${g.source.filter ? ` · only <span class="mono">${esc(g.source.filter)}</span>` : ""}`
+  : g.source.type === "csv" ? `CSV <span class="mono">${esc(g.source.file)}</span>` : "Pasted list";
+const mb = (n) => Math.round(n * 0.32);
+
+// ---------------------------------------------------------------- views
+function render() { if (S.view === "list") renderList(); else renderGroup(G(S.view)); }
+
+function siteCard() {
+  const s = S.site;
+  const summary = `<div class="site">
+      <div><span class="k">Site</span><span class="mono">${esc(s.url)}</span></div>
+      <div><span class="k">CSS files</span>${s.maps.map((m) => `<span class="mono">${esc(m.path)}</span> → <span class="mono">${esc(m.dir)}</span>`).join(", ")}</div>
+      <div><span class="k">Devices</span>${s.devices.map((d) => esc(d.split(" ")[0])).join(", ")}</div>
+      <span class="sp"></span>
+      ${s.editing ? "" : `<button class="btn small" id="editSite">Edit</button>`}
+    </div>`;
+  if (!s.editing) return `<div class="card">${summary}</div>`;
+  const all = ["Desktop 1366×768", "Mobile 390×844", "Tablet 820×1180"];
+  return `<div class="card">${summary}<div class="form">
+      <div class="lab">Site URL</div><div><input type="url" id="fUrl" value="${esc(s.url)}" style="width:360px;max-width:100%"><div class="hint">Pages are captured from here. Use staging or a local server if production isn't reachable.</div></div>
+      <div class="lab">Where your CSS lives</div><div>
+        ${s.maps.map((m, i) => `<div class="map-row"><span class="muted small">On the site</span><input type="text" data-map="${i}" data-k="path" value="${esc(m.path)}" style="width:150px"><span>→</span><span class="muted small">In your repo</span><input type="text" data-map="${i}" data-k="dir" value="${esc(m.dir)}" style="width:150px"></div>`).join("")}
+        <button class="btn link small" id="addMap">+ Add another</button>
+        <div class="hint" id="mapCheck"><button class="btn small" id="checkMap">Check</button> Links the site's stylesheets to the files you edit.</div></div>
+      <div class="lab">Devices</div><div class="chips">${all.map((d) => `<span class="chip${s.devices.includes(d) ? " on" : ""}" data-dev="${esc(d)}">${esc(d)}</span>`).join("")}</div>
+      <div></div><div><button class="btn primary" id="saveSite">Save</button> <button class="btn" id="cancelSite">Cancel</button>
+        <span class="muted small" style="margin-left:8px">Changing the URL or devices means a rescan of the active groups.</span></div>
+    </div></div>`;
+}
+
+function statusCell(g) {
+  const c = counts(g);
+  if (g.capturing != null) return `<span class="progress"><i style="width:${(100 * g.capturing) / Math.max(1, c.all)}%"></i></span><span class="small">Capturing ${fmt(g.capturing)} / ${fmt(c.all)}</span>`;
+  if (g.reading) return `<span class="spinner"></span><span class="small">Reading sitemap…</span>`;
+  if (!g.active) return `<span class="pill">Paused</span> <span class="small muted">copy from ${esc(g.captured)} kept</span>`;
+  if (g.captured === "never") return `<span class="pill warn">Not captured yet</span>`;
+  return `<span class="small">Captured ${esc(g.captured)}</span>${c.failed ? ` <span class="pill bad">${fmt(c.failed)} failed</span>` : ""}${c.new ? ` <span class="pill warn">${fmt(c.new)} new</span>` : ""}`;
+}
+
+function renderList() {
+  const act = groups.filter((g) => g.active), paused = groups.filter((g) => !g.active);
+  const uniq = (gs) => new Set(gs.flatMap((g) => pagesOf(g).map((p) => p.url))).size;
+  const nAct = uniq(act), nPaused = [...new Set(paused.flatMap((g) => pagesOf(g).map((p) => p.url)))].filter((u) => !act.some((g) => pages.get(u).groups.has(g.id))).length;
+  const rows = groups.map((g) => {
+    const c = counts(g);
+    const shared = pagesOf(g).filter((p) => p.groups.size > 1).length;
+    return `<tr class="${g.active ? "" : "paused"}">
+      <td><label class="switch" title="${g.active ? "Pause" : "Activate"}"><input type="checkbox" data-toggle="${g.id}" ${g.active ? "checked" : ""}><span></span></label></td>
+      <td><a class="gname" data-open="${g.id}">${esc(g.name)}</a>${shared ? `<div class="small muted">${fmt(shared)} also in other groups</div>` : ""}</td>
+      <td class="small">${sourceText(g)}</td><td class="num">${fmt(c.all)}</td><td>${statusCell(g)}</td>
+      <td class="actions"><button class="btn small" data-rescan="${g.id}" ${g.capturing != null || g.reading ? "disabled" : ""}>Rescan</button> <button class="btn small danger" data-del="${g.id}">Delete</button></td></tr>`;
+  }).join("");
+  $("#view").innerHTML = siteCard() + `
+    <div class="card">
+      <div class="card-h"><h2>Page groups</h2><span class="muted small">Paused groups aren't rescanned or counted. A page in several groups is captured once.</span><span class="sp"></span><button class="btn primary" id="openAdd">+ Add group</button></div>
+      <table><thead><tr><th style="width:60px">Active</th><th>Name</th><th>Source</th><th class="num">Pages</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="totals"><span><b>${fmt(nAct)}</b> pages watched in ${plural(act.length, "active group")} · ${fmt(mb(nAct))} MB on this computer</span>
+        ${paused.length ? `<span>Paused: ${plural(nPaused, "page")} · ${fmt(mb(nPaused))} MB kept</span>` : ""}</div>
+    </div>
+    <p class="muted small">Later: rescan groups automatically from CI after each deploy.</p>`;
+}
+
+function renderGroup(g) {
+  if (!g) { S.view = "list"; return render(); }
+  const c = counts(g), sitemap = g.source.type === "sitemap";
+  let list = S.status === "excluded" ? pagesOf(g, true).filter((p) => g.excluded.has(p.url)) : pagesOf(g).filter((p) => S.status === "all" || p.status === S.status || (S.status === "ok" && p.status === "capturing"));
+  if (S.search) list = list.filter((p) => p.url.includes(S.search));
+  list.sort((a, b) => (a.status === "failed" ? 0 : 1) - (b.status === "failed" ? 0 : 1) || a.url.localeCompare(b.url));
+  const st = (p) => g.excluded.has(p.url) ? `<span class="pill">Excluded</span>`
+    : p.status === "ok" ? `<span class="pill ok">OK</span>` : p.status === "capturing" ? `<span class="spinner"></span><span class="small">Capturing…</span>`
+    : p.status === "new" ? `<span class="pill warn">Not captured yet</span>` : `<span class="pill bad">Failed</span> <span class="reason">${esc(p.reason)}</span>`;
+  const rows = list.slice(0, S.limit).map((p) => {
+    const others = [...p.groups].filter((id) => id !== g.id).map((id) => G(id)).filter(Boolean);
+    const ex = g.excluded.has(p.url);
+    return `<tr><td class="mono url">${esc(p.url)}</td><td>${st(p)}</td><td class="small muted">${ex ? "" : esc(p.captured || "never")}</td>
+      <td class="small">${others.map((o) => `<a data-open="${o.id}">${esc(o.name)}</a>`).join(", ")}</td>
+      <td class="actions">${ex ? `<button class="btn small" data-include="${esc(p.url)}">Include again</button>`
+        : `<button class="btn small" data-rescanpage="${esc(p.url)}" ${p.status === "capturing" ? "disabled" : ""}>Rescan</button> <button class="btn small danger" data-remove="${esc(p.url)}" title="${sitemap ? "The sitemap will keep listing it; it stays excluded" : ""}">${sitemap ? "Exclude" : "Remove"}</button>`}</td></tr>`;
+  }).join("");
+  const f = (k, label, n) => `<button class="fbtn${S.status === k ? " on" : ""}" data-status="${k}">${label} ${fmt(n)}</button>`;
+  const pos = document.activeElement && document.activeElement.id === "search" ? document.activeElement.selectionStart : null;
+  $("#view").innerHTML = `
+    <a class="back" data-open="list">← All groups</a>
+    <div class="ghead"><h1>${esc(g.name)}</h1>
+      <label class="switch" title="${g.active ? "Pause" : "Activate"}"><input type="checkbox" data-toggle="${g.id}" ${g.active ? "checked" : ""}><span></span></label><span class="muted small">${g.active ? "Active" : "Paused"}</span>
+      <span class="sp"></span>
+      <button class="btn" data-rescan="${g.id}" ${g.capturing != null || g.reading ? "disabled" : ""}>Rescan group</button>
+      <button class="btn danger" data-del="${g.id}">Delete group</button></div>
+    <p style="margin:-6px 0 14px">${sourceText(g)}${sitemap ? ` <span class="muted small">· read again on every rescan</span>` : ""} · ${statusCell(g)}</p>
+    <div class="card">
+      <div class="card-h"><div class="filters">${f("all", "All", c.all)}${f("ok", "OK", c.ok)}${f("failed", "Failed", c.failed)}${f("new", "Not captured", c.new)}${sitemap || c.excluded ? f("excluded", "Excluded", c.excluded) : ""}</div>
+        <span class="sp"></span><input type="text" id="search" placeholder="Filter by URL" value="${esc(S.search)}" style="width:220px">
+        ${sitemap ? "" : `<button class="btn primary" id="openAddPages">+ Add pages</button>`}</div>
+      ${list.length ? `<table><thead><tr><th>Page</th><th>Status</th><th>Captured</th><th>Also in</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted" style="padding:16px;margin:0">No pages here.</p>`}
+      ${list.length > S.limit ? `<div style="padding:10px 16px;border-top:1px solid var(--line-soft)"><button class="btn small" id="more">Show ${fmt(Math.min(50, list.length - S.limit))} more of ${fmt(list.length - S.limit)}</button></div>` : ""}
+    </div>`;
+  if (pos != null) { const i = $("#search"); i.focus(); i.setSelectionRange(pos, pos); }
+}
+
+// ---------------------------------------------------------------- capture simulation
+function rescan(g) {
+  const run = () => {
+    const ps = pagesOf(g), size = ps.length;
+    g.capturing = 0;
+    const step = Math.max(1, Math.ceil(size / 40));
+    const tick = setInterval(() => {
+      if (!groups.includes(g)) return clearInterval(tick);
+      g.capturing = Math.min(size, g.capturing + step);
+      if (g.capturing >= size) {
+        clearInterval(tick);
+        g.capturing = null; g.captured = "just now"; g.active = true;
+        for (const p of ps) if (!(p.status === "failed" && p.reason.startsWith("404"))) Object.assign(p, { status: "ok", captured: "just now", reason: "" });
+        const c = counts(g);
+        toast(`<b>${esc(g.name)}</b> rescanned: ${plural(size, "page")}${c.failed ? `, ${fmt(c.failed)} failed` : ""}.`);
+      }
+      render();
+    }, 70);
+    render();
+  };
+  if (g.source.type !== "sitemap") return run();
+  g.reading = true; render();
+  setTimeout(() => {
+    g.reading = false;
+    const ps = pagesOf(g), gone = ps[Math.floor(R() * ps.length)];
+    gone.groups.delete(g.id); if (!gone.groups.size) pages.delete(gone.url);
+    const prefix = (g.source.filter || "/products/*").replace("*", "");
+    for (let i = 0; i < 3; i++) addPage(`${prefix}${slug(9000 + i)}`, g.id);
+    toast(`Sitemap read again: <b>3 new pages</b> joined <b>${esc(g.name)}</b>, 1 removed page left.`);
+    run();
+  }, 900);
+}
+
+// ---------------------------------------------------------------- add group / add pages modal
+function openModal(mode) {
+  S.modalMode = mode; S.pending = null;
+  $("#gName").value = ""; $("#smFilter").value = ""; $("#pasteBox").value = ""; $("#csvFile").value = "";
+  $("#mTitle").textContent = mode === "group" ? "Add a page group" : `Add pages to ${G(S.view).name}`;
+  $("#mOk").textContent = mode === "group" ? "Add group" : "Add pages";
+  $("#gNameWrap").classList.toggle("hidden", mode !== "group");
+  $('[data-src="sitemap"]').classList.toggle("hidden", mode !== "group");
+  setSrc(mode === "group" ? "sitemap" : "paste");
+  $("#modal").classList.add("open");
+  (mode === "group" ? $("#gName") : $("#pasteBox")).focus();
+}
+function setSrc(src) {
+  S.src = src; S.pending = null;
+  document.querySelectorAll("#srcTabs button").forEach((b) => b.classList.toggle("on", b.dataset.src === src));
+  document.querySelectorAll("[data-pane]").forEach((p) => p.classList.toggle("hidden", p.dataset.pane !== src));
+  showPreview();
+}
+function showPreview(html) { const p = $("#srcPreview"); p.classList.toggle("hidden", !html); p.innerHTML = html || ""; updateOk(); }
+function updateOk() { $("#mOk").disabled = !(S.pending && S.pending.urls.length && (S.modalMode !== "group" || $("#gName").value.trim())); }
+function setPending(urls, source, extra = "") {
+  S.pending = { urls, source };
+  const secs = Math.max(5, Math.round(urls.length * 0.11));
+  showPreview(`<b>${plural(urls.length, "page")}</b>${extra} · capture takes about ${secs < 90 ? secs + " s" : Math.round(secs / 60) + " min"}<ul>${urls.slice(0, 4).map((u) => `<li class="mono">${esc(u)}</li>`).join("")}${urls.length > 4 ? `<li>… and ${fmt(urls.length - 4)} more</li>` : ""}</ul>`);
+}
+const isUrl = (v) => /^(https?:\/\/|\/)/.test(v || "");
+function parseCsv(text, file) {
+  const cells = text.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.split(",").map((c) => c.trim().replace(/^"|"$/g, "")));
+  const width = Math.max(0, ...cells.map((r) => r.length));
+  let col = 0, best = -1;
+  for (let i = 0; i < width; i++) { const n = cells.filter((r) => isUrl(r[i])).length; if (n > best) { best = n; col = i; } }
+  const urls = [...new Set(cells.map((r) => r[col]).filter(isUrl).map((v) => v.replace(HOST, "")))];
+  if (!urls.length) { S.pending = null; showPreview(`No column of URLs found in <b>${esc(file)}</b>.`); return; }
+  const head = cells[0][col];
+  if (S.modalMode === "group" && !$("#gName").value) $("#gName").value = file.replace(/\.csv$/i, "").replace(/[-_]/g, " ");
+  setPending(urls, { type: "csv", file }, ` from column <b>${esc(isUrl(head) ? `#${col + 1}` : head)}</b> of ${esc(file)}`);
+}
+
+// ---------------------------------------------------------------- events
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip[data-dev]");
+  if (chip) { chip.classList.toggle("on"); return; }
+  const t = e.target.closest("button, a[data-open]");
+  if (!t) return;
+  const d = t.dataset;
+  if (d.open) { S.view = d.open; S.status = "all"; S.search = ""; S.limit = 50; render(); scrollTo(0, 0); }
+  else if (t.id === "editSite") { S.site.editing = true; render(); }
+  else if (t.id === "cancelSite") { S.site.editing = false; render(); }
+  else if (t.id === "saveSite") {
+    const old = JSON.stringify([S.site.url, S.site.devices]);
+    S.site.url = $("#fUrl").value.trim() || S.site.url;
+    document.querySelectorAll("[data-map]").forEach((i) => { S.site.maps[+i.dataset.map][i.dataset.k] = i.value.trim(); });
+    S.site.maps = S.site.maps.filter((m) => m.path && m.dir);
+    S.site.devices = [...document.querySelectorAll(".chip.on")].map((c) => c.dataset.dev);
+    S.site.editing = false; render();
+    if (old !== JSON.stringify([S.site.url, S.site.devices])) toast("Site settings saved. The active groups need a rescan.", "Rescan all", () => groups.filter((g) => g.active).forEach(rescan));
+    else toast("Site settings saved.");
+  }
+  else if (t.id === "addMap") { document.querySelectorAll("[data-map]").forEach((i) => { S.site.maps[+i.dataset.map][i.dataset.k] = i.value; }); S.site.maps.push({ path: "", dir: "" }); render(); }
+  else if (t.id === "checkMap") $("#mapCheck").innerHTML = `<span class="pill ok">✓</span> 14 stylesheets on the site match files in your repo. 2 come from other sites (fonts, widgets) and are ignored.`;
+  else if (t.id === "openAdd") openModal("group");
+  else if (t.id === "openAddPages") openModal("pages");
+  else if (t.hasAttribute("data-close")) $("#modal").classList.remove("open");
+  else if (d.src) setSrc(d.src);
+  else if (t.id === "smPreview") {
+    showPreview(`<span class="spinner"></span>Reading ${esc($("#smUrl").value)}…`);
+    setTimeout(() => {
+      const f = $("#smFilter").value.trim();
+      const all = Array.from({ length: 2140 }, (_, i) => `/${pick(["docs", "careers", "stories", "events", "partners"])}/${slug(i)}`);
+      const re = f ? new RegExp("^" + f.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$") : null;
+      const urls = re ? all.filter((u) => re.test(u)) : all;
+      if (!urls.length) { S.pending = null; showPreview(`No page in the sitemap matches <span class="mono">${esc(f)}</span>. Try <span class="mono">/stories/*</span>.`); return; }
+      setPending(urls, { type: "sitemap", url: $("#smUrl").value, filter: f || undefined }, re ? ` match <span class="mono">${esc(f)}</span> (of ${fmt(all.length)} in the sitemap)` : " in the sitemap");
+    }, 600);
+  }
+  else if (t.id === "csvSample") parseCsv(["title,url,owner", ...Array.from({ length: 57 }, (_, i) => `Spring offer ${i},${HOST}/lp/spring-${slug(i)},marketing`)].join("\n"), "spring-offers.csv");
+  else if (t.id === "mOk") {
+    const urls = S.pending.urls;
+    $("#modal").classList.remove("open");
+    if (S.modalMode === "group") {
+      const g = { id: "g" + Date.now(), name: $("#gName").value.trim(), active: true, source: S.pending.source, captured: "never", excluded: new Set() };
+      for (const u of urls) addPage(u, g.id);
+      groups.push(g);
+      toast(`Added <b>${esc(g.name)}</b> with ${plural(urls.length, "page")}.`);
+      if ($("#captureNow").checked) rescan(g); else render();
+    } else {
+      const g = G(S.view);
+      const fresh = urls.filter((u) => !pages.get(u)?.groups.has(g.id));
+      for (const u of fresh) addPage(u, g.id);
+      toast(`Added ${plural(fresh.length, "page")} to <b>${esc(g.name)}</b>${urls.length > fresh.length ? ` (${fmt(urls.length - fresh.length)} were already in it)` : ""}.`);
+      if ($("#captureNow").checked && fresh.length) captureList(fresh); else render();
+    }
+  }
+  else if (d.rescan) rescan(G(d.rescan));
+  else if (d.del) {
+    const g = G(d.del), i = groups.indexOf(g), owned = pagesOf(g, true);
+    groups.splice(i, 1);
+    for (const p of owned) p.groups.delete(g.id);
+    if (S.view === g.id) S.view = "list";
+    render();
+    toast(`Deleted <b>${esc(g.name)}</b>. Pages that are also in other groups stay.`, "Undo", () => { groups.splice(i, 0, g); for (const p of owned) { p.groups.add(g.id); pages.set(p.url, p); } render(); });
+  }
+  else if (d.status) { S.status = d.status; S.limit = 50; render(); }
+  else if (t.id === "more") { S.limit += 50; render(); }
+  else if (d.rescanpage) captureList([d.rescanpage]);
+  else if (d.remove) {
+    const g = G(S.view), p = pages.get(d.remove);
+    if (g.source.type === "sitemap") { g.excluded.add(p.url); toast(`Excluded <span class="mono">${esc(p.url)}</span>. It stays out even though the sitemap lists it.`, "Undo", () => { g.excluded.delete(p.url); render(); }); }
+    else { p.groups.delete(g.id); toast(`Removed <span class="mono">${esc(p.url)}</span> from <b>${esc(g.name)}</b>.`, "Undo", () => { p.groups.add(g.id); pages.set(p.url, p); render(); }); }
+    render();
+  }
+  else if (d.include) { G(S.view).excluded.delete(d.include); render(); }
+});
+
+function captureList(urls) {
+  for (const u of urls) pages.get(u).status = "capturing";
+  render();
+  setTimeout(() => {
+    for (const u of urls) {
+      const p = pages.get(u);
+      if (!p) continue;
+      if (p.reason && p.reason.startsWith("404")) Object.assign(p, { status: "failed", captured: "just now" });
+      else Object.assign(p, { status: "ok", captured: "just now", reason: "" });
+    }
+    render();
+  }, 900);
+}
+
+document.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset.toggle) {
+    const g = G(t.dataset.toggle);
+    g.active = t.checked;
+    if (!g.active) toast(`<b>${esc(g.name)}</b> paused. It won't be rescanned or counted; its copy from ${esc(g.captured)} is kept.`);
+    else toast(`<b>${esc(g.name)}</b> is active again, using its copy from ${esc(g.captured)}.`, "Rescan now", () => rescan(g));
+    render();
+  }
+  else if (t.id === "csvFile" && t.files[0]) { const f = t.files[0]; f.text().then((txt) => parseCsv(txt, f.name)); }
+});
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.id === "search") { S.search = t.value.trim(); S.limit = 50; render(); }
+  else if (t.id === "gName") updateOk();
+  else if (t.id === "pasteBox") {
+    const urls = [...new Set(t.value.split(/\s+/).filter(isUrl).map((v) => v.replace(HOST, "")))];
+    if (urls.length) setPending(urls, { type: "paste" }); else { S.pending = null; showPreview(); }
+  }
+});
+const drop = $("#drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); const f = e.dataTransfer.files[0]; if (f) f.text().then((txt) => parseCsv(txt, f.name)); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#modal").classList.remove("open"); });
+
+let toastTimer;
+function toast(html, action, fn) {
+  $("#toastText").innerHTML = html;
+  $("#toastAct").innerHTML = action ? `<button class="btn small">${esc(action)}</button>` : "";
+  if (action) $("#toastAct button").onclick = (e) => { e.stopPropagation(); fn(); $("#toast").classList.remove("show"); };
+  $("#toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 6000);
+}
+
+render();
+</script>
+</body>
+</html>

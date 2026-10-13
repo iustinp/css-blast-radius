@@ -13,14 +13,19 @@ import { openShell } from "./shell.js";
 
 export type RenderMode = "shell" | "live";
 
-export interface MeasureRequest {
-  page: PageRow;
-  variant: VariantInfo;
-  mode: RenderMode;
+export interface SheetEdit {
   /** Index stylesheet keys of the edited file (e.g. "/css/components.css"). */
   sheetKeys: string[];
   baseText: string;
   editedText: string;
+}
+
+export interface MeasureRequest extends Partial<SheetEdit> {
+  page: PageRow;
+  variant: VariantInfo;
+  mode: RenderMode;
+  /** Several edited files at once (the diff viewer); overrides sheetKeys/baseText/editedText. */
+  edits?: SheetEdit[];
   /** Properties to compare; shorthands are expanded in the page. */
   props: string[];
   screenshots?: boolean;
@@ -33,6 +38,16 @@ export interface ElementDiff {
   kind: "changed" | "moved" | "resized" | "appeared" | "disappeared";
   props: Array<{ prop: string; before: string; after: string }>;
   box?: { before: number[] | null; after: number[] | null };
+  /** An ancestor element changed too. */
+  nested?: boolean;
+}
+
+/** An outermost changed element: what the diff viewer outlines. */
+export interface Zone {
+  before: number[] | null;
+  after: number[] | null;
+  label: string;
+  props: Array<{ prop: string; before: string; after: string }>;
 }
 
 export interface PageDiff {
@@ -48,6 +63,11 @@ export interface PageDiff {
   truncated: boolean;
   comparedProps: string[];
   screenshots?: { before: string; after: string };
+  /** Outermost changed elements, top to bottom, in page CSS px. */
+  zones: Zone[];
+  /** Page width in CSS px and screenshot pixels per CSS px (with screenshots). */
+  pageWidth?: number;
+  scale?: number;
   timingMs: number;
 }
 
@@ -78,10 +98,12 @@ const EXPAND_SCRIPT = `(props) => {
 }`;
 
 interface Snapshot {
-  /** node index → [styles…] */
+  /** Keyed by backend node id: stable across both snapshots even when pseudo-elements appear. */
   styles: Map<number, string[]>;
   boxes: Map<number, number[]>;
-  nodes: { parent: number[]; type: number[]; name: string[]; attrs: string[][] };
+  nodes: { parent: number[]; type: number[]; name: string[]; attrs: string[][]; backend: number[] };
+  /** backend node id → node index */
+  index: Map<number, number>;
 }
 
 class Semaphore {
@@ -159,8 +181,12 @@ export class Renderer {
       elements: [],
       truncated: false,
       comparedProps: [],
+      zones: [],
       timingMs: 0,
     };
+    const edits = (req.edits ?? [{ sheetKeys: req.sheetKeys ?? [], baseText: req.baseText ?? "", editedText: req.editedText ?? "" }]).filter(
+      (e) => e.sheetKeys.length > 0,
+    );
     const done = (status: PageDiff["status"], reason?: string) => {
       out.status = status;
       if (reason) out.reason = reason;
@@ -168,7 +194,7 @@ export class Renderer {
       return out;
     };
     if (req.page.status !== "ok") return done("inconclusive", `page capture failed: ${req.page.error ?? "unknown"}`);
-    if (req.sheetKeys.length === 0) return done("inconclusive", "stylesheet-not-mapped: no page stylesheet to replace");
+    if (edits.length === 0) return done("inconclusive", "stylesheet-not-mapped: no page stylesheet to replace");
     if (req.mode === "shell" && req.page.fidelity !== undefined && req.page.fidelity < 0.98) {
       out.warnings.push(`shell replay fidelity ${(req.page.fidelity * 100).toFixed(1)}% (boxes within 1px of the live page)`);
     }
@@ -186,11 +212,14 @@ export class Renderer {
       // CSS must be enabled before navigation: enabling it on a loaded page
       // under request interception stalls ~5 s in Chromium's resource loader.
       const cdp = await ctx.newCDPSession(page);
-      const sheets = new Map<string, string>();
-      const want = new Set(req.sheetKeys);
+      // styleSheetId → the edit applied to it (the first edit naming the sheet wins).
+      const sheets = new Map<string, SheetEdit>();
+      const want = new Map<string, SheetEdit>();
+      for (const e of edits) for (const k of e.sheetKeys) if (!want.has(k)) want.set(k, e);
       cdp.on("CSS.styleSheetAdded", (e: any) => {
         const h = e.header;
-        if (h.origin === "regular" && h.sourceURL && want.has(sheetKey(this.cfg, h.sourceURL))) sheets.set(h.styleSheetId, h.sourceURL);
+        const edit = h.origin === "regular" && h.sourceURL ? want.get(sheetKey(this.cfg, h.sourceURL)) : undefined;
+        if (edit) sheets.set(h.styleSheetId, edit);
       });
       cdp.on("CSS.styleSheetRemoved", (e: any) => sheets.delete(e.styleSheetId));
       await cdp.send("DOM.enable");
@@ -215,28 +244,31 @@ export class Renderer {
         }
       }
 
-      const sheetIds = [...sheets.keys()];
-      if (sheetIds.length === 0) return done("inconclusive", "the edited stylesheet is not loaded on this page");
+      if (sheets.size === 0) return done("inconclusive", "the edited stylesheet is not loaded on this page");
 
       const requested = [...new Set([...BASE_PROPS, ...(req.props.length ? req.props : DEFAULT_PROPS)])];
       const props = ((await page.evaluate(`(${EXPAND_SCRIPT})(${JSON.stringify(requested)})`)) as string[]).slice(0, MAX_PROPS);
       if (requested.length + 10 < props.length) out.warnings.push(`compared the first ${MAX_PROPS} longhands only`);
       out.comparedProps = props;
 
-      const apply = async (text: string) => {
-        for (const id of sheetIds) await cdp.send("CSS.setStyleSheetText", { styleSheetId: id, text });
+      const apply = async (side: "baseText" | "editedText") => {
+        for (const [id, edit] of sheets) await cdp.send("CSS.setStyleSheetText", { styleSheetId: id, text: edit[side] });
         await page.evaluate(SETTLE_SCRIPT);
       };
       const shot = async () =>
         (await page.screenshot({ type: "jpeg", quality: 70, fullPage: true, animations: "disabled", timeout })).toString("base64");
 
-      await apply(req.baseText);
+      await apply("baseText");
       const before = await snapshot(cdp, props);
       const beforeShot = req.screenshots ? await shot() : undefined;
-      await apply(req.editedText);
+      await apply("editedText");
       const after = await snapshot(cdp, props);
       const afterShot = req.screenshots ? await shot() : undefined;
-      if (beforeShot && afterShot) out.screenshots = { before: beforeShot, after: afterShot };
+      if (beforeShot && afterShot) {
+        out.screenshots = { before: beforeShot, after: afterShot };
+        out.pageWidth = (await page.evaluate("Math.max(document.documentElement.scrollWidth, innerWidth)")) as number;
+        out.scale = this.profile(req.variant.profile).deviceScaleFactor ?? 1;
+      }
 
       diffSnapshots(before, after, props, req.maxElements ?? 200, out);
       return done(out.changedElements + out.movedElements > 0 ? "changed" : "unchanged");
@@ -265,17 +297,20 @@ async function snapshot(cdp: CDPSession, props: string[]): Promise<Snapshot> {
     type: doc.nodes.nodeType as number[],
     name: (doc.nodes.nodeName as number[]).map(str),
     attrs: (doc.nodes.attributes as number[][]).map((a) => a.map(str)),
+    backend: doc.nodes.backendNodeId as number[],
   };
+  const index = new Map<number, number>();
+  nodes.backend.forEach((b, i) => index.set(b, i));
   const styles = new Map<number, string[]>();
   const boxes = new Map<number, number[]>();
   const layout = doc.layout;
   for (let i = 0; i < layout.nodeIndex.length; i++) {
-    const n = layout.nodeIndex[i];
-    if (styles.has(n)) continue;
-    styles.set(n, (layout.styles[i] as number[]).map(str));
-    boxes.set(n, layout.bounds[i] as number[]);
+    const id = nodes.backend[layout.nodeIndex[i]];
+    if (styles.has(id)) continue;
+    styles.set(id, (layout.styles[i] as number[]).map(str));
+    boxes.set(id, layout.bounds[i] as number[]);
   }
-  return { styles, boxes, nodes };
+  return { styles, boxes, nodes, index };
 }
 
 function nodePath(nodes: Snapshot["nodes"], idx: number): string {
@@ -297,36 +332,70 @@ function nodePath(nodes: Snapshot["nodes"], idx: number): string {
 }
 
 const TOLERANCE = 0.5;
+const MAX_ZONES = 100;
+const MAX_ZONE_PROPS = 12;
 
 function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff): void {
-  const all = new Set<number>([...a.styles.keys(), ...b.styles.keys()]);
-  const changed: ElementDiff[] = [];
-  const moved: ElementDiff[] = [];
-  const order = [...all].sort((x, y) => x - y);
-  for (const n of order) {
+  const snap = (id: number) => (a.index.has(id) ? a : b);
+  const at = (id: number) => snap(id).index.get(id) ?? -1;
+  const parentOf = (id: number): number | undefined => {
+    const s = snap(id);
+    const p = s.nodes.parent[s.index.get(id)!];
+    return p >= 0 ? s.nodes.backend[p] : undefined;
+  };
+  const label = (id: number) => nodePath(snap(id).nodes, at(id));
+  const ids = [...new Set<number>([...a.styles.keys(), ...b.styles.keys()])].sort((x, y) => at(x) - at(y));
+  const changed: Array<[number, ElementDiff]> = [];
+  const moved: Array<[number, ElementDiff]> = [];
+  for (const id of ids) {
     // Elements and pseudo-elements; text runs are covered by their parent box.
-    const type = a.nodes.type[n] ?? b.nodes.type[n];
-    if (type !== 1) continue;
-    const sa = a.styles.get(n);
-    const sb = b.styles.get(n);
-    const ba = a.boxes.get(n) ?? null;
-    const bb = b.boxes.get(n) ?? null;
+    if (snap(id).nodes.type[at(id)] !== 1) continue;
+    const sa = a.styles.get(id);
+    const sb = b.styles.get(id);
+    const ba = a.boxes.get(id) ?? null;
+    const bb = b.boxes.get(id) ?? null;
     if (!sa || !sb) {
-      changed.push({ path: nodePath(a.nodes, n), kind: sa ? "disappeared" : "appeared", props: [], box: { before: ba, after: bb } });
+      changed.push([id, { path: label(id), kind: sa ? "disappeared" : "appeared", props: [], box: { before: ba, after: bb } }]);
       continue;
     }
     const diffs: ElementDiff["props"] = [];
     for (let k = 0; k < props.length; k++) if (sa[k] !== sb[k]) diffs.push({ prop: props[k], before: sa[k], after: sb[k] });
     const boxMoved = !!ba && !!bb && ba.some((v, k) => Math.abs(v - bb[k]) > TOLERANCE);
-    if (diffs.length) changed.push({ path: nodePath(a.nodes, n), kind: "changed", props: diffs, box: boxMoved ? { before: ba, after: bb } : undefined });
+    if (diffs.length) changed.push([id, { path: label(id), kind: "changed", props: diffs, box: { before: ba, after: bb } }]);
     else if (boxMoved) {
       const resized = Math.abs(ba![2] - bb![2]) > TOLERANCE || Math.abs(ba![3] - bb![3]) > TOLERANCE;
-      moved.push({ path: nodePath(a.nodes, n), kind: resized ? "resized" : "moved", props: [], box: { before: ba, after: bb } });
+      moved.push([id, { path: label(id), kind: resized ? "resized" : "moved", props: [], box: { before: ba, after: bb } }]);
     }
   }
   out.changedElements = changed.length;
   out.movedElements = moved.length;
-  const list = [...changed, ...moved];
+
+  // Zones: the outermost elements whose own styles changed; layout shifts follow from them.
+  // Only when nothing changed directly (a property we didn't compare) do moved boxes stand in.
+  const source = changed.length ? changed : moved.filter(([id]) => !/^(body|html)$/i.test(snap(id).nodes.name[at(id)]));
+  const inSource = new Map(source);
+  const outerOf = (id: number): number | undefined => {
+    let found: number | undefined;
+    for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (inSource.has(p)) found = p;
+    return found;
+  };
+  const zones = new Map<number, Zone>();
+  for (const [id, e] of source) {
+    if (outerOf(id) === undefined) zones.set(id, { before: e.box?.before ?? null, after: e.box?.after ?? null, label: e.path, props: [...e.props] });
+  }
+  for (const [id, e] of [...changed, ...moved]) {
+    const outer = outerOf(id);
+    if (outer === undefined) continue;
+    e.nested = true;
+    const z = zones.get(outer);
+    if (!z) continue;
+    for (const p of e.props) if (z.props.length < MAX_ZONE_PROPS && !z.props.some((x) => x.prop === p.prop)) z.props.push(p);
+  }
+  const top = (z: Zone) => Math.min(z.before?.[1] ?? Infinity, z.after?.[1] ?? Infinity);
+  out.zones = [...zones.values()].sort((x, y) => top(x) - top(y)).slice(0, MAX_ZONES);
+
+  // Outermost first, then everything nested in them.
+  const list = [...changed, ...moved].map(([, e]) => e).sort((x, y) => Number(!!x.nested) - Number(!!y.nested));
   out.truncated = list.length > max;
   out.elements = list.slice(0, max);
 }

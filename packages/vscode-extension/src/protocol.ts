@@ -102,6 +102,14 @@ export interface IndexStatus {
   capture?: { running: boolean; done: number; total: number; error?: string };
   limitations: string[];
   messages: string[];
+  scope: { linked: boolean; groups: Array<{ id: string; name: string; active: boolean }>; pages: number };
+}
+
+export interface GroupInfo {
+  id: string;
+  name: string;
+  active: boolean;
+  pages: number;
 }
 
 export interface InitializeResult {
@@ -113,6 +121,9 @@ export interface InitializeResult {
   repository: { workspaceRoot: string; siteRoot?: string; baseUrl?: string };
   capabilities: { levels: number[]; capture: boolean; diffBases: DiffBaseKind[] };
   status: IndexStatus;
+  sessionId: string;
+  serverUrl: string;
+  groups: GroupInfo[];
 }
 
 export interface SessionTotal {
@@ -162,7 +173,7 @@ export interface PagesResult {
   groups: Array<{ name: string; exact: number; possible: number; unknown: number }>;
   total: number;
   offset: number;
-  pages: Array<{ url: string; set: PageSetName; template?: string }>;
+  pages: Array<{ url: string; set: PageSetName; template?: string; groups: string[] }>;
 }
 
 export interface ElementDiff {

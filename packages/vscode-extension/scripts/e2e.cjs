@@ -1,44 +1,92 @@
-// End-to-end check of the compiled extension against a real daemon, with a
-// stubbed `vscode` API. Black-box: it observes the status bar, decorations,
-// Problems, CodeLens, hover and the panel's webview messages.
-//
-//   npm run build (backend + extension), capture the workspace, then:
-//   node scripts/e2e.cjs [workspace=/tmp/cbr-ws] [dataDir=/tmp/cbr-data]
-//
-// The workspace must be a clean git checkout of the generated fixture site.
-
+// Black-box check of the compiled VS Code extension (stubbed vscode API) against
+// a real server. Builds a 3-page site and a project in a temp folder, starts the
+// server from packages/backend/dist on a free port, sets it up over REST, runs the
+// checks, then removes everything. Needs `npm run build` and Chromium installed.
+// Usage: node scripts/e2e.cjs
 "use strict";
-const path = require("node:path");
+
 const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const Module = require("node:module");
+const assert = require("node:assert/strict");
+const { pathToFileURL } = require("node:url");
 
-const ws = path.resolve(process.argv[2] ?? "/tmp/cbr-ws");
-const data = path.resolve(process.argv[3] ?? "/tmp/cbr-data");
 const extRoot = path.resolve(__dirname, "..");
-const settings = { daemonPath: path.resolve(extRoot, "../backend/dist/cli.js"), dataDir: data, codeLens: true, warnLostPages: 10 };
+const backendDist = path.resolve(extRoot, "../backend/dist/server/http.js");
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "cbr-ext-e2e-"));
+const siteDir = path.join(scratch, "site");
+const workspace = path.join(scratch, "proj");
+const file = path.join(workspace, "styles/main.css");
+const page = (body) => `<!DOCTYPE html>\n<html>\n<head>\n  <link rel="stylesheet" href="css/main.css" />\n</head>\n<body>\n${body}\n</body>\n</html>\n`;
+const original = `.btn {
+  color: blue;
+  padding: 8px 16px;
+}
 
-// ------------------------------------------------------------------ stub
+.btn.btn-primary {
+  color: white;
+  background: navy;
+}
+
+.card .title {
+  font-weight: bold;
+}
+
+#hero {
+  color: darkred;
+}
+
+@media (min-width: 800px) {
+  .btn {
+    padding: 12px 24px;
+  }
+}
+`;
+for (const [name, text] of Object.entries({
+  "index.html": page(`  <div id="hero">Welcome</div>\n  <button class="btn btn-primary">Sign up</button>\n  <div class="card"><span class="title">Card title</span></div>`),
+  "about.html": page(`  <button class="btn">Learn more</button>\n  <div class="card"><span class="title">Another card</span></div>`),
+  "contact.html": page("  <p>No shared classes here.</p>"),
+  "css/main.css": original,
+  "styles/main.css": original,
+})) {
+  const target = name.startsWith("styles/") ? path.join(workspace, name) : path.join(siteDir, name);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, text);
+}
+process.env.TMPDIR = scratch;
+let server = "";
+let homeId = "";
+let backend;
+const settings = { server, autoStartServer: false, groups: [], diffBase: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
+const events = {};
+const commands = new Map();
+const panels = [];
+const notices = [];
+const outputs = [];
+const docs = [];
+const editors = [];
+const state = new Map();
+let activeEditor;
+let pickedIds = [];
+let scope = "unset";
 
 class EventEmitter {
   constructor() {
-    this.listeners = new Set();
-    this.event = (fn) => {
-      this.listeners.add(fn);
-      return { dispose: () => this.listeners.delete(fn) };
+    this.handlers = new Set();
+    this.event = (handler) => {
+      this.handlers.add(handler);
+      return { dispose: () => this.handlers.delete(handler) };
     };
   }
-  fire(e) {
-    for (const f of [...this.listeners]) f(e);
+  fire(value) {
+    for (const handler of [...this.handlers]) handler(value);
   }
-  dispose() {
-    this.listeners.clear();
-  }
+  dispose() { this.handlers.clear(); }
 }
+for (const name of ["open", "change", "save", "close", "visible", "selection", "active", "config"]) events[name] = new EventEmitter();
 class Position {
-  constructor(line, character) {
-    this.line = line;
-    this.character = character;
-  }
+  constructor(line, character) { Object.assign(this, { line, character }); }
 }
 class Range {
   constructor(a, b, c, d) {
@@ -47,344 +95,310 @@ class Range {
   }
 }
 class MarkdownString {
-  constructor(v = "") {
-    this.value = v;
-  }
-  appendMarkdown(s) {
-    this.value += s;
-    return this;
-  }
+  constructor(value = "") { this.value = value; }
+  appendMarkdown(value) { this.value += value; return this; }
 }
-class CodeLens {
-  constructor(range, command) {
-    Object.assign(this, { range, command });
-  }
-}
-class Hover {
-  constructor(contents) {
-    this.contents = contents;
-  }
-}
-class ThemeColor {
-  constructor(id) {
-    this.id = id;
-  }
-}
+class ThemeColor { constructor(id) { this.id = id; } }
 class Diagnostic {
-  constructor(range, message, severity) {
-    Object.assign(this, { range, message, severity });
-  }
+  constructor(range, message, severity) { Object.assign(this, { range, message, severity }); }
 }
-const disposable = { dispose() {} };
-const ev = { open: new EventEmitter(), change: new EventEmitter(), save: new EventEmitter(), close: new EventEmitter(), visible: new EventEmitter(), config: new EventEmitter() };
-const docs = [];
-const editors = [];
-const diagnostics = new Map();
-const statusItem = { show() {}, dispose() {}, text: "" };
-const decorationTypes = [];
-const commands = new Map();
-const messages = [];
-const providers = {};
-const panel = { posted: [], handler: undefined, created: 0 };
-let quickPick;
-
+const statusItem = { text: "", show() {}, dispose() {} };
+const noop = { dispose() {} };
+const uri = (p) => ({ fsPath: p, scheme: "file", toString: () => `file://${p}` });
 const vscode = {
-  EventEmitter,
-  Position,
-  Range,
-  MarkdownString,
-  CodeLens,
-  Hover,
-  ThemeColor,
-  ThemeIcon: ThemeColor,
-  Diagnostic,
-  DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
+  EventEmitter, Position, Range, MarkdownString, ThemeColor, ThemeIcon: ThemeColor, Diagnostic,
+  CodeLens: class { constructor(range, command) { Object.assign(this, { range, command }); } },
+  Hover: class { constructor(contents) { this.contents = contents; } },
+  DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2 },
   DecorationRangeBehavior: { ClosedClosed: 1 },
-  StatusBarAlignment: { Left: 1, Right: 2 },
+  StatusBarAlignment: { Left: 1 },
   ViewColumn: { One: 1, Beside: -2 },
   ProgressLocation: { Notification: 15 },
+  ConfigurationTarget: { Workspace: 2 },
   Uri: {
-    file: (p) => ({ fsPath: p, scheme: "file", toString: () => "file://" + p }),
-    joinPath: (u, ...parts) => ({ fsPath: path.join(u.fsPath, ...parts), scheme: "file" }),
+    file: uri,
+    parse: (url) => ({ toString: () => url }),
+    joinPath: (base, ...parts) => uri(path.join(base.fsPath, ...parts)),
   },
+  env: { openExternal: async () => true },
   workspace: {
-    workspaceFolders: [{ uri: { fsPath: ws } }],
-    onDidOpenTextDocument: ev.open.event,
-    onDidChangeTextDocument: ev.change.event,
-    onDidSaveTextDocument: ev.save.event,
-    onDidCloseTextDocument: ev.close.event,
-    onDidChangeConfiguration: ev.config.event,
-    get textDocuments() {
-      return docs;
-    },
-    getConfiguration: () => ({ get: (k) => settings[k] }),
-    asRelativePath: (p) => path.relative(ws, typeof p === "string" ? p : p.fsPath),
+    workspaceFolders: [{ uri: uri(workspace) }],
+    get textDocuments() { return docs; },
+    onDidOpenTextDocument: events.open.event,
+    onDidChangeTextDocument: events.change.event,
+    onDidSaveTextDocument: events.save.event,
+    onDidCloseTextDocument: events.close.event,
+    onDidChangeConfiguration: events.config.event,
+    getConfiguration: () => ({
+      get: (key) => settings[key],
+      update: async (key, value, target) => {
+        assert.equal(target, vscode.ConfigurationTarget.Workspace, "group links must be saved in workspace settings");
+        settings[key] = value;
+        events.config.fire({ affectsConfiguration: (name) => name === `cssBlastRadius.${key}` });
+      },
+    }),
+    asRelativePath: (p) => path.relative(workspace, typeof p === "string" ? p : p.fsPath),
   },
   window: {
-    createOutputChannel: () => ({ append() {}, appendLine: (s) => process.env.E2E_VERBOSE && console.log("  [ext]", s), show() {}, dispose() {} }),
-    createTextEditorDecorationType: (o) => {
-      const t = { o, name: decorationTypes.length === 0 ? "normal" : "attention", dispose() {} };
-      decorationTypes.push(t);
-      return t;
-    },
+    get activeTextEditor() { return activeEditor; },
+    get visibleTextEditors() { return editors; },
+    onDidChangeVisibleTextEditors: events.visible.event,
+    onDidChangeTextEditorSelection: events.selection.event,
+    onDidChangeActiveTextEditor: events.active.event,
+    createOutputChannel: () => ({
+      append() {}, appendLine: (line) => { outputs.push(line); if (process.env.E2E_VERBOSE) console.log("  [extension]", line); },
+      show() {}, dispose() {},
+    }),
+    createTextEditorDecorationType: (options) => ({ name: options.after.color.id === "editorWarning.foreground" ? "attention" : "normal", dispose() {} }),
     createStatusBarItem: () => statusItem,
-    get visibleTextEditors() {
-      return editors;
+    showInformationMessage: async (message) => { notices.push(message); return undefined; },
+    showWarningMessage: async (message) => { notices.push(message); return undefined; },
+    showErrorMessage: async (message) => { notices.push(message); return undefined; },
+    showQuickPick: async (items) => {
+      const options = await items;
+      assert(options.some((x) => x.label.includes("Open setup page")), "missing setup link");
+      return options.filter((x) => pickedIds.includes(x.id));
     },
-    onDidChangeVisibleTextEditors: ev.visible.event,
-    showInformationMessage: async (m) => void messages.push(m),
-    showWarningMessage: async (m) => void messages.push(m),
-    showErrorMessage: async (m) => void messages.push(m),
-    showQuickPick: async (items) => (await items).find((i) => i.base === quickPick),
-    withProgress: async (_o, fn) => fn({ report() {} }),
-    createWebviewPanel: () => {
-      panel.created++;
-      return {
+    withProgress: async (_, run) => run({ report() {} }),
+    createWebviewPanel: (viewType, title, column, options) => {
+      const disposed = new EventEmitter();
+      const changed = new EventEmitter();
+      const received = new EventEmitter();
+      const panel = {
+        viewType, title, column, options, active: true, closed: false, posted: [],
+        onDidDispose: disposed.event, onDidChangeViewState: changed.event,
+        reveal() { panel.active = true; changed.fire({ webviewPanel: panel }); },
+        dispose() { if (panel.closed) return; panel.closed = true; disposed.fire(); },
         webview: {
-          html: "",
-          cspSource: "vscode-resource:",
-          asWebviewUri: (u) => u.fsPath,
-          postMessage: async (m) => {
-            panel.posted.push(m);
-            return true;
-          },
-          onDidReceiveMessage: (fn) => {
-            panel.handler = fn;
-            return disposable;
-          },
+          html: "", cspSource: "vscode-resource:", onDidReceiveMessage: received.event,
+          asWebviewUri: (resource) => ({ toString: () => resource.fsPath }),
+          postMessage: async (message) => { panel.posted.push(message); return true; },
+          receive: (message) => received.fire(message),
         },
-        onDidDispose: () => disposable,
-        reveal() {},
-        dispose() {},
       };
+      panels.push(panel);
+      return panel;
     },
   },
   languages: {
-    createDiagnosticCollection: () => ({ set: (u, d) => diagnostics.set(u.fsPath, d), delete: (u) => diagnostics.delete(u.fsPath), dispose() {} }),
-    registerCodeLensProvider: (_s, p) => ((providers.lens = p), disposable),
-    registerHoverProvider: (_s, p) => ((providers.hover = p), disposable),
+    createDiagnosticCollection: () => ({ set() {}, delete() {}, dispose() {} }),
+    registerCodeLensProvider: () => noop,
+    registerHoverProvider: (_, provider) => { vscode.hoverProvider = provider; return noop; },
   },
   commands: {
-    registerCommand: (id, fn) => (commands.set(id, fn), disposable),
-    executeCommand: async (id, ...a) => commands.get(id)?.(...a),
+    registerCommand: (id, handler) => { commands.set(id, handler); return noop; },
+    executeCommand: async (id, ...args) => commands.get(id)?.(...args),
   },
 };
 
-const load = Module._load;
-Module._load = function (req, ...rest) {
-  return req === "vscode" ? vscode : load.call(this, req, ...rest);
+const priorLoad = Module._load;
+Module._load = function (request, ...rest) {
+  return request === "vscode" ? vscode : priorLoad.call(this, request, ...rest);
 };
 
-// ------------------------------------------------------------ documents
-
-function makeDoc(file) {
-  let lines = fs.readFileSync(file, "utf8").split("\n");
+function makeDoc(text) {
+  let lines = text.split("\n");
   const doc = {
-    uri: vscode.Uri.file(file),
-    languageId: "css",
+    uri: uri(file), languageId: "css", isDirty: false,
     getText: () => lines.join("\n"),
-    get lineCount() {
-      return lines.length;
-    },
+    get lineCount() { return lines.length; },
     lineAt: (n) => ({ range: { end: new Position(n, lines[n].length) }, text: lines[n] }),
     find: (needle) => {
-      const i = lines.findIndex((l) => l.includes(needle));
-      if (i < 0) throw new Error(`not found: ${needle}`);
-      return new Position(i, lines[i].indexOf(needle));
+      const i = lines.findIndex((line) => typeof needle === "string" ? line.includes(needle) : needle.test(line));
+      assert(i >= 0, `can't find ${needle}`);
+      return new Position(i, typeof needle === "string" ? lines[i].indexOf(needle) : lines[i].search(needle));
     },
-    /** Replace [start, end) with text and fire the change like VS Code does. */
-    edit(start, end, text) {
-      const before = lines.slice(0, start.line);
+    edit(start, end, insert) {
       const head = lines[start.line].slice(0, start.character);
       const tail = lines[end.line].slice(end.character);
-      const mid = (head + text + tail).split("\n");
-      lines = [...before, ...mid, ...lines.slice(end.line + 1)];
-      ev.change.fire({ document: doc, contentChanges: [{ range: new Range(start, end), text }] });
+      lines = [...lines.slice(0, start.line), ...(head + insert + tail).split("\n"), ...lines.slice(end.line + 1)];
+      doc.isDirty = true;
+      events.change.fire({ document: doc, contentChanges: [{ range: new Range(start, end), text: insert }] });
     },
   };
   return doc;
 }
 
-function showEditor(doc) {
-  const ed = { document: doc, decorations: { normal: [], attention: [] }, setDecorations: (t, opts) => (ed.decorations[t.name] = opts) };
-  editors.push(ed);
-  ev.visible.fire(editors);
-  return ed;
+const doc = makeDoc(original);
+const editor = {
+  document: doc, selections: [{ active: new Position(0, 0) }], decorations: { normal: [], attention: [] },
+  get selection() { return editor.selections[0]; },
+  setDecorations(type, value) { editor.decorations[type.name] = value; },
+  select(pos) { editor.selections = [{ active: pos }]; events.selection.fire({ textEditor: editor }); },
+};
+function decoration() {
+  return [...editor.decorations.normal, ...editor.decorations.attention].map((d) => d.renderOptions.after.contentText);
 }
-
-// ---------------------------------------------------------------- checks
-
-const results = [];
-async function check(name, fn) {
-  const t0 = Date.now();
+async function waitFor(test, label, timeout = 20_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const result = await test();
+    if (result) return result;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`Timed out waiting for ${label}. Status: ${statusItem.text}; output: ${outputs.slice(-4).join(" | ")}`);
+}
+async function json(url, options) {
+  const response = await fetch(new URL(url, server), { ...options, signal: AbortSignal.timeout(90_000) });
+  const body = await response.json();
+  assert(response.ok, `${response.status} ${url}: ${JSON.stringify(body).slice(0, 300)}`);
+  return body;
+}
+const checks = [];
+async function check(name, run) {
   try {
-    const note = await fn();
-    results.push({ name, ok: true });
-    console.log(`✓ ${name} (${Date.now() - t0} ms)${note ? ` — ${note}` : ""}`);
-  } catch (err) {
-    results.push({ name, ok: false });
-    console.log(`✗ ${name}: ${err?.message ?? err}`);
+    await run();
+    checks.push({ name, ok: true });
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    checks.push({ name, ok: false });
+    console.error(`FAIL ${name}: ${error.stack || error}`);
   }
 }
-function assert(cond, msg) {
-  if (!cond) throw new Error(msg);
-}
-async function waitFor(cond, what, timeoutMs = 15000) {
-  const t0 = Date.now();
-  for (;;) {
-    const v = await cond();
-    if (v) return v;
-    if (Date.now() - t0 > timeoutMs) throw new Error(`timed out waiting for ${what} (status: "${statusItem.text}")`);
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
-const token = { isCancellationRequested: false };
-const decoText = (ed, kind = "normal") => ed.decorations[kind].map((d) => `${d.range.start.line + 1}: ${d.renderOptions.after.contentText}`);
+const pagesPanel = () => panels.find((p) => p.viewType === "cssBlastRadius.pages" && !p.closed);
+const lastPages = (p) => [...p.posted].reverse().find((m) => m.type === "pages");
+const ctx = {
+  subscriptions: [], extensionUri: uri(extRoot),
+  workspaceState: { get: (key) => state.get(key), update: async (key, value) => state.set(key, value) },
+};
 
-// ------------------------------------------------------------------ run
+async function startBackend() {
+  const { startServer } = await import(pathToFileURL(backendDist).href);
+  backend = await startServer({ dataDir: path.join(scratch, "data"), port: 0, l1Workers: 0, log: () => {} });
+  server = settings.server = backend.url;
+  const write = (method, url, body) => json(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  await write("PUT", "/api/site", { siteFolder: siteDir, devices: ["desktop"] });
+  await write("POST", "/api/groups", { name: "All pages", source: { type: "paste" }, urls: ["/index.html", "/about.html", "/contact.html"], scan: false });
+  homeId = (await write("POST", "/api/groups", { name: "Home & About", source: { type: "paste" }, urls: ["/index.html", "/about.html"], scan: false })).id;
+  await json("/api/rescan-all", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  await backend.app.jobs.idle();
+  const scanned = (await json("/api/state")).groups.find((g) => g.id === homeId);
+  assert(scanned?.ok === 2, `fixture scan failed: ${JSON.stringify(scanned)}`);
+}
 
-async function main() {
+async function run() {
+  await startBackend();
   const { activate } = require(path.join(extRoot, "dist/extension.js"));
-  const ctx = { subscriptions: [], extensionUri: { fsPath: extRoot, scheme: "file" } };
-  const file = path.join(ws, "css/components.css");
-  const original = fs.readFileSync(file, "utf8");
-  const doc = makeDoc(file);
-  let ed;
-  let union = "";
-
-  await check("activate, spawn the daemon and attach", async () => {
-    activate(ctx);
-    await waitFor(() => statusItem.text.includes("No CSS edits"), "the connected status");
-    return statusItem.text;
-  });
-
-  await check("open a CSS file: no edits, no decorations", async () => {
-    docs.push(doc);
-    ed = showEditor(doc);
-    ev.open.fire(doc);
-    const lenses = await waitFor(async () => {
-      const l = await providers.lens.provideCodeLenses(doc, token);
-      return l.length ? l : undefined;
-    }, "CodeLens");
-    assert(decoText(ed).length === 0, `unexpected decorations ${decoText(ed)}`);
-    const promo = lenses.find((l) => l.range.start.line === doc.find(".promo-banner {").line);
-    assert(promo && promo.command.title === "51 pages", `promo lens: ${promo?.command.title}`);
-    assert(promo.command.command === "cssBlastRadius.showPages", "promo lens is clickable");
-    return `${lenses.length} lenses; .promo-banner → “${promo.command.title}”`;
-  });
-
-  const promoLine = doc.find(".promo-banner {").line;
-  await check("type a declaration keystroke by keystroke: decoration + status bar", async () => {
-    const text = "  outline: 1px solid red;\n";
-    let pos = new Position(promoLine + 1, 0);
-    const t0 = Date.now();
-    for (const ch of text) {
-      doc.edit(pos, pos, ch);
-      pos = ch === "\n" ? new Position(pos.line + 1, 0) : new Position(pos.line, pos.character + 1);
-      await new Promise((r) => setImmediate(r));
+  try {
+    await check("attach: initialize returns session and server URL", async () => {
+      activate(ctx);
+      await waitFor(() => statusItem.text.includes("Link page groups"), "initial link state");
+      const project = (await json("/api/state")).projects.find((p) => p.root === workspace);
+      assert(project?.id && project.groups.length === 0, `server session not initialized with empty groups: ${JSON.stringify(project)}`);
+      scope = project.id;
+      assert.equal(server, backend.url);
+      assert(outputs.some((line) => line.includes("Connected to")), "server not attached");
+    });
+    await check("unlinked: status prompts linking and page count stays zero", async () => {
+      assert.match(statusItem.text, /Link page groups/);
+      await vscode.commands.executeCommand("cssBlastRadius.showAllPages");
+      const p = pagesPanel();
+      assert(p, "panel wasn't opened on demand");
+      p.webview.receive({ type: "ready" });
+      const data = await waitFor(() => lastPages(p), "unlinked page list");
+      assert.equal(data.result.total, 0);
+      assert.equal(data.result.count.exact, 0);
+    });
+    await check("link picker: group selection changes the workspace setting", async () => {
+      pickedIds = [homeId];
+      await vscode.commands.executeCommand("cssBlastRadius.linkGroups");
+      assert.deepEqual(settings.groups, [homeId]);
+      await waitFor(async () => (await json("/api/state")).projects.find((p) => p.root === workspace)?.groups.includes(homeId), "server group link");
+      assert(!statusItem.text.includes("Link page groups"), statusItem.text);
+    });
+    await check("typing: .btn decoration and status count update before save", async () => {
+      docs.push(doc);
+      editors.push(editor);
+      activeEditor = editor;
+      events.active.fire(editor);
+      events.visible.fire(editors);
+      events.open.fire(doc);
+      await waitFor(() => outputs.some((s) => s.includes("Connected to")), "document open");
+      const start = /\.btn\s*\{/.exec(doc.getText());
+      assert(start, "fixture must include a .btn rule");
+      const positionAt = (offset) => {
+        const parts = doc.getText().slice(0, offset).split("\n");
+        return new Position(parts.length - 1, parts[parts.length - 1].length);
+      };
+      const at = positionAt(start.index);
+      editor.select(new Position(at.line, at.character + 2));
+      const insert = "\n  outline: 2px solid red;";
+      const closingOffset = doc.getText().indexOf("}", start.index + start[0].length);
+      assert(closingOffset > 0, ".btn rule has no closing brace");
+      const close = positionAt(closingOffset);
+      let pos = new Position(close.line, close.character);
+      for (const char of insert) {
+        doc.edit(pos, pos, char);
+        pos = char === "\n" ? new Position(pos.line + 1, 0) : new Position(pos.line, pos.character + 1);
+        editor.select(new Position(at.line, at.character + 2));
+        await new Promise((r) => setImmediate(r));
+      }
+      await waitFor(() => statusItem.text.includes("2 pages") && decoration().some((text) => text.includes("2 pages")), "two pages while unsaved");
+      assert(doc.isDirty && fs.readFileSync(file, "utf8") === original, "typing wrote the file to disk");
+    });
+    await check("hover: changed rule has Show pages and all-pages links", async () => {
+      const hover = await waitFor(() => vscode.hoverProvider.provideHover(doc, editor.selection.active), "changed-rule hover");
+      assert.match(hover.contents.value, /2 pages/);
+      assert.match(hover.contents.value, /command:cssBlastRadius\.showPages\?/);
+      assert.match(hover.contents.value, /command:cssBlastRadius\.showAllPages\?/);
+    });
+    await check("panel: on-demand page list includes both pages and file chips", async () => {
+      await vscode.commands.executeCommand("cssBlastRadius.showAllPages");
+      const p = pagesPanel();
+      const data = await waitFor(() => {
+        const m = lastPages(p);
+        return m?.result.pages.some((x) => x.url === "/about.html") && m;
+      }, "linked page list");
+      assert.deepEqual(data.result.pages.map((x) => x.url).sort(), ["/about.html", "/index.html"]);
+      assert(data.result.pages.every((x) => x.groups.includes("Home & About")), "page group names missing from rows");
+      assert(data.chips.some((chip) => chip.path === file && chip.changes.length), "no file/change chips");
+    });
+    await check("diff: iframe URL and server-rendered changed result", async () => {
+      pagesPanel().webview.receive({ type: "page", url: "/about.html" });
+      const diff = await waitFor(() => panels.find((p) => p.viewType === "cssBlastRadius.diff"), "diff tab");
+      const escaped = `${server}/diff?s=${scope}&amp;url=%2Fabout.html&amp;embed=1`;
+      assert(diff.webview.html.includes(`src="${escaped}"`), "wrong embedded diff URL");
+      const result = await json(`/api/diff?s=${scope}&url=%2Fabout.html`);
+      assert.equal(result.status, "changed", `page diff: ${result.status} ${result.reason || ""}`);
+    });
+    await check("pause: groups/changed updates linked counts without an editor save", async () => {
+      const res = await json(`/api/groups/${homeId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: false }),
+      });
+      assert.equal(res.active, false);
+      await waitFor(() => !statusItem.text.includes("2 pages") && statusItem.text.includes("0 pages"), "count after group pause");
+      assert.deepEqual(settings.groups, [homeId], "link should remain saved while group is paused");
+      await json(`/api/groups/${homeId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: true }),
+      });
+      await waitFor(() => statusItem.text.includes("2 pages"), "count after group resumes");
+    });
+    await check("outside editor: closed file change triggers one notice", async () => {
+      docs.splice(docs.indexOf(doc), 1);
+      editors.splice(editors.indexOf(editor), 1);
+      activeEditor = undefined;
+      events.close.fire(doc);
+      await new Promise((r) => setTimeout(r, 350));
+      const changed = original.replace(/(\.btn\s*\{[^}]*\bcolor\s*:\s*)blue/i, "$1red");
+      assert.notEqual(changed, original, "fixture must contain color: blue");
+      fs.writeFileSync(file, changed);
+      await waitFor(() => notices.some((text) => text.includes("CSS changed outside the editor")), "outside-editor notification", 25_000);
+    });
+    await check("dispose: no shared-server shutdown", async () => {
+      for (const item of [...ctx.subscriptions].reverse()) item.dispose();
+      await json("/api/state");
+      assert(!outputs.some((line) => /shutdown/i.test(line)), "extension attempted server shutdown");
+    });
+  } finally {
+    for (const item of [...ctx.subscriptions].reverse()) {
+      try { item.dispose(); } catch {}
     }
-    await waitFor(() => statusItem.text.includes("Your edits: 51 pages"), "51 pages in the status bar");
-    const ms = Date.now() - t0;
-    const d = await waitFor(() => decoText(ed).find((t) => t.includes("51 pages") && !t.includes("editing")), "the final decoration");
-    return `${ms} ms after the first keystroke; “${d}”; ${statusItem.text}`;
-  });
-
-  await check("hover on the changed rule explains the count", async () => {
-    const h = providers.hover.provideHover(doc, new Position(promoLine, 0));
-    assert(h, "no hover");
-    const md = h.contents.value;
-    assert(md.includes("Declarations changed") && md.includes("**51** exact") && md.includes("`outline`"), md);
-    assert(md.includes("command:cssBlastRadius.showPages?"), "no show-pages link");
-    return "Declarations changed · 51 exact · outline";
-  });
-
-  await check("panel: page list, elements (L1) and render diff (L2)", async () => {
-    await vscode.commands.executeCommand("cssBlastRadius.showPages", { path: file, line: promoLine + 1, title: ".promo-banner" });
-    assert(panel.created === 1 && panel.handler, "panel not created");
-    panel.handler({ type: "ready" });
-    const pages = await waitFor(() => panel.posted.find((m) => m.type === "pages"), "the page list");
-    assert(pages.result.total === 51 && pages.summary === "51 pages", `list: ${pages.result.total} / ${pages.summary}`);
-    const url = pages.result.pages[0].url;
-    panel.handler({ type: "page", url });
-    const d1 = await waitFor(() => panel.posted.find((m) => m.type === "detail" && m.kind === "page"), "L1 detail");
-    const m = d1.results[0].result.matches;
-    assert(m.length && m[0].variants[0].count > 0, `no matched elements: ${JSON.stringify(d1.results[0])}`);
-    panel.handler({ type: "render", url, screenshots: false });
-    const d2 = await waitFor(() => panel.posted.find((m) => m.type === "detail" && m.kind === "render"), "L2 detail", 30000);
-    const r = d2.results[0].result.render;
-    assert(r && r.status === "changed" && r.changedElements > 0, `render: ${JSON.stringify(d2.results[0]).slice(0, 300)}`);
-    return `${url}: ${m[0].variants[0].count} element(s); L2 ${r.changedElements} changed in ${d2.ms} ms`;
-  });
-
-  await check("session panel lists the session's pages", async () => {
-    panel.posted.length = 0;
-    await vscode.commands.executeCommand("cssBlastRadius.showPages");
-    const pages = await waitFor(() => panel.posted.find((m) => m.type === "pages"), "session list");
-    assert(pages.result.total === 51, `session total ${pages.result.total}`);
-  });
-
-  await check("selector rename that loses pages: attention decoration + Problems warning", async () => {
-    const at = doc.find(".card--featured {");
-    doc.edit(new Position(at.line, at.character), new Position(at.line, at.character + ".card--featured".length), ".card--featurd");
-    const diag = await waitFor(() => (diagnostics.get(file) ?? []).find((d) => d.message.includes("no longer reaches")), "the warning");
-    assert(diag.severity === vscode.DiagnosticSeverity.Warning && diag.message.includes("45"), diag.message);
-    const att = decoText(ed, "attention");
-    assert(att.some((t) => t.includes("−45")), `attention: ${att}`);
-    // The union: some pages carry both rules.
-    const n = await waitFor(() => Number(/Your edits: (\d+) pages/.exec(statusItem.text)?.[1] ?? 0) > 51 && /Your edits: \d+ pages/.exec(statusItem.text)[0], "the session union");
-    union = n;
-    return `“${diag.message}”; ${att.join(", ")}; ${n}`;
-  });
-
-  await check("save, then diff base “saved”: nothing left to compare", async () => {
-    // VS Code writes the file, then fires the event; "saved" compares with the disk.
-    fs.writeFileSync(file, doc.getText());
-    ev.save.fire(doc);
-    await new Promise((r) => setTimeout(r, 200));
-    quickPick = "saved";
-    await vscode.commands.executeCommand("cssBlastRadius.setDiffBase");
-    await waitFor(() => statusItem.text.includes("No CSS edits"), "no edits vs saved");
-    quickPick = "HEAD";
-    await vscode.commands.executeCommand("cssBlastRadius.setDiffBase");
-    await waitFor(() => statusItem.text.includes(union), "edits vs HEAD again");
-    // Revert the disk (an open file is owned by the editor: nothing changes).
-    fs.writeFileSync(file, original);
-  });
-
-  await check("restart the daemon: documents are re-opened, answers come back", async () => {
-    await vscode.commands.executeCommand("cssBlastRadius.restartDaemon");
-    await waitFor(() => statusItem.text.includes(union), "answers after restart", 30000);
-    const lenses = await providers.lens.provideCodeLenses(doc, token);
-    assert(lenses.length > 10, "no lenses after restart");
-  });
-
-  await check("close the file: back to the file on disk (unchanged)", async () => {
-    docs.splice(docs.indexOf(doc), 1);
-    editors.length = 0;
-    ev.close.fire(doc);
-    await waitFor(() => statusItem.text.includes("No CSS edits"), "no edits after close");
-    assert(!diagnostics.get(file)?.length, "diagnostics not cleared");
-  });
-
-  await check("dispose: the daemon it started exits", async () => {
-    const sock = require(path.join(extRoot, "dist/daemonLifecycle.js")).socketPathFor(ws);
-    for (const s of ctx.subscriptions) s.dispose();
-    await waitFor(() => !fs.existsSync(sock), "the socket to be removed", 10000);
-  });
-
-  const failed = results.filter((r) => !r.ok).length;
-  console.log(failed ? `\n${failed} of ${results.length} checks FAILED` : `\nALL ${results.length} PASSED`);
-  if (messages.length) console.log("messages shown:", messages);
-  process.exit(failed ? 1 : 0);
+    await backend.close().catch(() => {});
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  const failed = checks.filter((x) => !x.ok).length;
+  console.log(`${checks.length - failed}/${checks.length} checks passed`);
+  if (failed) process.exitCode = 1;
 }
 
-process.on("exit", () => {
-  // Never leave the fixture checkout modified.
-  const file = path.join(ws, "css/components.css");
-  require("node:child_process").spawnSync("git", ["-C", ws, "checkout", "--", path.relative(ws, file)]);
-});
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run().catch((error) => { console.error(error); process.exitCode = 1; });

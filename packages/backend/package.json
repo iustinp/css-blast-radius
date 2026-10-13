@@ -4,6 +4,7 @@
   "description": "Local daemon for CSS Blast Radius: captures every page in Chromium once, then answers how many pages a CSS edit reaches as you type (L0/L1), with on-demand render (L2) and live (L3) checks over a JSON-RPC socket.",
   "type": "module",
   "bin": {
+    "css-blast-radius": "./dist/cli.js",
     "css-blast-radius-daemon": "./dist/cli.js"
   },
   "main": "./dist/index.js",
@@ -13,6 +14,7 @@
     "test": "vitest run",
     "bench": "tsx bench/bench.mts",
     "dev:daemon": "tsx src/cli.ts",
+    "serve": "node dist/cli.js serve",
     "smoke": "tsx scripts/smoke.mts"
   },
   "dependencies": {

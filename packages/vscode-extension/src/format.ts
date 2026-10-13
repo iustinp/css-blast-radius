@@ -1,6 +1,6 @@
 // How numbers read (§7.1 / §8). Pure functions: no vscode import, unit-tested.
 
-import type { ChangeAnswer, Count, Freshness } from "./protocol";
+import type { ChangeAnswer, Count, FileAnswer, Freshness, RuleCount } from "./protocol";
 
 const plural = (n: number, word = "page") => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
 
@@ -43,6 +43,30 @@ export function formatChange(ch: ChangeAnswer): string {
   return formatCount(ch.pages, ch.reasons);
 }
 
+/** A server change has a starting line; server rule ranges extend it to the cursor. */
+export function changeAtCursor(changes: ChangeAnswer[], rules: RuleCount[], line: number): ChangeAnswer | undefined {
+  const candidates = changes.flatMap((ch) => rules
+    .filter((r) => r.line <= ch.line && ch.line <= r.endLine && r.line <= line && line <= r.endLine)
+    .map((r) => ({ change: ch, size: r.endLine - r.line })));
+  return candidates.sort((a, b) => a.size - b.size)[0]?.change ?? changes.find((ch) => ch.line === line);
+}
+
+export function ghostText(answer: FileAnswer, change: ChangeAnswer): string {
+  if (answer.editing) return "◀ finish typing…";
+  const lost = change.lost ?? (change.kind === "removed" ? change.pages : undefined);
+  const lostN = lost?.exact ?? 0;
+  let text: string;
+  if (lostN && change.kind === "selector" && isZero(change.pages)) {
+    text = `matches no page now · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
+  } else {
+    const count = answer.changes.length > 1 ? answer.total : change.pages;
+    text = formatCount(count, answer.changes.length > 1 ? answer.totalReasons : change.reasons).replace(/^Up to /, "up to ");
+    if (lostN) text += ` · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
+  }
+  if (answer.changes.length > 1) text += ` (${answer.changes.length} edits)`;
+  return `◀ ${text}`;
+}
+
 export function formatAge(ms: number): string {
   const m = Math.round(ms / 60_000);
   if (m < 1) return "just now";
@@ -77,11 +101,15 @@ export function shortReason(r: string): string {
     case "selector-never-matches":
       return "selector never matches";
     case "stylesheet-not-linked":
-      return "no page links this file";
+      return "no linked group uses this";
+    case "no-linked-groups":
+      return "no page groups linked to this project";
+    case "not-in-linked-groups":
+      return "no page in the linked groups loads this file";
     case "stylesheet-not-mapped":
-      return "file not mapped";
+      return "file name doesn't match a scanned stylesheet";
     case "index-missing":
-      return "no index";
+      return "no pages scanned yet";
     case "index-stale":
       return "stale";
     case "token-never-seen":
@@ -106,17 +134,21 @@ export function reasonText(r: string): string {
   const [code, arg = ""] = splitReason(r);
   switch (code) {
     case "no-effective-change":
-      return "No effective change: the rules are the same as in the diff base.";
+      return "No effective change: the rules are the same as on the live site.";
     case "selector-never-matches":
-      return "The selector matches no element on any captured page.";
+      return "The selector matches no element on any scanned page.";
     case "stylesheet-not-linked":
-      return "No captured page links this stylesheet.";
+      return "No page in a linked group uses this file.";
+    case "no-linked-groups":
+      return "No page groups are linked to this project. Link page groups to see page counts.";
+    case "not-in-linked-groups":
+      return "No page in the linked groups loads this file.";
     case "stylesheet-not-mapped":
-      return "This file isn't mapped to a deployed stylesheet: counted over all captured pages (upper bound).";
+      return "This file's name doesn't match any stylesheet on the scanned pages: counts are only possible.";
     case "index-missing":
-      return "No index yet: run “CSS Blast Radius: Capture Site”.";
+      return "No pages scanned yet: run “CSS Blast Radius: Rescan Linked Groups”.";
     case "index-stale":
-      return "The index is older than your markup or this stylesheet: recapture for exact numbers.";
+      return "Pages have changed since the last scan: rescan for exact numbers.";
     case "token-never-seen":
       return `\`${tokenText(arg)}\` never appears on a captured page.`;
     case "added-by-js":
@@ -132,7 +164,7 @@ export function reasonText(r: string): string {
     case "invalid-selector":
       return `Invalid selector (${arg}): browsers drop this rule.`;
     case "capture-failed":
-      return `${arg} page(s) failed to capture: they count as unknown.`;
+      return `${arg} page(s) could not be scanned: their results are not known.`;
     case "custom-property-scope":
       return "Custom property: counted where it is defined and used.";
     case "custom-property-unused":
@@ -155,8 +187,8 @@ export function reasonText(r: string): string {
 }
 
 export const DIFF_BASE_LABEL: Record<string, string> = {
-  HEAD: "HEAD (uncommitted changes)",
+  HEAD: "last commit",
   saved: "last save",
-  session: "session start",
-  production: "production (captured CSS)",
+  session: "when I opened VS Code",
+  production: "the live site",
 };

@@ -1,22 +1,16 @@
-// JSON-RPC 2.0 over a Unix domain socket (Windows: a named pipe path, which
-// node:net handles transparently). Framing is NDJSON: one JSON value per line.
+// The per-workspace daemon: JSON-RPC 2.0 over a Unix domain socket (Windows:
+// a named pipe path, which node:net handles transparently). Framing is NDJSON:
+// one JSON value per line. The local server (server/http.ts) serves the same
+// methods to many projects over one HTTP port.
 
-import net, { type Socket } from "node:net";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { Session, type SessionOptions } from "../daemon/session.js";
 import { DIFF_BASES } from "../daemon/diffBase.js";
-import {
-  ERR,
-  PROTOCOL_MAJOR,
-  PROTOCOL_MINOR,
-  RpcError,
-  SCHEMA_VERSION,
-  SERVICE_VERSION,
-  type InitializeResult,
-  type JsonRpcNotification,
-  type JsonRpcRequest,
-} from "./protocol.js";
+import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type InitializeResult } from "./protocol.js";
+import { serveRpc, type RpcPeer } from "./connection.js";
+import { SERIAL, SESSION_NOTIFICATIONS, sessionMethod } from "./methods.js";
 
 export interface DaemonOptions extends SessionOptions {
   socketPath: string;
@@ -27,15 +21,6 @@ export interface Daemon {
   session: Session;
   server: net.Server;
   close(): Promise<void>;
-}
-
-const MAX_LINE = 64 * 1024 * 1024;
-
-/** Methods that change document/session state run strictly in arrival order. */
-const SERIAL = new Set(["document/open", "document/change", "document/save", "document/close", "session/setDiffBase"]);
-
-function send(socket: Socket, message: unknown): void {
-  if (!socket.destroyed) socket.write(JSON.stringify(message) + "\n");
 }
 
 async function socketInUse(p: string): Promise<boolean> {
@@ -59,27 +44,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   if (!isPipe) fs.mkdirSync(path.dirname(opts.socketPath), { recursive: true, mode: 0o700 });
 
   const session = await Session.create(opts);
-  const clients = new Set<Socket>();
-  const notify = (method: string, params: unknown) => {
-    const msg: JsonRpcNotification = { jsonrpc: "2.0", method, params };
-    for (const c of clients) send(c, msg);
-  };
-  session.on("refined", (p) => notify("analysis/refined", p));
-  session.on("publish", (p) => notify("analysis/publishImpact", p));
-  session.on("status", (p) => notify("index/statusChanged", p));
-  session.on("revision", (p) => notify("index/revisionSwitched", p));
-  session.on("captureProgress", (p) => notify("index/captureProgress", p));
-  session.on("degraded", (p) => notify("server/degraded", p));
+  const clients = new Set<RpcPeer>();
+  for (const [event, method] of SESSION_NOTIFICATIONS) session.on(event, (p) => clients.forEach((c) => c.notify(method, p)));
 
   let serial: Promise<unknown> = Promise.resolve();
   let closing = false;
   const started = Date.now();
 
   async function dispatch(method: string, p: any): Promise<unknown> {
-    const need = (k: string) => {
-      if (p?.[k] === undefined) throw new RpcError(ERR.invalidParams, `missing parameter: ${k}`);
-      return p[k];
-    };
+    const handled = sessionMethod(session, method, p);
+    if (handled) return handled;
     switch (method) {
       case "initialize": {
         const r: InitializeResult = {
@@ -94,42 +68,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
         };
         return r;
       }
-      case "workspace/attach":
-      case "index/getStatus":
-        return session.status();
       case "server/health":
         return { health: session.status().health, uptimeMs: Date.now() - started, pid: process.pid };
-      case "document/open":
-        return session.open(need("path"), need("text"), p.version ?? 0);
-      case "document/change":
-        return session.change(need("path"), need("version"), need("changes"));
-      case "document/save":
-        return session.save(need("path"), p.text);
-      case "document/close":
-        return session.close(need("path"));
-      case "session/setDiffBase":
-        return session.setDiffBase(need("base"));
-      case "analysis/queryImpacts":
-        switch (p?.scope ?? "file") {
-          case "session":
-            return session.sessionTotal();
-          case "rules":
-            return session.ruleCounts(need("path"));
-          case "file":
-            return session.fileAnswer(need("path"));
-          default:
-            throw new RpcError(ERR.invalidParams, `unknown scope: ${p.scope}`);
-        }
-      case "analysis/getPages":
-        return session.getPages(p ?? {});
-      case "analysis/getDrilldown":
-        need("path");
-        need("url");
-        return session.drilldown({ ...p, level: p.level === 2 ? 2 : 1 });
-      case "analysis/openLive":
-        need("path");
-        need("url");
-        return session.openLive(p);
       case "index/capture":
         return session.startCapture(p ?? {});
       case "server/shutdown":
@@ -141,52 +81,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   }
 
   const server = net.createServer((socket) => {
-    clients.add(socket);
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      if (buffer.length > MAX_LINE) {
-        log("client sent an oversized message; closing the connection");
-        socket.destroy();
-        return;
-      }
-      let idx: number;
-      while ((idx = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 1);
-        if (line.trim()) handle(line);
-      }
+    const peer = serveRpc(socket, {
+      dispatch,
+      serialize: (method, run) => (SERIAL.has(method) ? (serial = serial.then(run, run)) : run()),
+      log,
+      onClose: (x) => clients.delete(x),
     });
-    socket.on("close", () => clients.delete(socket));
-    socket.on("error", () => clients.delete(socket));
-
-    function handle(line: string): void {
-      let msg: JsonRpcRequest | JsonRpcNotification;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        send(socket, { jsonrpc: "2.0", id: null, error: { code: ERR.parse, message: "parse error" } });
-        return;
-      }
-      if (!msg || typeof msg.method !== "string") {
-        send(socket, { jsonrpc: "2.0", id: (msg as any)?.id ?? null, error: { code: ERR.invalidRequest, message: "invalid request" } });
-        return;
-      }
-      const isRequest = "id" in msg && msg.id !== undefined && msg.id !== null;
-      const run = () => dispatch(msg.method, msg.params);
-      const p = SERIAL.has(msg.method) ? (serial = serial.then(run, run)) : run();
-      p.then(
-        (result) => {
-          if (isRequest) send(socket, { jsonrpc: "2.0", id: (msg as JsonRpcRequest).id, result });
-        },
-        (err: any) => {
-          const code = typeof err?.code === "number" ? err.code : ERR.internal;
-          if (code === ERR.internal) log(`${msg.method} failed: ${err?.stack ?? err}`);
-          if (isRequest) send(socket, { jsonrpc: "2.0", id: (msg as JsonRpcRequest).id, error: { code, message: String(err?.message ?? err), data: err?.data } });
-        },
-      );
-    }
+    clients.add(peer);
   });
 
   await new Promise<void>((res, rej) => {
@@ -204,7 +105,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     async close() {
       if (closing) return;
       closing = true;
-      for (const c of clients) c.destroy();
+      for (const c of clients) c.close();
       await new Promise<void>((r) => server.close(() => r()));
       await session.dispose();
       if (!isPipe && fs.existsSync(opts.socketPath)) fs.unlinkSync(opts.socketPath);

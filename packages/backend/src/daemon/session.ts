@@ -5,10 +5,10 @@
 
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import fg from "fast-glob";
-import { loadConfig, urlsForFile, type CbrConfig } from "../config.js";
+import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
 import { diffModels, type CssChange } from "../css/diff.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
@@ -16,11 +16,12 @@ import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0
 import { SiteIndex } from "../index/siteIndex.js";
 import { Store, type PageRow, type VariantInfo } from "../index/store.js";
 import { L1Pool } from "../l1/pool.js";
-import { DEFAULT_PROPS, Renderer, type PageDiff } from "../l2/render.js";
+import { DEFAULT_PROPS, Renderer, type PageDiff, type SheetEdit } from "../l2/render.js";
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
 import { DIFF_BASES, Git, readText, type BaseText, type DiffBaseKind } from "./diffBase.js";
+import { SheetMatcher } from "./sheetMatch.js";
 import {
   ERR,
   RpcError,
@@ -31,13 +32,34 @@ import {
   type GetPagesParams,
   type IndexStatus,
   type OpenLiveParams,
+  type PageDiffParams,
+  type PageDiffView,
   type PageItem,
   type PageSetName,
   type PagesResult,
   type RulesResult,
+  type ScopeStatus,
   type SelectorElements,
   type SessionTotal,
 } from "../rpc/protocol.js";
+
+/** A linked page group (server mode): counts cover the pages of the active ones. */
+export interface ScopeGroup {
+  id: string;
+  name: string;
+  active: boolean;
+  urls: string[];
+}
+
+/** Resources a server shares between its project sessions. */
+export interface SharedResources {
+  cfg: CbrConfig;
+  store: Store;
+  pool: L1Pool;
+  renderer: () => Renderer;
+  /** The current index, loaded once for every project (server mode). */
+  index?: () => SiteIndex | undefined;
+}
 
 export interface SessionOptions {
   workspaceRoot: string;
@@ -49,6 +71,10 @@ export interface SessionOptions {
   /** Watch the workspace for CSS/markup changes (default true). */
   watch?: boolean;
   diffBase?: DiffBaseKind;
+  /** Server mode: config, store, L1 pool and renderer owned by the server. */
+  shared?: SharedResources;
+  /** Server mode: the linked page groups (undefined: every captured page counts). */
+  scope?: ScopeGroup[];
 }
 
 interface FileResult {
@@ -116,13 +142,28 @@ export class Session extends EventEmitter {
   private captureState?: { running: boolean; done: number; total: number; error?: string };
   private queryN = 0;
   private readonly messages: string[] = [];
+  private matcher: SheetMatcher;
+  private scopeGroups?: ScopeGroup[];
+  /** Active linked groups → their pages in the current index. */
+  private scopeSets?: Map<string, PageSet>;
+  private scopeGen = 0;
+  /** CSS files found in the workspace by the last scan. */
+  private cssFiles: string[] = [];
 
   private constructor(readonly opts: SessionOptions) {
     super();
-    this.cfg = loadConfig(opts.workspaceRoot, { siteRoot: opts.siteRoot, baseUrl: opts.baseUrl, dataDir: opts.dataDir });
-    this.store = new Store(this.cfg.dataDir);
-    this.pool = new L1Pool({ blobDir: this.store.blobDir, workers: opts.l1Workers });
+    if (opts.shared) {
+      this.cfg = { ...opts.shared.cfg, workspaceRoot: resolve(opts.workspaceRoot) };
+      this.store = opts.shared.store;
+      this.pool = opts.shared.pool;
+    } else {
+      this.cfg = loadConfig(opts.workspaceRoot, { siteRoot: opts.siteRoot, baseUrl: opts.baseUrl, dataDir: opts.dataDir });
+      this.store = new Store(this.cfg.dataDir);
+      this.pool = new L1Pool({ blobDir: this.store.blobDir, workers: opts.l1Workers });
+    }
     this.diffBase = opts.diffBase ?? "HEAD";
+    this.scopeGroups = opts.scope;
+    this.matcher = new SheetMatcher(this.cfg, undefined);
   }
 
   static async create(opts: SessionOptions): Promise<Session> {
@@ -143,21 +184,75 @@ export class Session extends EventEmitter {
   // ---------------------------------------------------------------- index
 
   private loadIndex(): void {
-    const idx = SiteIndex.load(this.store);
+    const idx = this.opts.shared?.index ? this.opts.shared.index() : SiteIndex.load(this.store);
     this.index = idx;
+    this.matcher = new SheetMatcher(this.cfg, idx);
     if (!idx) {
       this.engine = undefined;
       this.l1 = undefined;
+      this.scopeSets = undefined;
       return;
     }
     this.l1 = new L1Cache(idx.revision.id, idx.size);
-    this.engine = new L0Engine(idx, this.cfg, this.l1);
+    this.engine = new L0Engine(idx, this.cfg, this.l1, { keysFor: (f) => this.matcher.keysFor(f), scope: this.computeScope() });
     this.l1Queue = new Map();
     this.l1Tried = new Map();
     this.l1gen++;
     // Production bases come from the capture: they change with the revision.
     if (this.diffBase === "production") for (const f of this.files.values()) f.base = undefined;
     this.pool.warm(idx).catch((err) => this.degrade(`L1 workers: ${err?.message ?? err}`));
+  }
+
+  /** Pages of the active linked groups in the current index (undefined: no scope). */
+  private computeScope(): PageSet | undefined {
+    const idx = this.index;
+    if (!this.scopeGroups || !idx) {
+      this.scopeSets = undefined;
+      return undefined;
+    }
+    const sets = new Map<string, PageSet>();
+    const union = PageSet.empty(idx.size);
+    for (const g of this.scopeGroups) {
+      if (!g.active) continue;
+      const set = PageSet.empty(idx.size);
+      for (const u of g.urls) {
+        const id = idx.byUrl.get(u);
+        if (id !== undefined) set.add(id);
+      }
+      set.andInPlace(idx.all);
+      sets.set(g.name, set);
+      union.orInPlace(set);
+    }
+    this.scopeSets = sets;
+    return union;
+  }
+
+  /** Server mode: the page groups this project is linked to (undefined: every page). */
+  setScope(groups: ScopeGroup[] | undefined): SessionTotal {
+    this.scopeGroups = groups;
+    this.scopeGen++;
+    this.engine?.setScope(this.computeScope());
+    this.l1Tried = new Map();
+    this.emit("status", this.status());
+    this.publishOpenDocs();
+    return this.sessionTotal();
+  }
+
+  /** Server mode: the site settings changed (the index updates on the next scan). */
+  reconfigure(cfg: CbrConfig): void {
+    Object.assign(this.cfg, { ...cfg, workspaceRoot: this.cfg.workspaceRoot });
+    this.matcher = new SheetMatcher(this.cfg, this.index);
+    for (const f of this.files.values()) this.touch(f);
+    this.publishOpenDocs();
+  }
+
+  scopeStatus(): ScopeStatus | undefined {
+    if (!this.scopeGroups) return undefined;
+    return {
+      linked: this.scopeGroups.length > 0,
+      groups: this.scopeGroups.map((g) => ({ id: g.id, name: g.name, active: g.active })),
+      pages: this.engine?.scoped.count() ?? 0,
+    };
   }
 
   private degrade(msg: string): void {
@@ -183,6 +278,7 @@ export class Session extends EventEmitter {
       markupChanged: this.markupChanged,
       diffBase: this.diffBase,
       capture: this.captureState ? { ...this.captureState } : undefined,
+      scope: this.scopeStatus(),
       limitations: LIMITATIONS,
       messages,
     };
@@ -291,7 +387,7 @@ export class Session extends EventEmitter {
 
   private cssDirs(): string[] {
     const dirs = this.cfg.stylesheets.map((m) => m.dir);
-    return dirs.length ? dirs : [this.cfg.siteRoot ?? this.cfg.workspaceRoot];
+    return dirs.length ? dirs : [this.cfg.workspaceRoot];
   }
 
   private async listCss(): Promise<string[]> {
@@ -301,7 +397,21 @@ export class Session extends EventEmitter {
       const found = await fg("**/*.css", { cwd: dir, absolute: true, ignore: ["**/node_modules/**", "**/.git/**"], suppressErrors: true });
       out.push(...found.map((f) => resolve(f)).filter((f) => !f.startsWith(this.cfg.dataDir)));
     }
-    return [...new Set(out)];
+    this.cssFiles = [...new Set(out)];
+    return this.cssFiles;
+  }
+
+  /** Workspace CSS files per site stylesheet they were matched to (the setup page lists them). */
+  sheetFiles(): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    for (const f of this.cssFiles) {
+      for (const key of this.matcher.keysFor(f)) {
+        let list = out.get(key);
+        if (!list) out.set(key, (list = []));
+        list.push(f);
+      }
+    }
+    return out;
   }
 
   /** Captured content hashes of the stylesheet(s) a workspace file is served as. */
@@ -309,9 +419,8 @@ export class Session extends EventEmitter {
     const idx = this.index;
     if (!idx) return [];
     const out: string[] = [];
-    for (const u of urlsForFile(this.cfg, path)) {
-      const key = idx.sheetKey(u);
-      const h = key ? idx.sheets.get(key)?.hash : undefined;
+    for (const key of this.matcher.keysFor(path)) {
+      const h = idx.sheets.get(key)?.hash;
       if (h) out.push(h);
     }
     return out;
@@ -383,7 +492,7 @@ export class Session extends EventEmitter {
   // ------------------------------------------------------------- analysis
 
   private stamp(f: FileState, pendingSensitive: boolean): string {
-    return [f.version, this.index?.revision.id ?? "-", this.diffBase, this.markupChanged ? 1 : 0, pendingSensitive ? this.l1gen : 0].join("|");
+    return [f.version, this.index?.revision.id ?? "-", this.diffBase, this.markupChanged ? 1 : 0, this.scopeGen, pendingSensitive ? this.l1gen : 0].join("|");
   }
 
   private current(f: FileState): CurrentModel {
@@ -416,7 +525,7 @@ export class Session extends EventEmitter {
       total: { exact: 0, possible: 0, unknown: 0, complete: false },
       totalReasons: [],
       changes: [],
-      mapping: { mapped: urlsForFile(this.cfg, f.path).length > 0, urls: urlsForFile(this.cfg, f.path), linkedPages: 0 },
+      mapping: { mapped: this.matcher.keysFor(f.path).length > 0, urls: this.matcher.keysFor(f.path), linkedPages: 0 },
       freshness: null,
       basis: "LOCAL_INDEX",
       timingMs: 0,
@@ -651,22 +760,30 @@ export class Session extends EventEmitter {
     if (r.pending && (await this.l1Idle())) r = this.setsFor(p);
     const { sets, pending, editRevision } = r;
     this.checkRevision(editRevision, p.editRevision);
-    const groupOf = (url: string) => {
+    // Server mode: the linked page groups (a page can be in several); otherwise the first path segment.
+    const scope = this.scopeSets;
+    const groupsOf = (id: number, url: string): string[] => {
+      if (scope) return [...scope].filter(([, set]) => set.has(id)).map(([name]) => name);
       const m = /^\/[^/]+\//.exec(url);
-      return m ? m[0] : "/";
+      return [m ? m[0] : "/"];
     };
     const groups = new Map<string, { name: string; exact: number; possible: number; unknown: number }>();
+    for (const name of scope?.keys() ?? []) groups.set(name, { name, exact: 0, possible: 0, unknown: 0 });
     const items: PageItem[] = [];
     const want = p.set ?? "all";
     for (const name of ["exact", "possible", "unknown"] as PageSetName[]) {
       for (const id of sets[name].ids()) {
         const row = idx.pages[id];
         if (!row) continue;
-        const g = groupOf(row.url);
-        let e = groups.get(g);
-        if (!e) groups.set(g, (e = { name: g, exact: 0, possible: 0, unknown: 0 }));
-        e[name]++;
-        if ((want === "all" || want === name) && (!p.group || p.group === g)) items.push({ url: row.url, set: name, template: row.template });
+        const gs = groupsOf(id, row.url);
+        for (const g of gs) {
+          let e = groups.get(g);
+          if (!e) groups.set(g, (e = { name: g, exact: 0, possible: 0, unknown: 0 }));
+          e[name]++;
+        }
+        if ((want === "all" || want === name) && (!p.group || gs.includes(p.group))) {
+          items.push({ url: row.url, set: name, template: row.template, ...(scope ? { groups: gs } : {}) });
+        }
       }
     }
     const order: Record<PageSetName, number> = { exact: 0, possible: 1, unknown: 2 };
@@ -866,9 +983,9 @@ export class Session extends EventEmitter {
       variants.find((v) => matches.some((m) => m.variants.some((x) => x.variant === v.name && x.count > 0))) ??
       variants[0] ??
       this.index!.variants[0];
-    this.renderer ??= new Renderer(this.cfg, this.store);
+    const renderer = this.getRenderer();
     const { props, unresolved } = this.propsFor(changes, [snap.r.cur.model, snap.baseModel], page);
-    const diff = await this.renderer.measure({
+    const diff = await renderer.measure({
       page,
       variant,
       mode,
@@ -883,6 +1000,106 @@ export class Session extends EventEmitter {
       diff.reason = `no stylesheet on this page uses ${unresolved.join(", ")}: the properties it feeds (inline styles, scripts) weren't compared`;
     }
     return diff;
+  }
+
+  private getRenderer(): Renderer {
+    if (this.opts.shared) return this.opts.shared.renderer();
+    return (this.renderer ??= new Renderer(this.cfg, this.store));
+  }
+
+  /**
+   * One page before and after every current edit of the project, with
+   * full-page screenshots and the outermost changed zones (the diff viewer).
+   */
+  async pageDiff(p: PageDiffParams): Promise<PageDiffView> {
+    const idx = this.requireIndex();
+    const page = this.pageRow(p.url);
+    const t0 = performance.now();
+    const editRevision = this.editRevision;
+    const edits: SheetEdit[] = [];
+    const list: PageDiffView["edits"] = [];
+    const changes: CssChange[] = [];
+    const models: StylesheetModel[] = [];
+    const warnings: string[] = [];
+    const owner = new Map<string, string>(); // site stylesheet → the file applied to it
+    for (const f of this.files.values()) {
+      const r = this.resultFor(f);
+      if (r.changes.length === 0) continue;
+      const file = relative(this.cfg.workspaceRoot, f.path).split(sep).join("/") || f.path;
+      list.push({ file, changes: r.changes.length });
+      let keys = r.answer.mapping.urls;
+      if (keys.length > 1 && f.base?.kind === "production") {
+        // A name tie: the base is the first match's captured CSS, so the edit only fits sheets with that same content.
+        const hash = this.sheetHashes(f.path)[0];
+        const same = keys.filter((k) => idx.sheets.get(k)?.hash === hash);
+        if (same.length < keys.length) {
+          warnings.push(`${file} matches ${keys.length} site stylesheets with the same name; it's compared only where the site's copy is identical (${same.join(", ")}).`);
+        }
+        keys = same;
+      }
+      const taken = keys.filter((k) => owner.has(k));
+      for (const k of taken) warnings.push(`${file} and ${owner.get(k)} both match ${k}; only ${owner.get(k)} is compared there.`);
+      keys = keys.filter((k) => !owner.has(k));
+      if (keys.length === 0) continue;
+      for (const k of keys) owner.set(k, file);
+      edits.push({ sheetKeys: keys, baseText: f.base?.text ?? "", editedText: r.cur.text });
+      changes.push(...r.changes);
+      models.push(r.cur.model, f.baseModel ?? r.cur.model);
+    }
+    const variants = this.pageVariants(page);
+    const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
+    const view: PageDiffView = {
+      status: "unchanged",
+      warnings,
+      url: page.url,
+      device: variant?.name ?? "",
+      devices: variants.map((v) => v.name),
+      live: !!p.live,
+      editRevision,
+      scannedAt: page.capturedAt,
+      edits: list,
+      scale: 1,
+      width: 0,
+      before: "",
+      after: "",
+      zones: [],
+      changedElements: 0,
+      movedElements: 0,
+      timingMs: 0,
+    };
+    const finish = () => {
+      view.timingMs = Math.round(performance.now() - t0);
+      return view;
+    };
+    if (list.length === 0) {
+      view.reason = "You have no CSS changes compared with the live site right now.";
+      return finish();
+    }
+    if (edits.length === 0) {
+      view.status = "inconclusive";
+      view.reason = "Your changed files don't match any stylesheet on the site, so they can't be applied to this page.";
+      return finish();
+    }
+    const { props, unresolved } = this.propsFor(changes, models, page);
+    const diff = await this.getRenderer().measure({ page, variant, mode: p.live ? "live" : "shell", edits, props, screenshots: true, maxElements: 500 });
+    view.status = diff.status;
+    view.reason = diff.reason;
+    view.warnings = [...warnings, ...diff.warnings];
+    if (diff.status === "unchanged" && unresolved.length) {
+      view.status = "inconclusive";
+      view.reason = `No stylesheet on this page uses ${unresolved.join(", ")}: what it feeds (inline styles, scripts) wasn't compared.`;
+    }
+    view.changedElements = diff.changedElements;
+    view.movedElements = diff.movedElements;
+    view.scale = diff.scale ?? 1;
+    view.width = diff.pageWidth ?? 0;
+    if (diff.screenshots) {
+      view.before = `data:image/jpeg;base64,${diff.screenshots.before}`;
+      view.after = `data:image/jpeg;base64,${diff.screenshots.after}`;
+    }
+    const box = (b: number[] | null) => (b ? ([b[0], b[1], b[2], b[3]] as [number, number, number, number]) : null);
+    view.zones = diff.zones.map((z) => ({ before: box(z.before), after: box(z.after), label: z.label, props: z.props }));
+    return finish();
   }
 
   // -------------------------------------------------------------- capture
@@ -907,13 +1124,7 @@ export class Session extends EventEmitter {
             }
           },
         });
-        this.loadIndex();
-        this.markupChanged = false;
-        for (const f of this.files.values()) this.touch(f);
-        await this.refreshClosed();
-        for (const f of this.files.values()) await this.ensureBase(f);
-        this.emit("revision", { indexRevision: this.index?.revision.id ?? null, result: res });
-        this.publishOpenDocs();
+        await this.indexChanged(res);
       } catch (err: any) {
         state.error = String(err?.message ?? err).split("\n")[0];
       } finally {
@@ -922,6 +1133,17 @@ export class Session extends EventEmitter {
       }
     })();
     return { started: true };
+  }
+
+  /** A new index revision was published (by this session's capture or the server's). */
+  async indexChanged(result?: unknown): Promise<void> {
+    this.loadIndex();
+    this.markupChanged = false;
+    for (const f of this.files.values()) this.touch(f);
+    await this.refreshClosed();
+    for (const f of this.files.values()) await this.ensureBase(f);
+    this.emit("revision", { indexRevision: this.index?.revision.id ?? null, result });
+    this.publishOpenDocs();
   }
 
   // ------------------------------------------------------------- watching
@@ -964,8 +1186,19 @@ export class Session extends EventEmitter {
             await this.ensureBase(f);
           }
         }
+        const before = new Map<string, string | undefined>();
+        for (const [p, f] of this.files) if (!f.doc) before.set(p, f.diskText);
+        const totalBefore = JSON.stringify(this.sessionTotal().total);
         await this.refreshClosed();
         this.publishOpenDocs();
+        // CSS changed on disk outside the editor (pull, branch switch, AI tools, other editors).
+        const files: string[] = [];
+        for (const [p, f] of this.files) if (!f.doc && (!before.has(p) || before.get(p) !== f.diskText)) files.push(p);
+        for (const p of before.keys()) if (!this.files.has(p)) files.push(p);
+        if (files.length) {
+          const session = this.sessionTotal();
+          if (JSON.stringify(session.total) !== totalBefore) this.emit("externalChange", { files, session });
+        }
       } catch (err: any) {
         this.messages.push(`refresh failed: ${err?.message ?? err}`);
       }
@@ -975,6 +1208,7 @@ export class Session extends EventEmitter {
   async dispose(): Promise<void> {
     clearTimeout(this.refreshTimer);
     await this.watcher?.close();
+    if (this.opts.shared) return; // the server owns the store, pool and renderer
     await this.renderer?.close();
     await this.pool.close();
     this.store.close();

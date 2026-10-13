@@ -46,8 +46,10 @@ export class L1Cache {
 export interface Candidates {
   mapped: boolean;
   urls: string[];
-  /** Pages that load the stylesheet (every captured page when unmapped). */
+  /** Pages that load the stylesheet (every captured page when unmapped), within the scope. */
   pages: PageSet;
+  /** Why there are no candidate pages at all. */
+  emptyReason?: string;
 }
 
 /** Selector key → candidate pages L1 should resolve. */
@@ -90,32 +92,52 @@ export interface Analysis {
   candidates: Candidates;
 }
 
-const ZERO_EXPLAINED = new Set<string>([REASON.customPropertyUnused, REASON.definitionUnused, REASON.notLinked]);
+const ZERO_EXPLAINED = new Set<string>([REASON.customPropertyUnused, REASON.definitionUnused, REASON.notLinked, REASON.noScope, REASON.outsideScope]);
 
 export class L0Engine {
   private readonly ubCache = new Map<string, PageSet>();
+
+  /** Pages counts are limited to (the linked page groups); undefined = every page. */
+  private scope?: PageSet;
+  private readonly keysFor: (file: string) => string[];
 
   constructor(
     readonly index: SiteIndex,
     readonly cfg: CbrConfig,
     readonly l1: L1Cache,
-  ) {}
+    opts: { keysFor?: (file: string) => string[]; scope?: PageSet } = {},
+  ) {
+    // Default: the explicit mapping, resolved to the captured keys (the page may link the file with different letter case).
+    this.keysFor = opts.keysFor ?? ((file) => [...new Set(urlsForFile(cfg, file).map((u) => index.sheetKey(u) ?? u))]);
+    this.setScope(opts.scope);
+  }
 
   get size(): number {
     return this.index.size;
   }
 
+  setScope(scope: PageSet | undefined): void {
+    this.scope = scope ? scope.and(this.index.all) : undefined;
+  }
+
+  get scoped(): PageSet {
+    return this.scope ?? this.index.all;
+  }
+
   candidates(file: string): Candidates {
-    const mapped = urlsForFile(this.cfg, file);
-    if (mapped.length === 0) return { mapped: false, urls: mapped, pages: this.index.all.clone() };
-    // The captured keys (the page may link the file with different letter case).
-    const urls = [...new Set(mapped.map((u) => this.index.sheetKey(u) ?? u))];
+    const urls = this.keysFor(file);
+    const noScope = this.scope?.isEmpty() ? REASON.noScope : undefined;
+    if (urls.length === 0) return { mapped: false, urls, pages: this.scoped.clone(), emptyReason: noScope };
     const pages = PageSet.empty(this.size);
     for (const u of urls) {
       const s = this.index.sheets.get(u);
       if (s) pages.orInPlace(s.pages);
     }
-    return { mapped: true, urls, pages: pages.andInPlace(this.index.all) };
+    pages.andInPlace(this.index.all);
+    const linked = !pages.isEmpty();
+    if (this.scope) pages.andInPlace(this.scope);
+    const emptyReason = !pages.isEmpty() ? undefined : noScope ?? (linked ? REASON.outsideScope : REASON.notLinked);
+    return { mapped: true, urls, pages, emptyReason };
   }
 
   freshness(cand: Candidates, baseText: string | undefined): Freshness {
@@ -422,7 +444,7 @@ export class L0Engine {
       }
       s.unknown.orInPlace(unknownC);
       s.normalize();
-      if (cand.mapped && cand.pages.isEmpty()) ctx.reasons.add(REASON.notLinked);
+      if (cand.emptyReason) ctx.reasons.add(cand.emptyReason);
       if (s.exact.isEmpty() && s.possible.isEmpty() && (a || b)) this.explainZero((a ?? b)!, ctx);
       if (!cand.mapped) {
         this.unmap(s, ctx);
@@ -505,7 +527,7 @@ export class L0Engine {
     const s = this.ruleSets(r, ctx).clone();
     s.unknown.orInPlace(call.unknownC);
     s.normalize();
-    if (cand.mapped && cand.pages.isEmpty()) ctx.reasons.add(REASON.notLinked);
+    if (cand.emptyReason) ctx.reasons.add(cand.emptyReason);
     if (s.exact.isEmpty() && s.possible.isEmpty()) this.explainZero(r, ctx);
     if (!cand.mapped) this.unmap(s, ctx);
     return { s, ctx };

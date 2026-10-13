@@ -1,33 +1,105 @@
-// CSS Blast Radius for VS Code: wires the daemon, document sync, editor
-// surfaces and the page panel together (§7, §10.4).
+// Workspace editor session on the shared CSS Blast Radius server.
 
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { RpcCallError } from "./daemonClient";
 import { DaemonLifecycle } from "./daemonLifecycle";
 import { DocumentSync, isCssDocument } from "./documentSync";
+import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
-import { DIFF_BASE_LABEL } from "./format";
+import { ExternalNoticeBatch } from "./externalNotice";
+import { changeAtCursor, formatCount } from "./format";
 import { PagesPanel } from "./panel";
-import type { CaptureProgressParams, DiffBaseKind, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
+import type { CaptureProgressParams, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
 import { ImpactState } from "./state";
-
-const RESTART_SETTINGS = ["siteRoot", "baseUrl", "dataDir", "daemonPath", "nodePath", "diffBase"];
+import { serverOrigin } from "./urls";
 
 export function activate(ctx: vscode.ExtensionContext): void {
   // Multi-root workspaces: the first folder only (v1).
   const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) return;
+  if (!folder) {
+    const watcher = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      if (!vscode.workspace.workspaceFolders?.length) return;
+      watcher.dispose();
+      activate(ctx);
+    });
+    ctx.subscriptions.push(watcher);
+    return;
+  }
+  const folderUri = folder.uri;
 
-  const life = new DaemonLifecycle(folder.uri.fsPath);
+  const life = new DaemonLifecycle(folderUri.fsPath);
   const client = life.client;
   const state = new ImpactState();
   const log = (m: string) => life.output.appendLine(m);
-  const sync = new DocumentSync(client, state, log);
-  const surfaces = new EditorSurfaces(client, life, state, sync);
-  ctx.subscriptions.push(life, state, sync, surfaces);
-
+  const notices = new ExternalNoticeBatch();
+  let noticeTimer: NodeJS.Timeout | undefined;
   let captureUi: { report(p: CaptureProgressParams): void; done(): void } | undefined;
+
+  function flushNotices(): void {
+    clearTimeout(noticeTimer);
+    const notice = notices.take(Date.now());
+    if (notice) {
+      const count = notice.files.length;
+      void vscode.window.showInformationMessage(
+        `CSS changed outside the editor (${count} file${count === 1 ? "" : "s"}): ${formatCount(notice.session.total)} affected.`,
+        "Show pages", "Dismiss",
+      ).then((choice) => { if (choice === "Show pages") void vscode.commands.executeCommand("cssBlastRadius.showAllPages"); });
+    } else noticeTimer = setTimeout(flushNotices, notices.delay(Date.now()));
+  }
+
+  function externalChange(files: string[], session: SessionTotal): void {
+    state.acceptSession(session);
+    if (!files.length) return;
+    notices.add(files, state.session ?? session);
+    flushNotices();
+  }
+
+  const sync = new DocumentSync(client, state, log, (file, session) => externalChange([file], session));
+  const surfaces = new EditorSurfaces(client, life, state, sync);
+  ctx.subscriptions.push(life, state, sync, surfaces, { dispose: () => { clearTimeout(noticeTimer); notices.clear(); } });
+
+  async function refreshScope(): Promise<void> {
+    try {
+      state.setStatus(await client.call<IndexStatus>("index/getStatus"));
+    } catch (err: any) {
+      log(`group status: ${err?.message ?? err}`);
+    }
+  }
+
+  async function refreshAnswers(): Promise<void> {
+    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map(async (doc) => {
+      try {
+        state.acceptAnswer(await client.call<FileAnswer>("analysis/queryImpacts", { path: doc.uri.fsPath, scope: "file" }));
+      } catch (err: any) {
+        log(`Page count for ${doc.uri.fsPath}: ${err?.message ?? err}`);
+      }
+    }));
+  }
+
+  async function applyConfiguredBase(refresh = true): Promise<void> {
+    if (!client.connected) return;
+    const base = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<DiffBaseKind | "">("diffBase") || "production";
+    try {
+      state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base }, 120_000));
+      await refreshScope();
+      if (refresh) await refreshAnswers();
+    } catch (err: any) {
+      log(`Comparison base: ${err?.message ?? err}`);
+    }
+  }
+
+  async function setGroups(): Promise<void> {
+    if (!client.connected) return;
+    const groups = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<string[]>("groups") ?? [];
+    try {
+      state.acceptSession(await client.call<SessionTotal>("session/setGroups", { groups }));
+      await refreshScope();
+      await refreshAnswers();
+    } catch (err: any) {
+      log(`linking groups: ${err?.message ?? err}`);
+    }
+  }
 
   client.onNotification((method, p) => {
     switch (method) {
@@ -41,59 +113,69 @@ export function activate(ctx: vscode.ExtensionContext): void {
       case "analysis/publishImpact":
         state.acceptSession((p as { session: SessionTotal }).session);
         return;
+      case "analysis/externalChange": {
+        const change = p as { files: string[]; session: SessionTotal };
+        externalChange(change.files, change.session);
+        return;
+      }
+      case "groups/changed":
+        if (life.init) life.init.groups = (p as { groups: GroupInfo[] }).groups;
+        void setGroups();
+        return;
       case "index/statusChanged": {
         const s = p as IndexStatus;
         state.setStatus(s);
         if (captureUi && !s.capture?.running) {
           captureUi.done();
           captureUi = undefined;
-          if (s.capture?.error) void vscode.window.showErrorMessage(`Capture failed: ${s.capture.error}`);
-          else void vscode.window.showInformationMessage(`Captured ${s.okPages.toLocaleString("en-US")} pages${s.failedPages ? ` (${s.failedPages} failed)` : ""}.`);
+          if (s.capture?.error) void vscode.window.showErrorMessage(`Scan failed: ${s.capture.error}`);
         }
         return;
       }
       case "index/revisionSwitched":
-        log(`index revision ${(p as { indexRevision: number | null }).indexRevision}`);
+        log(`page scan updated`);
         state.invalidateRules(undefined);
+        captureUi?.done();
+        captureUi = undefined;
+        void refreshScope();
+        void refreshAnswers();
         return;
       case "index/captureProgress": {
         const pr = p as CaptureProgressParams;
-        if (!pr.ok) log(`capture failed: ${pr.url}`);
+        if (!pr.ok) log(`Page scan failed: ${pr.url}`);
         captureUi?.report(pr);
-        const st = state.status;
-        if (st?.capture) {
-          st.capture.done = pr.done;
-          st.capture.total = pr.total;
-          state.setStatus(st);
-        }
         return;
       }
       case "server/degraded": {
         const msg = (p as { message: string }).message;
-        log(`degraded: ${msg}`);
+        log(`Server needs attention: ${msg}`);
         state.setDegraded(msg);
-        return;
       }
     }
   });
 
   life.onAttached(async (init) => {
-    log(`attached: daemon ${init.serviceVersion}, ${init.status.pages} pages indexed`);
+    log(`Connected: ${init.serviceVersion}, ${init.status.pages} pages scanned`);
     state.reset();
+    notices.clear();
     state.setStatus(init.status);
+    const base = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<DiffBaseKind | "">("diffBase");
+    if (base && base !== init.status.diffBase) await applyConfiguredBase(false);
     await sync.openAll();
     try {
       state.acceptSession(await client.call<SessionTotal>("analysis/queryImpacts", { scope: "session" }));
     } catch (err: any) {
-      if (!(err instanceof RpcCallError)) log(`session: ${err?.message ?? err}`);
+      if (!(err instanceof RpcCallError)) log(`Page count: ${err?.message ?? err}`);
     }
     state.invalidateRules(undefined);
-    if (!init.status.ready && !init.status.capture?.running) {
+    if (!init.status.scope?.linked && !ctx.workspaceState.get<boolean>("promptedGroups")) {
+      await ctx.workspaceState.update("promptedGroups", true);
       const pick = await vscode.window.showInformationMessage(
-        "CSS Blast Radius hasn't captured this site yet. Capture it now? (It runs in the background.)",
-        "Capture site",
+        "Link page groups to this project to see which pages your CSS edits affect.",
+        "Link page groups", "Open setup page",
       );
-      if (pick) void vscode.commands.executeCommand("cssBlastRadius.captureSite");
+      if (pick === "Link page groups") void vscode.commands.executeCommand("cssBlastRadius.linkGroups");
+      if (pick === "Open setup page") void vscode.commands.executeCommand("cssBlastRadius.openSetupPage");
     }
   });
 
@@ -106,74 +188,123 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   const requireConnected = (): boolean => {
     if (client.connected) return true;
-    void vscode.window.showWarningMessage(`CSS Blast Radius isn't connected to its daemon. ${life.stateDetail}`, "Show output").then((x) => x && life.output.show());
+    void vscode.window.showWarningMessage(
+      `CSS Blast Radius server is offline. ${life.stateDetail}`, "Reconnect to Server", "Show Output",
+    ).then((choice) => {
+      if (choice === "Reconnect to Server") void life.reconnect();
+      if (choice === "Show Output") life.output.show();
+    });
     return false;
+  };
+
+  const cursorTarget = (): PagesTarget => {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || !isCssDocument(ed.document)) return { title: "All edits" };
+    const file = ed.document.uri.fsPath;
+    const a = state.answers.get(file);
+    const r = state.rules.get(file);
+    const rules = a && r?.editRevision === a.editRevision && r.indexRevision === a.indexRevision ? r.rules : [];
+    const ch = a && changeAtCursor(a.changes, rules, ed.selection.active.line + 1);
+    if (!ch) return { title: "All edits" };
+    const sides: PagesTarget["sides"] = ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])];
+    return { path: file, changeId: ch.id, sides, title: ch.selector || `Edit on line ${ch.line}` };
   };
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand("cssBlastRadius.showPages", (target?: PagesTarget) => {
       if (!requireConnected()) return;
-      PagesPanel.show(ctx, client, state, target && typeof target === "object" && "title" in target ? target : { title: "Your edits" });
+      PagesPanel.show(ctx, client, life, state, target && typeof target === "object" && "title" in target ? target : cursorTarget());
     }),
-
-    vscode.commands.registerCommand("cssBlastRadius.showFilePages", (uri?: vscode.Uri) => {
-      if (!requireConnected()) return;
-      const doc = uri ? undefined : vscode.window.activeTextEditor?.document;
-      const file = uri?.fsPath ?? (doc && isCssDocument(doc) ? doc.uri.fsPath : undefined);
-      if (!file) return void vscode.window.showInformationMessage("Open a CSS file first.");
-      PagesPanel.show(ctx, client, state, { path: file, title: path.basename(file) });
+    vscode.commands.registerCommand("cssBlastRadius.showAllPages", () => {
+      if (requireConnected()) PagesPanel.show(ctx, client, life, state, { title: "All edits" });
     }),
-
-    vscode.commands.registerCommand("cssBlastRadius.captureSite", async () => {
+    vscode.commands.registerCommand("cssBlastRadius.togglePanel", () => {
+      if (requireConnected()) PagesPanel.toggle(ctx, client, life, state);
+    }),
+    vscode.commands.registerCommand("cssBlastRadius.openDiffInBrowser", () => DiffTab.openInBrowser()),
+    vscode.commands.registerCommand("cssBlastRadius.linkGroups", async () => {
       if (!requireConnected()) return;
-      if (state.status?.capture?.running) return void vscode.window.showInformationMessage("A capture is already running.");
+      try {
+        const groups = await client.call<GroupInfo[]>("groups/list");
+        const linked = new Set(vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<string[]>("groups") ?? []);
+        const setup = { label: "$(link-external) Open setup page", description: "Add or manage groups", id: "" };
+        const picks = await vscode.window.showQuickPick(
+          [...groups.map((g) => ({
+            label: g.name,
+            description: g.active ? `${g.pages.toLocaleString("en-US")} pages` : "paused",
+            picked: linked.has(g.id), id: g.id,
+          })), setup],
+          { title: "Link page groups to this project", placeHolder: "Choose the groups whose pages your CSS edits may affect", canPickMany: true },
+        );
+        if (!picks) return;
+        if (picks.some((p) => !p.id)) void vscode.commands.executeCommand("cssBlastRadius.openSetupPage");
+        const selected = picks.filter((p) => !!p.id).map((p) => p.id);
+        if (selected.length || !picks.some((p) => !p.id)) {
+          await vscode.workspace.getConfiguration("cssBlastRadius", folderUri).update("groups", selected, vscode.ConfigurationTarget.Workspace);
+        }
+      } catch (err: any) {
+        void vscode.window.showErrorMessage(`Couldn't load page groups: ${err?.message ?? err}`);
+      }
+    }),
+    vscode.commands.registerCommand("cssBlastRadius.openSetupPage", async () => {
+      try {
+        await vscode.env.openExternal(vscode.Uri.parse(serverOrigin(life.serverUrl).toString()));
+      } catch (err: any) {
+        void vscode.window.showErrorMessage(`Couldn't open the setup page: ${err?.message ?? err}`);
+      }
+    }),
+    vscode.commands.registerCommand("cssBlastRadius.rescanGroups", async () => {
+      if (!requireConnected()) return;
+      if (state.status?.capture?.running) return void vscode.window.showInformationMessage("A scan is already running.");
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "CSS Blast Radius: capturing the site", cancellable: false },
-        (progress) =>
-          new Promise<void>((resolve) => {
-            let pct = 0;
-            captureUi = {
-              report: (p) => {
-                const next = p.total ? (p.done / p.total) * 100 : 0;
-                progress.report({ increment: Math.max(next - pct, 0), message: `${p.done}/${p.total}` });
-                pct = Math.max(pct, next);
-              },
-              done: resolve,
-            };
-            client.call("index/capture", {}).catch((err: any) => {
-              captureUi = undefined;
-              resolve();
-              void vscode.window.showErrorMessage(`Couldn't start the capture: ${err?.message ?? err}`);
-            });
-          }),
+        { location: vscode.ProgressLocation.Notification, title: "CSS Blast Radius: scanning linked groups", cancellable: false },
+        (progress) => new Promise<void>((resolve) => {
+          let pct = 0;
+          captureUi = {
+            report: (p) => {
+              const next = p.total ? (p.done / p.total) * 100 : 0;
+              progress.report({ increment: Math.max(next - pct, 0), message: `${p.done}/${p.total} pages` });
+              pct = Math.max(pct, next);
+            },
+            done: resolve,
+          };
+          client.call("index/capture", {}).catch((err: any) => {
+            captureUi = undefined;
+            resolve();
+            void vscode.window.showErrorMessage(`Couldn't start the scan: ${err?.message ?? err}`);
+          });
+        }),
       );
     }),
-
     vscode.commands.registerCommand("cssBlastRadius.setDiffBase", async () => {
       if (!requireConnected()) return;
-      const bases: DiffBaseKind[] = life.init?.capabilities.diffBases ?? ["HEAD", "saved", "session"];
-      const current = state.session?.diffBase ?? state.status?.diffBase;
+      const bases: DiffBaseKind[] = ["production", "HEAD", "saved", "session"];
+      const labels: Record<DiffBaseKind, string> = {
+        production: "The live site (last scan)", HEAD: "Last commit",
+        saved: "Last save", session: "When I opened VS Code",
+      };
+      const current = state.session?.diffBase ?? state.status?.diffBase ?? "production";
       const pick = await vscode.window.showQuickPick(
-        bases.map((b) => ({ label: DIFF_BASE_LABEL[b] ?? b, description: b === current ? "current" : undefined, base: b })),
+        bases.map((base) => ({ label: labels[base], description: base === current ? "current" : undefined, base })),
         { title: "Compare your CSS edits with…" },
       );
       if (!pick) return;
       try {
         state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base: pick.base }, 120_000));
-        state.setStatus(await client.call<IndexStatus>("index/getStatus"));
+        await refreshScope();
+        await refreshAnswers();
       } catch (err: any) {
-        void vscode.window.showErrorMessage(`Couldn't change the diff base: ${err?.message ?? err}`);
+        void vscode.window.showErrorMessage(`Couldn't change what your edits are compared with: ${err?.message ?? err}`);
       }
     }),
-
-    vscode.commands.registerCommand("cssBlastRadius.restartDaemon", () => life.restart()),
+    vscode.commands.registerCommand("cssBlastRadius.reconnectServer", () => life.reconnect()),
     vscode.commands.registerCommand("cssBlastRadius.showOutput", () => life.output.show()),
-
-    vscode.workspace.onDidChangeConfiguration(async (e) => {
+    vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("cssBlastRadius.codeLens")) state.invalidateRules(undefined);
-      if (RESTART_SETTINGS.some((k) => e.affectsConfiguration(`cssBlastRadius.${k}`))) {
-        const pick = await vscode.window.showInformationMessage("Restart the CSS Blast Radius daemon to apply the new settings?", "Restart");
-        if (pick) await life.restart();
+      if (e.affectsConfiguration("cssBlastRadius.groups")) void setGroups();
+      if (e.affectsConfiguration("cssBlastRadius.diffBase")) void applyConfiguredBase();
+      if (["server", "autoStartServer", "serverPath", "daemonPath", "nodePath"].some((k) => e.affectsConfiguration(`cssBlastRadius.${k}`))) {
+        void life.reconnect();
       }
     }),
   );

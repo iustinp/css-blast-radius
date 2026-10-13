@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // css-blast-radius CLI.
 //
+//   css-blast-radius serve   [--port 4317] [--host 127.0.0.1] [--data ~/.css-blast-radius]
 //   css-blast-radius daemon  --workspace <dir> [--socket <path>] [site options]
 //   css-blast-radius capture --workspace <dir> [--urls /a.html,/b.html] [site options]
 //   css-blast-radius impact  --workspace <dir> [--diff-base HEAD|saved|production] [--pages] [site options]
@@ -12,6 +13,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { startDaemon } from "./rpc/server.js";
+import { DEFAULT_PORT, startServer } from "./server/http.js";
 import { Session } from "./daemon/session.js";
 import { DIFF_BASES, type DiffBaseKind } from "./daemon/diffBase.js";
 import { loadConfig } from "./config.js";
@@ -20,6 +22,7 @@ import { Capturer } from "./capture/capture.js";
 import type { Count } from "./engine/contract.js";
 
 const USAGE = `usage:
+  css-blast-radius serve   [--port ${DEFAULT_PORT}] [--host 127.0.0.1] [--data <dir>]   (default data: ~/.css-blast-radius)
   css-blast-radius daemon  --workspace <dir> [--socket <path>] [--l1-workers <n>]
   css-blast-radius capture --workspace <dir> [--urls <path,...>] [--concurrency <n>]
   css-blast-radius impact  --workspace <dir> [--diff-base ${DIFF_BASES.join("|")}] [--pages]
@@ -70,6 +73,31 @@ async function main(): Promise<number> {
   if (diffBase && !DIFF_BASES.includes(diffBase)) throw new Error(`--diff-base must be one of ${DIFF_BASES.join(", ")}`);
 
   switch (cmd) {
+    case "serve": {
+      const port = Number(flags.get("port") ?? DEFAULT_PORT);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("--port must be a number between 0 and 65535");
+      const host = flags.get("host") ?? "127.0.0.1";
+      const dataDir = path.resolve(flags.get("data") ?? path.join(os.homedir(), ".css-blast-radius"));
+      const log = (m: string) => process.stderr.write(`[css-blast-radius] ${m}\n`);
+      let server;
+      try {
+        server = await startServer({ dataDir, port, host, l1Workers: flags.has("l1-workers") ? Number(flags.get("l1-workers")) : undefined, log });
+      } catch (err: any) {
+        if (err?.code === "EADDRINUSE") {
+          process.stderr.write(`Port ${port} is already in use: CSS Blast Radius may already be running (open http://127.0.0.1:${port}), or pick another port with --port.\n`);
+          return 1;
+        }
+        throw err;
+      }
+      if (!["127.0.0.1", "localhost", "::1"].includes(host)) log(`warning: listening on ${host}; anyone who can reach this address can use it (there is no login yet)`);
+      process.stdout.write(`CSS Blast Radius is running.\n  Set up your site:  ${server.url}\n  Data folder:       ${dataDir}\nPress Ctrl+C to stop.\n`);
+      const srv = server;
+      const stop = () => void srv.close().then(() => process.exit(0));
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      if (flags.has("exit-with-parent")) process.stdin.on("end", stop).resume();
+      return new Promise<number>(() => {});
+    }
     case "daemon": {
       const socketPath = flags.get("socket") ?? defaultSocketPath(workspaceRoot);
       const l1 = flags.get("l1-workers");

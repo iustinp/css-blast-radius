@@ -1,21 +1,14 @@
-// Attach to the workspace's daemon or start one (§10.4); reconnect with backoff.
+// A workspace session on the shared, long-lived local server.
 
 import * as vscode from "vscode";
 import * as cp from "node:child_process";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { DaemonClient } from "./daemonClient";
-import { PROTOCOL_MAJOR, type IndexStatus, type InitializeResult } from "./protocol";
+import { PROTOCOL_MAJOR, type InitializeResult } from "./protocol";
+import { isLocalServer, serverOrigin } from "./urls";
 
 export type ConnectionState = "STARTING" | "CONNECTED" | "DISCONNECTED" | "FAILED";
-
-/** Same default as the CLI (`defaultSocketPath`), so CLI-started daemons are found too. */
-export function socketPathFor(workspaceRoot: string): string {
-  const h = crypto.createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 16);
-  return process.platform === "win32" ? `\\\\.\\pipe\\css-blast-radius-${h}` : path.join(os.tmpdir(), `css-blast-radius-${h}.sock`);
-}
 
 export class DaemonLifecycle implements vscode.Disposable {
   readonly client = new DaemonClient();
@@ -23,25 +16,26 @@ export class DaemonLifecycle implements vscode.Disposable {
   state: ConnectionState = "STARTING";
   stateDetail = "";
   init?: InitializeResult;
-  private proc?: cp.ChildProcess;
   private disposed = false;
   private retryMs = 500;
   private reconnectTimer?: NodeJS.Timeout;
   private starting?: Promise<void>;
-  private readonly socketPath: string;
+  private lastSpawn = 0;
   private readonly onAttachedEmitter = new vscode.EventEmitter<InitializeResult>();
   private readonly onStateEmitter = new vscode.EventEmitter<ConnectionState>();
-  /** Fired after every (re)connect: the daemon may be new, so documents must be re-opened. */
   readonly onAttached = this.onAttachedEmitter.event;
   readonly onState = this.onStateEmitter.event;
 
   constructor(private readonly workspaceRoot: string) {
-    this.socketPath = socketPathFor(workspaceRoot);
     this.client.onClose(() => {
       if (this.disposed) return;
-      this.setState("DISCONNECTED", "Daemon disconnected; reconnecting…");
+      this.setState("DISCONNECTED", "Server disconnected; reconnecting…");
       this.scheduleReconnect();
     });
+  }
+
+  get serverUrl(): string {
+    return this.init?.serverUrl || this.settings().server;
   }
 
   private setState(s: ConnectionState, detail = ""): void {
@@ -51,14 +45,13 @@ export class DaemonLifecycle implements vscode.Disposable {
   }
 
   private settings() {
-    const c = vscode.workspace.getConfiguration("cssBlastRadius");
+    const c = vscode.workspace.getConfiguration("cssBlastRadius", vscode.Uri.file(this.workspaceRoot));
     return {
-      daemonPath: c.get<string>("daemonPath") || path.resolve(__dirname, "../../backend/dist/cli.js"),
+      server: c.get<string>("server") || "http://127.0.0.1:4317",
+      autoStart: c.get<boolean>("autoStartServer") ?? true,
+      serverPath: c.get<string>("serverPath") || c.get<string>("daemonPath") || path.resolve(__dirname, "../../backend/dist/cli.js"),
       nodePath: c.get<string>("nodePath") || "node",
-      siteRoot: c.get<string>("siteRoot") || "",
-      baseUrl: c.get<string>("baseUrl") || "",
-      dataDir: c.get<string>("dataDir") || "",
-      diffBase: c.get<string>("diffBase") || "",
+      groups: c.get<string[]>("groups") || [],
     };
   }
 
@@ -68,67 +61,86 @@ export class DaemonLifecycle implements vscode.Disposable {
   }
 
   private async doStart(): Promise<void> {
-    if (this.disposed) return;
-    if (await this.tryAttach()) return;
-    const s = this.settings();
-    if (!fs.existsSync(s.daemonPath)) {
-      this.setState("FAILED", `Daemon not found at ${s.daemonPath}. Build the backend or set cssBlastRadius.daemonPath.`);
+    if (this.disposed || this.client.connected) return;
+    this.setState("STARTING", "Connecting to the server…");
+    const settings = this.settings();
+    let url: URL;
+    try {
+      url = serverOrigin(settings.server);
+    } catch (err: any) {
+      this.setState("FAILED", err.message);
       return;
     }
-    const args = [s.daemonPath, "daemon", "--workspace", this.workspaceRoot, "--socket", this.socketPath, "--exit-with-parent"];
-    if (s.siteRoot) args.push("--site", s.siteRoot);
-    if (s.baseUrl) args.push("--base-url", s.baseUrl);
-    if (s.dataDir) args.push("--data", s.dataDir);
-    if (s.diffBase) args.push("--diff-base", s.diffBase);
-    this.output.appendLine(`starting: ${s.nodePath} ${args.join(" ")}`);
-    let spawnError: string | undefined;
-    const proc = cp.spawn(s.nodePath, args, { cwd: this.workspaceRoot, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    this.proc = proc;
-    proc.stdout?.on("data", (d) => this.output.append(String(d)));
-    proc.stderr?.on("data", (d) => this.output.append(String(d)));
-    proc.on("error", (err) => {
-      spawnError = `Couldn't start the daemon with “${s.nodePath}”: ${err.message}. Set cssBlastRadius.nodePath to a Node.js ≥ 20 binary.`;
-      this.output.appendLine(spawnError);
-    });
-    proc.on("exit", (code) => {
-      this.output.appendLine(`daemon exited (${code})`);
-      if (this.proc === proc) this.proc = undefined;
-    });
-    for (let attempt = 0; attempt < 40 && !this.disposed; attempt++) {
-      await new Promise((r) => setTimeout(r, Math.min(100 * 1.5 ** attempt, 1000)));
-      if (spawnError) break;
-      if (await this.tryAttach()) return;
-      if (!this.proc) break;
+    let error = await this.tryAttach(settings.server, settings.groups);
+    if (!error) return;
+    if (settings.autoStart && isLocalServer(url) && (error as NodeJS.ErrnoException).code === "ECONNREFUSED") {
+      if (Date.now() - this.lastSpawn > 15_000) {
+        this.lastSpawn = Date.now();
+        if (!fs.existsSync(settings.serverPath)) {
+          const detail = `Server not found at ${settings.serverPath}. Build the backend or set cssBlastRadius.serverPath.`;
+          this.output.appendLine(detail);
+          this.setState("FAILED", detail);
+          this.scheduleReconnect();
+          return;
+        } else {
+          this.output.appendLine(`Starting server: ${settings.nodePath} ${settings.serverPath} serve --port ${url.port || "80"}`);
+          try {
+            const proc = cp.spawn(settings.nodePath, [settings.serverPath, "serve", "--port", url.port || "80"], {
+              detached: true,
+              stdio: "ignore",
+              windowsHide: true,
+            });
+            proc.on("error", (e) => this.output.appendLine(`Server start failed: ${e.message}`));
+            proc.unref();
+          } catch (e: any) {
+            this.output.appendLine(`Server start failed: ${e?.message ?? e}`);
+          }
+        }
+      }
+      const until = Date.now() + 10_000;
+      let delay = 100;
+      while (!this.disposed && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, delay));
+        error = await this.tryAttach(settings.server, settings.groups);
+        if (!error) return;
+        delay = Math.min(Math.round(delay * 1.5), 900);
+      }
     }
-    this.setState("FAILED", spawnError ?? "The daemon didn't start; see the “CSS Blast Radius” output.");
+    if (this.disposed) return;
+    this.output.appendLine(`Server unavailable: ${error.message}`);
+    this.setState("FAILED", `Server unavailable at ${settings.server}: ${error.message}`);
+    this.scheduleReconnect();
   }
 
-  private async tryAttach(): Promise<boolean> {
+  private async tryAttach(server: string, groups: string[]): Promise<Error | undefined> {
     try {
-      await this.client.connect(this.socketPath, 1500);
-    } catch {
-      return false;
+      await this.client.connect(server, 1500);
+    } catch (err: any) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+    if (this.disposed) {
+      this.client.dispose();
+      return new Error("Extension deactivated");
     }
     try {
-      const init = await this.client.call<InitializeResult>("initialize", { client: "vscode" }, 10_000);
-      if (init.protocolMajor !== PROTOCOL_MAJOR) {
-        this.client.dispose();
-        this.setState("FAILED", `Incompatible daemon (protocol ${init.protocolMajor}, need ${PROTOCOL_MAJOR}). Restart the daemon.`);
-        return true;
-      }
+      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, groups, client: "vscode" }, 10_000);
+      if (init.protocolMajor !== PROTOCOL_MAJOR) throw new Error(`Incompatible server (protocol ${init.protocolMajor}, need ${PROTOCOL_MAJOR}).`);
       this.init = init;
       this.retryMs = 500;
+      clearTimeout(this.reconnectTimer);
       this.setState("CONNECTED");
+      this.output.appendLine(`Connected to ${server} (${init.serviceVersion})`);
       this.onAttachedEmitter.fire(init);
-      return true;
+      return undefined;
     } catch (err: any) {
-      this.output.appendLine(`initialize failed: ${err?.message ?? err}`);
+      this.output.appendLine(`Initialize failed: ${err?.message ?? err}`);
       this.client.dispose();
-      return false;
+      return err instanceof Error ? err : new Error(String(err));
     }
   }
 
   private scheduleReconnect(): void {
+    if (this.disposed) return;
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.retryMs = Math.min(this.retryMs * 2, 10_000);
@@ -136,27 +148,18 @@ export class DaemonLifecycle implements vscode.Disposable {
     }, this.retryMs);
   }
 
-  async restart(): Promise<void> {
+  async reconnect(): Promise<void> {
     clearTimeout(this.reconnectTimer);
-    if (this.client.connected) await this.client.call("server/shutdown", undefined, 5000).catch(() => {});
-    this.proc?.kill();
-    this.proc = undefined;
     this.client.dispose();
-    this.setState("STARTING");
-    await new Promise((r) => setTimeout(r, 300));
+    this.init = undefined;
+    this.retryMs = 500;
     await this.start();
-  }
-
-  status(): IndexStatus | undefined {
-    return this.init?.status;
   }
 
   dispose(): void {
     this.disposed = true;
     clearTimeout(this.reconnectTimer);
     this.client.dispose();
-    // Closing stdin ends a daemon started with --exit-with-parent.
-    this.proc?.stdin?.end();
     this.onAttachedEmitter.dispose();
     this.onStateEmitter.dispose();
     this.output.dispose();

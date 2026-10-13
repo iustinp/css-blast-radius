@@ -1,6 +1,7 @@
-// Daemon ↔ extension protocol (§11): JSON-RPC 2.0, one JSON value per line
-// (NDJSON) over a Unix domain socket or Windows named pipe. Every answer
-// carries indexRevision and editRevision (§6.8).
+// Editor ↔ backend protocol (§11): JSON-RPC 2.0, one JSON value per line
+// (NDJSON), over the local server's `/rpc` HTTP upgrade (or the older
+// per-workspace daemon socket). Every answer carries indexRevision and
+// editRevision (§6.8).
 
 import type { Count, FileAnswer, RuleCount } from "../engine/contract.js";
 import type { PageDiff } from "../l2/render.js";
@@ -8,8 +9,8 @@ import type { DiffBaseKind } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 0;
-export const SERVICE_VERSION = "0.2.0";
+export const PROTOCOL_MINOR = 1;
+export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
 export interface JsonRpcRequest {
@@ -61,6 +62,32 @@ export interface InitializeResult {
   repository: { workspaceRoot: string; siteRoot?: string; baseUrl?: string };
   capabilities: { levels: number[]; capture: boolean; diffBases: DiffBaseKind[] };
   status: IndexStatus;
+  /** Server mode only: the project's session, the server's URL and every page group. */
+  sessionId?: string;
+  serverUrl?: string;
+  groups?: GroupInfo[];
+}
+
+/** A page group as the editor sees it. */
+export interface GroupInfo {
+  id: string;
+  name: string;
+  active: boolean;
+  pages: number;
+}
+
+export interface InitializeParams {
+  workspaceRoot: string;
+  /** Linked page group ids (server mode). */
+  groups?: string[];
+  client?: string;
+}
+
+/** Which pages counts cover: the linked active page groups (server mode). */
+export interface ScopeStatus {
+  linked: boolean;
+  groups: Array<{ id: string; name: string; active: boolean }>;
+  pages: number;
 }
 
 export interface IndexStatus {
@@ -76,6 +103,8 @@ export interface IndexStatus {
   markupChanged: boolean;
   diffBase: DiffBaseKind;
   capture?: { running: boolean; done: number; total: number; error?: string };
+  /** Server mode: the linked page groups counts are limited to. */
+  scope?: ScopeStatus;
   /** Plain-language limitations shown in the hover/panel. */
   limitations: string[];
   messages: string[];
@@ -147,6 +176,8 @@ export interface PageItem {
   url: string;
   set: PageSetName;
   template?: string;
+  /** Names of the linked page groups the page is in (server mode). */
+  groups?: string[];
 }
 
 export interface PagesResult {
@@ -206,6 +237,45 @@ export interface OpenLiveParams {
 export interface CaptureParams {
   /** Recapture only these page paths. */
   urls?: string[];
+}
+
+export type Box = [number, number, number, number];
+
+/** One page, before and after every current edit of the project (the diff viewer). */
+export interface PageDiffView {
+  status: "changed" | "unchanged" | "inconclusive";
+  reason?: string;
+  warnings: string[];
+  url: string;
+  device: string;
+  devices: string[];
+  /** true: loaded from the live site (L3); false: the stored copy (L2). */
+  live: boolean;
+  editRevision: number;
+  scannedAt: string;
+  edits: Array<{ file: string; changes: number }>;
+  /** Screenshot pixels per CSS px. */
+  scale: number;
+  /** Page width in CSS px. */
+  width: number;
+  before: string;
+  after: string;
+  /** Outermost changed elements, top to bottom (page coordinates, CSS px). */
+  zones: Array<{ before: Box | null; after: Box | null; label: string; props: Array<{ prop: string; before: string; after: string }> }>;
+  changedElements: number;
+  movedElements: number;
+  timingMs: number;
+}
+
+export interface PageDiffParams {
+  url: string;
+  device?: string;
+  live?: boolean;
+}
+
+export interface ExternalChangeParams {
+  files: string[];
+  session: SessionTotal;
 }
 
 // Notifications (daemon → client)

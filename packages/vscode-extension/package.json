@@ -1,7 +1,7 @@
 {
   "name": "css-blast-radius",
   "displayName": "CSS Blast Radius",
-  "description": "See how many pages of your site a CSS edit reaches, as you type, backed by a local blast-radius daemon.",
+  "description": "See which pages your CSS edits affect as you type, compared with the live site.",
   "version": "0.1.0",
   "publisher": "css-blast-radius",
   "engines": {
@@ -12,26 +12,36 @@
   ],
   "activationEvents": [
     "onLanguage:css",
-    "workspaceContains:cbr.config.json"
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "cssBlastRadius.showPages",
-        "title": "Show Pages Your Edits Reach",
+        "title": "Show Pages",
         "category": "CSS Blast Radius",
-        "icon": "$(flame)"
+        "icon": "$(list-unordered)"
       },
       {
-        "command": "cssBlastRadius.showFilePages",
-        "title": "Show Pages This File's Edits Reach",
+        "command": "cssBlastRadius.showAllPages",
+        "title": "Show All Affected Pages",
         "category": "CSS Blast Radius",
-        "icon": "$(flame)"
+        "icon": "$(list-unordered)"
       },
       {
-        "command": "cssBlastRadius.captureSite",
-        "title": "Capture Site",
+        "command": "cssBlastRadius.linkGroups",
+        "title": "Link Page Groups",
+        "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.openSetupPage",
+        "title": "Open Setup Page",
+        "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.rescanGroups",
+        "title": "Rescan Linked Groups",
         "category": "CSS Blast Radius"
       },
       {
@@ -40,9 +50,15 @@
         "category": "CSS Blast Radius"
       },
       {
-        "command": "cssBlastRadius.restartDaemon",
-        "title": "Restart Daemon",
+        "command": "cssBlastRadius.reconnectServer",
+        "title": "Reconnect to Server",
         "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.openDiffInBrowser",
+        "title": "Open in Browser",
+        "category": "CSS Blast Radius",
+        "icon": "$(link-external)"
       },
       {
         "command": "cssBlastRadius.showOutput",
@@ -53,35 +69,44 @@
     "menus": {
       "editor/title": [
         {
-          "command": "cssBlastRadius.showFilePages",
-          "when": "resourceLangId == css",
+          "command": "cssBlastRadius.openDiffInBrowser",
+          "when": "cssBlastRadius.diffActive",
           "group": "navigation@90"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "cssBlastRadius.showFilePages",
-          "when": "editorLangId == css"
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "cssBlastRadius.showPages",
+        "key": "alt+b",
+        "mac": "alt+b",
+        "when": "editorTextFocus && editorLangId == css"
+      }
+    ],
     "configuration": {
       "title": "CSS Blast Radius",
       "properties": {
-        "cssBlastRadius.siteRoot": {
+        "cssBlastRadius.server": {
           "type": "string",
-          "default": "",
-          "description": "Folder with the site's built HTML (relative to the workspace). Overrides cbr.config.json; empty: the config file or the workspace root."
+          "default": "http://127.0.0.1:4317",
+          "description": "Address of the shared local CSS Blast Radius server, setup page, and page comparison."
         },
-        "cssBlastRadius.baseUrl": {
-          "type": "string",
-          "default": "",
-          "description": "Base URL of the deployed site, for the live check (L3) and capture of a served site. Overrides cbr.config.json."
+        "cssBlastRadius.autoStartServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the server when a local connection is refused. The server keeps running after VS Code closes."
         },
-        "cssBlastRadius.dataDir": {
+        "cssBlastRadius.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Where the index is stored. Empty: .css-blast-radius/ in the workspace."
+          "description": "Path to the server CLI (cli.js). Empty: the backend next to this extension; the old daemonPath setting is a fallback."
+        },
+        "cssBlastRadius.groups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "resource",
+          "description": "Page group IDs linked to this project, saved in .vscode/settings.json. Only active linked groups count; use Link Page Groups to choose them."
         },
         "cssBlastRadius.diffBase": {
           "type": "string",
@@ -93,28 +118,33 @@
             "production"
           ],
           "default": "",
-          "description": "What your edits are compared with when the daemon starts. Empty: HEAD (uncommitted changes). Change it at runtime with “CSS Blast Radius: Change Diff Base”."
+          "description": "What your CSS edits are compared with. Empty: the live site as last scanned. Use Change Diff Base to switch during this session."
+        },
+        "cssBlastRadius.cursorCount": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the affected page count next to the cursor while typing in a changed CSS rule."
         },
         "cssBlastRadius.warnLostPages": {
           "type": "number",
           "default": 10,
           "minimum": 1,
-          "description": "Warn in Problems when removing a rule or changing a selector stops it from reaching at least this many pages."
+          "description": "Warn in Problems and next to the cursor when a removed rule or changed selector stops reaching at least this many pages."
         },
         "cssBlastRadius.codeLens": {
           "type": "boolean",
-          "default": true,
-          "description": "Show page counts above each rule."
+          "default": false,
+          "description": "Show page counts above CSS rules. Off by default because counts appear next to the cursor."
         },
         "cssBlastRadius.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Node.js (≥ 20) used to run the daemon. Empty: “node” on PATH. The editor's own runtime isn't used because the index database is a native module."
+          "description": "Node.js (≥ 20) used to start the shared server. Empty: “node” on PATH."
         },
         "cssBlastRadius.daemonPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the backend CLI (cli.js). Empty: the backend next to this extension."
+          "description": "Legacy fallback for serverPath. Prefer cssBlastRadius.serverPath."
         }
       }
     }

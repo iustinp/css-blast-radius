@@ -387,11 +387,13 @@ cannot meet the L0 budget. Decorations and the status bar update immediately.
 
 | Surface | Shows | Why |
 |---|---|---|
-| End-of-line decoration on the edited rule | `312 pages`, `+5 / −2 pages`, `Up to 340 pages` | Updates at once (`setDecorations`): the L0 surface |
-| Status bar item | `Your edits: 340 pages`; click opens the panel | Always visible, updates at once |
-| CodeLens above each rule | The settled count, e.g. `312 pages · show` | Fine once typing pauses |
-| Hover | The full answer: exact/possible/unknown, conditions, reasons, index age | On demand |
-| Panel (webview) | L1 list → L2 page detail (changed elements, `old → new` values, moved boxes, before/after) → `Check live page` (L3) | On demand |
+| Count next to the cursor, on the line being edited | `312 pages`, `+5 / −2 pages`, `Up to 340 pages` | Updates at once (`setDecorations`), before saving: the L0 surface |
+| Status bar item | `Your edits: 340 pages`, or `Link page groups` when none are linked; click opens the panel | Always visible, updates at once |
+| Hover | The full answer: exact/possible/unknown, conditions, reasons, index age, page links | On demand |
+| Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff | On demand |
+| Diff tab (webview embedding the server's `/diff` page; also opens in a browser) | L2: the whole page, before/after on one canvas, changed zones outlined; Space flips, N jumps to the next change; `Check on the live page` (L3) | On demand; refreshes itself as you keep typing |
+| Outside-editor notice | "CSS changed outside the editor: 12 → 40 pages" after a pull, branch switch or another tool | Edits that never went through the editor |
+| CodeLens above each rule (off by default) | The settled count, e.g. `312 pages · show` | Fine once typing pauses |
 | Problems | Only important negatives: a rule removed from many pages, a rule that is still invalid on save, a stale or missing index | Avoids noise |
 
 How numbers read:
@@ -413,10 +415,13 @@ How numbers read:
 - **Session total** (status bar): *how many pages can my edits reach?* The
   union over every changed rule, in every file, compared with a **diff
   base**:
-  - `HEAD` (default) — your uncommitted changes;
-  - last save, or the start of the session;
-  - production — the CSS captured in the index: "what would deploying this
-    reach?"
+  - production (default) — **the live site as last scanned**: "what would
+    deploying this reach?" Needs no git;
+  - `HEAD` — your uncommitted changes;
+  - last save, or the start of the session.
+- **Scope:** counts cover only the pages of the page groups linked to the
+  project (§10.5) that are active. Nothing linked means `0` with reason
+  `no-linked-groups`, and the status bar asks to link groups.
 
 ### 7.3 Repository files versus deployed stylesheets
 
@@ -427,7 +432,11 @@ order of preference:
 1. source maps of the deployed CSS, which list the original files;
 2. a build manifest (e.g. Vite or webpack `manifest.json`);
 3. configured path patterns;
-4. content hashes, for plain unbundled CSS.
+4. **file names** (implemented first): hashes, version numbers and `.min`
+   are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`;
+   ties are broken by matching folder names. The setup page lists every
+   site stylesheet with the project file it matched;
+5. content hashes, for plain unbundled CSS.
 
 When the file is bundled, L2 builds the "base" and "edited" versions of the
 deployed stylesheet by splicing the file's part through the source map, or by
@@ -582,14 +591,17 @@ The VS Code extension never crawls, stores indexes, runs browsers or parses
 CSS for analysis. It forwards document events, shows results and manages the
 daemon. Everything else lives in one backend engine with two roles:
 
-- **Local daemon** (always present, one per developer workspace): the editor
-  protocol, unsaved edits, file watching, the in-memory L0 index, L1
-  matching, and optionally local capture and L2 tabs.
+- **Local daemon** (always present): the editor protocol, unsaved edits,
+  file watching, the in-memory L0 index, L1 matching, and optionally local
+  capture and L2 tabs. It is implemented as the **local server** (§10.5): one
+  per site, shared by every project and VS Code window on the machine, with
+  one analysis session per project.
 - **Index service** (optional, shared): canonical captures and revisions for a
   team, deploy-triggered recapture, L2/L3 jobs at scale.
 
 ```
-VS Code extension ──JSON-RPC, local socket──▶ local daemon ──HTTPS + push──▶ index service (optional)
+VS Code extension ──JSON-RPC over /rpc──▶ local server ──HTTPS + push──▶ index service (optional)
+browser (setup page, diff viewer) ──REST + SSE──▶ local server
 ```
 
 The extension only ever talks to the local daemon. It has one protocol in
@@ -631,9 +643,12 @@ L0 depend on network latency.
 
 ### 10.4 Daemon lifecycle and packaging
 
-- The extension attaches to a compatible running daemon for the workspace or
-  starts one. `server/health` is cheap. If the daemon dies, the extension
-  retries with backoff and marks results stale meanwhile.
+- The extension connects to the local server at `cssBlastRadius.server`
+  (default `http://127.0.0.1:4317`) and starts it when the connection is
+  refused. The server outlives VS Code and is never shut down by the
+  extension, because other windows share it. `server/health` is cheap. If the
+  connection drops, the extension reconnects with backoff, re-sends its open
+  documents and marks results stale meanwhile.
 - Browser problems block capture and L2/L3 only; L0/L1 on a ready index keep
   working. One "degraded" status, not a flood of errors.
 - Shipped as a Marketplace extension (thin client) plus a backend package or
@@ -642,12 +657,47 @@ L0 depend on network latency.
 - The extension manages only the local daemon; admins run the shared service
   (container, systemd, Kubernetes…).
 
+### 10.5 The local server: setup page and page groups
+
+`css-blast-radius serve` runs one HTTP port per site (default 4317):
+
+| Path | Who uses it | What |
+|---|---|---|
+| `/` | Browser | **Setup page**: site address (live URL or local folder), devices, page groups, scan progress, stylesheet matches, connected projects |
+| `/api/…`, `/api/events` | Setup page, diff viewer | REST plus Server-Sent Events (`state`, throttled to ~4/s during scans; `edit` when a project's edits change) |
+| `/diff?s=…&url=…` | Diff tab in VS Code, or a browser | L2/L3 before/after viewer for one page |
+| `/rpc` (HTTP upgrade) | VS Code extension | JSON-RPC (§11) |
+
+**Page groups** are what a developer watches: named lists of pages from a
+sitemap (with an optional filter such as `/blog/*`), a CSV file or pasted
+addresses. A group can be:
+
+- **paused**: not counted and not rescanned, to save resources when nobody
+  works on that part of the site; resuming queues its never-scanned pages;
+- **rescanned**: sitemap groups re-read the sitemap first, so new pages join
+  and removed pages leave; excluded pages stay out;
+- **deleted**: soft delete, undoable for 5 minutes.
+
+A page can be in several groups; it is scanned once. Scans run in one serial,
+deduplicated queue. They are partial (only the requested pages, the rest
+carried forward) unless the site or devices changed, or the user asks for
+**Rescan all**, which also drops pages no longer in any active group. Each
+scan publishes a new index revision (§9.3), and every project session
+switches to it without interrupting counts.
+
+**Linked groups.** Each project lists the group IDs it works on in
+`.vscode/settings.json` (`cssBlastRadius.groups`), so the choice is shared
+with the team. The extension asks on first open. Counts cover only pages of
+linked, active groups (§7.2). Pausing, renaming or deleting a group reaches
+every connected editor at once (`groups/changed`).
+
 ## 11. Protocol
 
-Versioned **JSON-RPC 2.0**. Locally over a Unix domain socket (macOS, Linux)
-or a named pipe (Windows), accessible only to the user. Daemon → service:
-HTTPS for requests and a WebSocket for notifications, with the same
-vocabulary.
+Versioned **JSON-RPC 2.0**, one JSON message per line. Locally over the
+server's `/rpc` HTTP upgrade (§10.5), which accepts only loopback requests
+without a browser `Origin`; the CLI daemon also serves it over a Unix domain
+socket (mode 0600). Daemon → service: HTTPS for requests and a WebSocket for
+notifications, with the same vocabulary.
 
 **Handshake.** `initialize` returns protocol major/minor, service and schema
 versions, capabilities (available levels, index readiness), mode
@@ -658,24 +708,30 @@ migrated or refused, never read silently.
 
 | Method | Level | Purpose |
 |---|---|---|
-| `workspace/attach` | — | Bind the session to a repository and site |
+| `initialize` | — | Bind the connection to a project (`workspaceRoot`) and its linked groups; returns `sessionId`, `serverUrl` and the groups |
+| `groups/list`, `session/setGroups` | — | List page groups; change the linked groups. Counts cover only linked, active groups |
 | `document/open`, `document/change`, `document/save`, `document/close` | — | Editor events. `change` carries incremental ranges (full text for small files) and returns the L0 answer |
 | `analysis/queryImpacts` | 0 | Counts for a rule, a file or the session |
 | `analysis/getPages` | 1 | Paginated page list, with progress |
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |
-| `session/setDiffBase` | — | `HEAD`, last save, session start or production |
+| `session/setDiffBase` | — | Production (the live site as last scanned; default), `HEAD`, last save or session start |
+| `index/capture` | — | Rescan some pages, or the linked active groups |
 | `index/getStatus`, `server/health` | — | Readiness, coverage, freshness |
 
 **Notifications:** `analysis/publishImpact` (new answer), `analysis/refined`
 (an answer became more precise, e.g. `Up to 340` → `212`),
 `analysis/drilldownProgress` (streamed L2/L3 results),
-`analysis/resultSuperseded`, `index/statusChanged`, `index/revisionSwitched`,
-`server/degraded`, `server/restarting`.
+`analysis/resultSuperseded`, `analysis/externalChange` (CSS changed on disk
+outside the editor and moved the total), `groups/changed`,
+`index/statusChanged`, `index/revisionSwitched`, `server/degraded`,
+`server/restarting`.
 
 Every request and notification carries `queryId`, `indexRevision` and
-`editRevision` (§6.8). The webview never talks to the daemon directly; it
-goes through the extension host, which owns the authenticated session.
+`editRevision` (§6.8). The page panel webview goes through the extension
+host. The diff tab embeds the server's `/diff` page, which reads the
+session's current edits from the server by `sessionId`; editor buffers are
+never sent from the browser.
 
 ## 12. File watching and invalidation
 
@@ -710,6 +766,11 @@ staleness beats numbers that only look continuous.
   label them clearly.
 - The local socket or pipe is user-only. Unsaved edits stay local unless an
   L2/L3 job is explicitly sent to the shared service.
+- The local server binds to `127.0.0.1` by default and has no login yet. It
+  rejects requests whose `Host` isn't loopback (DNS rebinding), writes that
+  aren't same-origin JSON (CSRF), `/rpc` upgrades that carry a browser
+  `Origin`, and request bodies over 32 MB. Binding it elsewhere prints a
+  warning; hosting it for a team needs the organization auth of §10.3.
 
 ## 14. Sizing (estimates to benchmark)
 
@@ -783,6 +844,10 @@ editor lifecycle and the VS Code surfaces. It indexes a static fixture site
 with jsdom and estimates the cascade heuristically. Each step ships something
 usable and keeps L0/L1 independent of browsers.
 
+**Status:** steps 1–5 are built. From step 6, the diff bases and file-name
+stylesheet matching are built. Step 6a (the local server) is built. Build
+adapters and steps 7–8 are not.
+
 1. **Answer contract and timing.** `exact / possible / unknown` page counts,
    the zero rule, and `level`, `queryId`, `indexRevision` and `editRevision`
    on every message; latency measured from keystroke to decoration.
@@ -812,6 +877,15 @@ usable and keeps L0/L1 independent of browsers.
 6. **Diff base, stylesheet mapping, build adapters.** `session/setDiffBase`;
    source-map, manifest, config and hash mapping; asynchronous adapters for
    Sass first, then Tailwind and CSS Modules.
+
+   6a. **Local server and setup page** (§10.5). One port per site for the
+   setup page, page groups (sitemap, CSV, pasted), linked groups per project,
+   the scan queue, the diff viewer and the editor connection. The production
+   diff base and file-name matching become the defaults, so a project needs
+   no git or configuration. In the editor: the count next to the cursor, the
+   page panel, the diff tab and the outside-editor notice.
+   *Gate:* a project goes from an empty server to counts in VS Code using
+   only the setup page and one "link groups" choice.
 7. **Production sync and CI.** Deploy and CMS webhooks, the post-deploy CI
    job, targeted recapture, atomic publishing, page inventory with added,
    removed and failed pages.
@@ -830,7 +904,7 @@ index or edit revisions.
 
 ## 17. Not in v1 (stated, never silently ignored)
 
-- **Extension → remote service directly** — always via the local daemon.
+- **Extension → remote service directly** — always via the local server.
 - **Multi-tenant SaaS** — signup, billing, quotas, cross-tenant isolation.
   Hosted mode is single-tenant per organization.
 - **Local markup changes on top of a shared index** — local HTML, template or

@@ -4,3 +4,4 @@ dist/
 .css-blast-radius/
 *.sock
 *.vsix
+.DS_Store
