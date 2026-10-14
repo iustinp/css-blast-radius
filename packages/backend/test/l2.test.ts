@@ -122,6 +122,30 @@ describe.skipIf(skipBrowser)("L2 renderer on fixture site (§6.6, §16)", () => 
     expect(result.changedElements).toBe(0);
   }, 60_000);
 
+  it("does not report untouched ::before/::after as removed and added when the sheet is swapped", async () => {
+    const pageIndex = idx.pages[idx.byUrl.get("/about.html")!];
+    const variant = idx.variants[0];
+    // A tall page: the full-page screenshot between the two measurements rebuilds them.
+    const pseudo =
+      "\nbody { min-height: 3000px; }\n@media (min-width: 800px) {\n  .card .title::before { content: '» '; }\n  .card::after { content: '.'; }\n}\n";
+    const editedCss = baseCssText.replace("padding: 12px 24px;", "padding: 40px 80px;");
+
+    const result = await renderer.measure({
+      page: pageIndex,
+      variant,
+      mode: "shell",
+      sheetKeys: ["/css/main.css"],
+      baseText: baseCssText + pseudo,
+      editedText: editedCss + pseudo,
+      props: ["padding"],
+      screenshots: true,
+    });
+
+    expect(result.status).toBe("changed");
+    expect(result.elements.filter((e) => e.kind === "appeared" || e.kind === "disappeared")).toEqual([]);
+    expect(result.zones.map((z) => z.label)).toEqual([expect.stringContaining("button.btn")]);
+  }, 60_000);
+
   it("reports 'inconclusive' when the page does not load the edited stylesheet", async () => {
     const pageIndex = idx.pages[idx.byUrl.get("/index.html")!];
     const variant = idx.variants[0];

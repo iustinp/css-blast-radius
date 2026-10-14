@@ -98,12 +98,12 @@ const EXPAND_SCRIPT = `(props) => {
 }`;
 
 interface Snapshot {
-  /** Keyed by backend node id: stable across both snapshots even when pseudo-elements appear. */
-  styles: Map<number, string[]>;
-  boxes: Map<number, number[]>;
-  nodes: { parent: number[]; type: number[]; name: string[]; attrs: string[][]; backend: number[] };
-  /** backend node id → node index */
-  index: Map<number, number>;
+  /** Keyed by nodeKeys(): the same element gets the same key in both snapshots. */
+  styles: Map<string, string[]>;
+  boxes: Map<string, number[]>;
+  nodes: { parent: number[]; type: number[]; name: string[]; attrs: string[][]; keys: string[] };
+  /** node key → node index */
+  index: Map<string, number>;
 }
 
 class Semaphore {
@@ -292,25 +292,50 @@ async function snapshot(cdp: CDPSession, props: string[]): Promise<Snapshot> {
   const s: string[] = r.strings;
   const doc = r.documents[0];
   const str = (i: number) => (i >= 0 ? s[i] : "");
+  const parent = doc.nodes.parentIndex as number[];
+  const name = (doc.nodes.nodeName as number[]).map(str);
   const nodes = {
-    parent: doc.nodes.parentIndex as number[],
+    parent,
     type: doc.nodes.nodeType as number[],
-    name: (doc.nodes.nodeName as number[]).map(str),
+    name,
     attrs: (doc.nodes.attributes as number[][]).map((a) => a.map(str)),
-    backend: doc.nodes.backendNodeId as number[],
+    keys: nodeKeys(parent, name, doc.nodes.backendNodeId as number[]),
   };
-  const index = new Map<number, number>();
-  nodes.backend.forEach((b, i) => index.set(b, i));
-  const styles = new Map<number, string[]>();
-  const boxes = new Map<number, number[]>();
+  const index = new Map<string, number>();
+  nodes.keys.forEach((k, i) => index.set(k, i));
+  const styles = new Map<string, string[]>();
+  const boxes = new Map<string, number[]>();
   const layout = doc.layout;
   for (let i = 0; i < layout.nodeIndex.length; i++) {
-    const id = nodes.backend[layout.nodeIndex[i]];
+    const id = nodes.keys[layout.nodeIndex[i]];
     if (styles.has(id)) continue;
     styles.set(id, (layout.styles[i] as number[]).map(str));
     boxes.set(id, layout.bounds[i] as number[]);
   }
   return { styles, boxes, nodes, index };
+}
+
+/**
+ * DOM nodes keep their backend id between snapshots. Pseudo-elements don't:
+ * Chromium rebuilds them when it re-evaluates media queries (a full-page
+ * screenshot does), so they are keyed by their owner and pseudo name instead.
+ */
+function nodeKeys(parent: number[], name: string[], backend: number[]): string[] {
+  const keys: string[] = new Array(name.length);
+  const used = new Set<string>();
+  const keyOf = (i: number): string => {
+    if (keys[i] !== undefined) return keys[i];
+    let k = String(backend[i]);
+    if (name[i].startsWith("::") && parent[i] >= 0) {
+      const base = keyOf(parent[i]) + name[i].toLowerCase();
+      k = base;
+      for (let n = 2; used.has(k); n++) k = `${base}#${n}`;
+    }
+    used.add(k);
+    return (keys[i] = k);
+  };
+  for (let i = 0; i < name.length; i++) keyOf(i);
+  return keys;
 }
 
 function nodePath(nodes: Snapshot["nodes"], idx: number): string {
@@ -336,17 +361,17 @@ const MAX_ZONES = 100;
 const MAX_ZONE_PROPS = 12;
 
 function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff): void {
-  const snap = (id: number) => (a.index.has(id) ? a : b);
-  const at = (id: number) => snap(id).index.get(id) ?? -1;
-  const parentOf = (id: number): number | undefined => {
+  const snap = (id: string) => (a.index.has(id) ? a : b);
+  const at = (id: string) => snap(id).index.get(id) ?? -1;
+  const parentOf = (id: string): string | undefined => {
     const s = snap(id);
     const p = s.nodes.parent[s.index.get(id)!];
-    return p >= 0 ? s.nodes.backend[p] : undefined;
+    return p >= 0 ? s.nodes.keys[p] : undefined;
   };
-  const label = (id: number) => nodePath(snap(id).nodes, at(id));
-  const ids = [...new Set<number>([...a.styles.keys(), ...b.styles.keys()])].sort((x, y) => at(x) - at(y));
-  const changed: Array<[number, ElementDiff]> = [];
-  const moved: Array<[number, ElementDiff]> = [];
+  const label = (id: string) => nodePath(snap(id).nodes, at(id));
+  const ids = [...new Set<string>([...a.styles.keys(), ...b.styles.keys()])].sort((x, y) => at(x) - at(y));
+  const changed: Array<[string, ElementDiff]> = [];
+  const moved: Array<[string, ElementDiff]> = [];
   for (const id of ids) {
     // Elements and pseudo-elements; text runs are covered by their parent box.
     if (snap(id).nodes.type[at(id)] !== 1) continue;
@@ -374,12 +399,12 @@ function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, o
   // Only when nothing changed directly (a property we didn't compare) do moved boxes stand in.
   const source = changed.length ? changed : moved.filter(([id]) => !/^(body|html)$/i.test(snap(id).nodes.name[at(id)]));
   const inSource = new Map(source);
-  const outerOf = (id: number): number | undefined => {
-    let found: number | undefined;
+  const outerOf = (id: string): string | undefined => {
+    let found: string | undefined;
     for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (inSource.has(p)) found = p;
     return found;
   };
-  const zones = new Map<number, Zone>();
+  const zones = new Map<string, Zone>();
   for (const [id, e] of source) {
     if (outerOf(id) === undefined) zones.set(id, { before: e.box?.before ?? null, after: e.box?.after ?? null, label: e.path, props: [...e.props] });
   }

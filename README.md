@@ -139,7 +139,7 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (138) + extension (16) unit tests
+npm test                                         # backend (139) + extension (16) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
 node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (10 checks)
