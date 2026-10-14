@@ -133,6 +133,8 @@ export interface SessionTotal {
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
+  /** Live-site base on a git branch: only the branch's own changes count. */
+  branch?: { name: string | null; mainRef: string; behind: number };
 }
 
 export interface DocResult {

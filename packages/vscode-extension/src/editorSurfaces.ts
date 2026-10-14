@@ -8,6 +8,7 @@ import type { DaemonLifecycle } from "./daemonLifecycle";
 import { isCssDocument, type DocumentSync } from "./documentSync";
 import {
   DIFF_BASE_LABEL,
+  branchNote,
   changeAtCursor,
   formatCount,
   formatAge,
@@ -236,6 +237,8 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["cssBlastRadius.showAllPages", "cssBlastRadius.linkGroups"] };
     md.appendMarkdown(`**CSS Blast Radius** — compared with ${DIFF_BASE_LABEL[s?.diffBase ?? st?.diffBase ?? "production"] ?? "the live site"}\n\n`);
+    const note = branchNote(s?.branch);
+    if (note) md.appendMarkdown(`${note}\n\n`);
     md.appendMarkdown(`Linked groups: ${st.scope.groups.map((g) => g.name.replace(/[\\`*_~\[\]<>]/g, "\\$&") + (g.active ? "" : " (paused)")).join(", ") || "none"} (${st.scope.pages.toLocaleString("en-US")} active pages)\n\n`);
     if (s?.files.length) {
       md.appendMarkdown(`Your edits reach ${countLine(s.total)} pages\n\n`);
@@ -243,7 +246,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
         md.appendMarkdown(`- \`${vscode.workspace.asRelativePath(f.file)}\`: ${formatCount(f.pages)} (${f.changes} change${f.changes === 1 ? "" : "s"})\n`);
       }
       if (s.files.length > 12) md.appendMarkdown(`- …and ${s.files.length - 12} more files\n`);
-    } else md.appendMarkdown("No CSS changes compared with the live site.\n");
+    } else md.appendMarkdown(s?.branch ? "Your branch has no CSS changes.\n" : "No CSS changes compared with the live site.\n");
     if (st) {
       const scanned = st.capturedAt ? formatAge(Math.max(0, Date.now() - Date.parse(st.capturedAt))) : "not yet";
       md.appendMarkdown(`\n\n${s?.diffBase === "production" || !s ? "Compared with the live site" : "The live site was scanned"} (${s?.diffBase === "production" || !s ? "scanned " : ""}${scanned})`);

@@ -186,6 +186,14 @@ export function reasonText(r: string): string {
   }
 }
 
+/** Shown when the branch lacks newer commits of the deployed branch: they aren't counted as edits. */
+export function branchNote(branch: { mainRef: string; behind: number } | undefined): string | undefined {
+  if (!branch || branch.behind <= 0) return undefined;
+  const main = branch.mainRef.replace(/^[^/]+\//, "");
+  const n = branch.behind.toLocaleString("en-US");
+  return `${main} has ${n} newer commit${branch.behind === 1 ? "" : "s"} not in your branch; only your branch's changes are counted.`;
+}
+
 export const DIFF_BASE_LABEL: Record<string, string> = {
   HEAD: "last commit",
   saved: "last save",

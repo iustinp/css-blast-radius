@@ -151,6 +151,45 @@ export function diffRules(oldRules: StyleRule[], newRules: StyleRule[], lastLine
   return changes.sort((x, y) => x.line - y.line);
 }
 
+/**
+ * Drops changes whose result `live` already has: on a branch, edits that
+ * reached the site another way (e.g. squash-merged) change nothing there.
+ * Moves are kept (order isn't compared).
+ */
+export function appliedFilter(live: StylesheetModel): (changes: CssChange[], cur: StylesheetModel) => CssChange[] {
+  const rules = new Set(live.rules.map((r) => `${r.key}\0${r.declSig}`));
+  const has = (r?: StyleRule) => !!r && rules.has(`${r.key}\0${r.declSig}`);
+  const defs = (m: StylesheetModel, k: string) => m.defs.filter((d) => defKey(d) === k).map((d) => d.sig).join("\n");
+  const otherSig = (m: StylesheetModel) => m.other.map((o) => o.sig).join("\n");
+  return (changes, cur) =>
+    changes.filter((c) => {
+      switch (c.kind) {
+        case "declarations":
+        case "added":
+          return !has(c.after);
+        case "removed":
+          return has(c.before);
+        case "selector":
+        case "condition":
+          return !has(c.after) || has(c.before);
+        case "definition": {
+          const k = `${c.def!.kind}|${c.def!.name}`;
+          return defs(live, k) !== defs(cur, k);
+        }
+        case "layer-order":
+          return live.layerOrder.join(",") !== cur.layerOrder.join(",");
+        case "import":
+          return live.imports.join("\n") !== cur.imports.join("\n");
+        case "namespace":
+          return live.namespaces.join("\n") !== cur.namespaces.join("\n");
+        case "unrecognized":
+          return otherSig(live) !== otherSig(cur);
+        default:
+          return true;
+      }
+    });
+}
+
 function defKey(d: Definition): string {
   return `${d.kind}|${d.name}`;
 }

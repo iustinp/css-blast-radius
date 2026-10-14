@@ -10,7 +10,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import fg from "fast-glob";
 import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
-import { diffModels, type CssChange } from "../css/diff.js";
+import { appliedFilter, diffModels, type CssChange } from "../css/diff.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
 import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0.js";
 import { SiteIndex } from "../index/siteIndex.js";
@@ -20,7 +20,7 @@ import { DEFAULT_PROPS, Renderer, type PageDiff, type SheetEdit } from "../l2/re
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
-import { DIFF_BASES, Git, readText, type BaseText, type DiffBaseKind } from "./diffBase.js";
+import { DIFF_BASES, Git, readText, type BaseText, type BranchPoint, type DiffBaseKind } from "./diffBase.js";
 import { SheetMatcher } from "./sheetMatch.js";
 import {
   ERR,
@@ -88,7 +88,7 @@ interface FileResult {
 interface DetailSnapshot {
   r: FileResult;
   editRevision: number;
-  baseText: string;
+  base?: BaseText;
   baseModel: StylesheetModel;
 }
 
@@ -99,6 +99,8 @@ interface FileState {
   diskText?: string;
   base?: BaseText;
   baseModel?: StylesheetModel;
+  /** Branch on the live-site base: drops changes the site already has. */
+  applied?: (changes: CssChange[], cur: StylesheetModel) => CssChange[];
   /** Bumped whenever the text or the base changes. */
   version: number;
   /** editRevision of the last text/base change. */
@@ -125,6 +127,10 @@ export class Session extends EventEmitter {
   readonly pool: L1Pool;
   private renderer?: Renderer;
   private git?: Git;
+  /** Production base on a branch: where it left the deployed branch (§7.2). */
+  private branch?: BranchPoint;
+  private branchLoad?: Promise<BranchPoint | undefined>;
+  private gitMoved = false;
   diffBase: DiffBaseKind;
   editRevision = 0;
   private readonly files = new Map<string, FileState>();
@@ -341,6 +347,7 @@ export class Session extends EventEmitter {
   async setDiffBase(kind: DiffBaseKind): Promise<SessionTotal> {
     if (!DIFF_BASES.includes(kind)) throw new RpcError(ERR.invalidParams, `unknown diff base: ${kind}`);
     this.diffBase = kind;
+    this.branchLoad = undefined;
     for (const f of this.files.values()) {
       f.base = undefined;
       this.touch(f);
@@ -357,6 +364,7 @@ export class Session extends EventEmitter {
     if (f.base) return;
     f.base = await this.loadBase(f.path);
     f.baseModel = browserModel(f.base.text ?? "");
+    f.applied = f.base.live !== undefined ? appliedFilter(browserModel(f.base.live)) : undefined;
     f.version++;
   }
 
@@ -378,11 +386,24 @@ export class Session extends EventEmitter {
       }
       case "production": {
         const hash = this.sheetHashes(path)[0];
-        if (hash) return { text: this.store.getBlob(hash).toString("utf8"), kind: "production" };
+        if (hash) {
+          const live = this.store.getBlob(hash).toString("utf8");
+          // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
+          const bp = await this.branchPoint();
+          const text = bp ? await this.git!.show(path, bp.mergeBase) : undefined;
+          if (text !== undefined) return { text, kind: "production", live };
+          return { text: live, kind: "production" };
+        }
         if (this.git) return { text: await this.git.show(path), kind: "HEAD", note: "no captured stylesheet for this file" };
         return { text: readText(path), kind: "saved", note: "no captured stylesheet for this file" };
       }
     }
+  }
+
+  /** Where the checked-out branch left the deployed branch (production base only). */
+  private branchPoint(): Promise<BranchPoint | undefined> {
+    if (this.diffBase !== "production" || !this.git) return Promise.resolve((this.branch = undefined));
+    return (this.branchLoad ??= this.git.branchPoint().then((bp) => (this.branch = bp)));
   }
 
   private cssDirs(): string[] {
@@ -462,11 +483,15 @@ export class Session extends EventEmitter {
       }
       case "production": {
         if (!this.index) break;
-        for (const f of await this.listCss()) {
+        const all = await this.listCss();
+        const bp = await this.branchPoint();
+        // On a branch: the files it changed, unless the site already has that exact content.
+        const files = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : all;
+        for (const f of files) {
           const hashes = this.sheetHashes(f);
           if (!hashes.length) continue;
           const t = readText(f);
-          if (t !== undefined && !hashes.includes(sha256(t))) changed.push(f);
+          if (t === undefined ? bp !== undefined : !hashes.includes(sha256(t))) changed.push(f);
         }
         break;
       }
@@ -511,7 +536,8 @@ export class Session extends EventEmitter {
     const cur = this.current(f);
     const baseModel = f.baseModel ?? parseStylesheet("");
     const lines = cur.text.split("\n").length;
-    const changes = diffModels(baseModel, cur.model, lines);
+    let changes = diffModels(baseModel, cur.model, lines);
+    if (f.applied) changes = f.applied(changes, cur.model);
     const reasons = new Set<string>(cur.notes);
     if (f.base?.note) reasons.add(`diff-base:${f.base.kind} (${f.base.note})`);
     const ans: FileAnswer = {
@@ -550,7 +576,7 @@ export class Session extends EventEmitter {
       ans.total = analysis.totalCount;
       for (const r of analysis.totalReasons) reasons.add(r);
       ans.mapping = { mapped: analysis.candidates.mapped, urls: analysis.candidates.urls, linkedPages: analysis.candidates.pages.count() };
-      ans.freshness = this.engine.freshness(analysis.candidates, f.base?.text);
+      ans.freshness = this.engine.freshness(analysis.candidates, f.base?.live ?? f.base?.text);
       if (this.markupChanged) ans.freshness.stale = true;
       if (ans.freshness.stale) reasons.add(REASON.stale);
     }
@@ -586,7 +612,16 @@ export class Session extends EventEmitter {
     if (files.length === 0) reasons.add(REASON.noEffectiveChange);
     if (!this.index) reasons.add(REASON.noIndex);
     const count: Count = this.index ? total.count(pending) : { exact: 0, possible: 0, unknown: 0, complete: false };
-    return { editRevision: this.editRevision, indexRevision: this.index?.revision.id ?? null, diffBase: this.diffBase, total: count, reasons: [...reasons], files };
+    const bp = this.diffBase === "production" ? this.branch : undefined;
+    return {
+      editRevision: this.editRevision,
+      indexRevision: this.index?.revision.id ?? null,
+      diffBase: this.diffBase,
+      total: count,
+      reasons: [...reasons],
+      files,
+      branch: bp && { name: bp.branch, mainRef: bp.mainRef, behind: bp.behind },
+    };
   }
 
   fileAnswer(path: string): FileAnswer {
@@ -920,7 +955,7 @@ export class Session extends EventEmitter {
   private snapshot(f: FileState, asked?: number): DetailSnapshot {
     const r = this.resultFor(f);
     this.checkRevision(f.editRevision, asked);
-    return { r, editRevision: f.editRevision, baseText: f.base?.text ?? "", baseModel: f.baseModel ?? r.cur.model };
+    return { r, editRevision: f.editRevision, base: f.base, baseModel: f.baseModel ?? r.cur.model };
   }
 
   async drilldown(p: DrilldownParams): Promise<DrilldownResult> {
@@ -985,21 +1020,40 @@ export class Session extends EventEmitter {
       this.index!.variants[0];
     const renderer = this.getRenderer();
     const { props, unresolved } = this.propsFor(changes, [snap.r.cur.model, snap.baseModel], page);
+    const texts = await this.renderTexts(snap.base, snap.r.cur.text);
     const diff = await renderer.measure({
       page,
       variant,
       mode,
       sheetKeys: snap.r.answer.mapping.urls,
-      baseText: snap.baseText,
-      editedText: snap.r.cur.text,
+      baseText: texts.baseText,
+      editedText: texts.editedText,
       props,
       screenshots,
     });
+    if (texts.conflict) diff.warnings.unshift(conflictWarning(this.relPath(snap.r.answer.file), this.branch));
     if (diff.status === "unchanged" && unresolved.length) {
       diff.status = "inconclusive";
       diff.reason = `no stylesheet on this page uses ${unresolved.join(", ")}: the properties it feeds (inline styles, scripts) weren't compared`;
     }
     return diff;
+  }
+
+  /**
+   * The texts the visual diff swaps in. On a branch: the site's copy before,
+   * and the site's copy with the branch's changes merged in after (as git
+   * would merge them); the branch's own versions when they conflict.
+   */
+  private async renderTexts(base: BaseText | undefined, cur: string): Promise<{ baseText: string; editedText: string; conflict?: boolean }> {
+    const from = base?.text ?? "";
+    if (base?.live === undefined || base.live === from || !this.git) return { baseText: from, editedText: cur };
+    const merged = await this.git.mergeFile(base.live, from, cur);
+    if (merged === undefined) return { baseText: from, editedText: cur, conflict: true };
+    return { baseText: base.live, editedText: merged };
+  }
+
+  private relPath(path: string): string {
+    return relative(this.cfg.workspaceRoot, path).split(sep).join("/") || path;
   }
 
   private getRenderer(): Renderer {
@@ -1022,10 +1076,11 @@ export class Session extends EventEmitter {
     const models: StylesheetModel[] = [];
     const warnings: string[] = [];
     const owner = new Map<string, string>(); // site stylesheet → the file applied to it
+    const todo: Array<{ file: string; keys: string[]; base?: BaseText; cur: string }> = [];
     for (const f of this.files.values()) {
       const r = this.resultFor(f);
       if (r.changes.length === 0) continue;
-      const file = relative(this.cfg.workspaceRoot, f.path).split(sep).join("/") || f.path;
+      const file = this.relPath(f.path);
       list.push({ file, changes: r.changes.length });
       let keys = r.answer.mapping.urls;
       if (keys.length > 1 && f.base?.kind === "production") {
@@ -1042,9 +1097,14 @@ export class Session extends EventEmitter {
       keys = keys.filter((k) => !owner.has(k));
       if (keys.length === 0) continue;
       for (const k of keys) owner.set(k, file);
-      edits.push({ sheetKeys: keys, baseText: f.base?.text ?? "", editedText: r.cur.text });
+      todo.push({ file, keys, base: f.base, cur: r.cur.text });
       changes.push(...r.changes);
       models.push(r.cur.model, f.baseModel ?? r.cur.model);
+    }
+    for (const e of todo) {
+      const texts = await this.renderTexts(e.base, e.cur);
+      if (texts.conflict) warnings.push(conflictWarning(e.file, this.branch));
+      edits.push({ sheetKeys: e.keys, baseText: texts.baseText, editedText: texts.editedText });
     }
     const variants = this.pageVariants(page);
     const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
@@ -1072,7 +1132,7 @@ export class Session extends EventEmitter {
       return view;
     };
     if (list.length === 0) {
-      view.reason = "You have no CSS changes compared with the live site right now.";
+      view.reason = this.branch ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.";
       return finish();
     }
     if (edits.length === 0) {
@@ -1151,7 +1211,8 @@ export class Session extends EventEmitter {
   private startWatching(): void {
     const roots = new Set<string>(this.cssDirs());
     if (this.cfg.siteRoot) roots.add(this.cfg.siteRoot);
-    const gitFiles = this.git ? [join(this.git.top, ".git", "HEAD"), join(this.git.top, ".git", "index")].filter(existsSync) : [];
+    // HEAD/index: commits, checkouts, merges; FETCH_HEAD: the deployed branch moved.
+    const gitFiles = this.git ? ["HEAD", "index", "FETCH_HEAD"].map((n) => join(this.git!.top, ".git", n)).filter(existsSync) : [];
     const dataDir = this.cfg.dataDir;
     this.watcher = chokidar.watch([...roots, ...gitFiles], {
       ignoreInitial: true,
@@ -1162,6 +1223,7 @@ export class Session extends EventEmitter {
       const p = resolve(path);
       if (gitFiles.includes(p)) {
         if (this.diffBase === "HEAD") for (const f of this.files.values()) if (f.doc) f.base = undefined;
+        this.gitMoved = true;
         this.scheduleRefresh();
       } else if (/\.css$/i.test(p)) {
         if (this.files.get(p)?.doc) return; // the editor owns open files (§12)
@@ -1180,6 +1242,17 @@ export class Session extends EventEmitter {
     clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(async () => {
       try {
+        if (this.gitMoved) {
+          this.gitMoved = false;
+          const old = this.branch?.mergeBase;
+          this.branchLoad = undefined;
+          if ((await this.branchPoint())?.mergeBase !== old) {
+            for (const f of this.files.values()) {
+              f.base = undefined;
+              this.touch(f);
+            }
+          }
+        }
         for (const f of this.files.values()) {
           if (f.doc && !f.base) {
             this.touch(f);
@@ -1213,4 +1286,9 @@ export class Session extends EventEmitter {
     await this.pool.close();
     this.store.close();
   }
+}
+
+function conflictWarning(file: string, bp: BranchPoint | undefined): string {
+  const main = bp ? bp.mainRef.replace(/^[^/]+\//, "") : "the deployed branch";
+  return `${file}: ${main} also changed the lines your branch edits, so this compares your branch's own version of the file before and after (merge ${main} to see them together).`;
 }

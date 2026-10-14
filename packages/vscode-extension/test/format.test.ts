@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
+import { branchNote, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
 import type { ChangeAnswer, Count } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
@@ -69,5 +69,17 @@ describe("helpers", () => {
     expect(reasonText("invalid-on-save:line 12")).toBe("Invalid rule on save (line 12): browsers will drop it.");
     expect(reasonText("token-never-seen:c:promo")).toContain("`.promo`");
     expect(reasonText("unlisted")).toBe("unlisted");
+  });
+});
+
+describe("branchNote", () => {
+  it("says how many newer deployed-branch commits are left out", () => {
+    expect(branchNote({ mainRef: "origin/main", behind: 7 })).toBe("main has 7 newer commits not in your branch; only your branch's changes are counted.");
+    expect(branchNote({ mainRef: "upstream/release/v2", behind: 1 })).toBe("release/v2 has 1 newer commit not in your branch; only your branch's changes are counted.");
+  });
+
+  it("stays quiet when the branch is up to date or there is no branch", () => {
+    expect(branchNote({ mainRef: "origin/main", behind: 0 })).toBeUndefined();
+    expect(branchNote(undefined)).toBeUndefined();
   });
 });

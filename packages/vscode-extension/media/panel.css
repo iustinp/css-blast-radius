@@ -16,7 +16,7 @@ header {
 #summary { font-size: 13px; }
 .muted { color: var(--vscode-descriptionForeground); }
 .warning { color: var(--vscode-editorWarning-foreground); }
-#meta, #warning { font-size: 12px; margin-top: 5px; }
+#meta, #branch, #warning { font-size: 12px; margin-top: 5px; }
 #chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 16px 10px; max-height: 34%; overflow: auto; }
 .file-chips { width: 100%; display: flex; flex-wrap: wrap; gap: 4px; }
 .file-name { width: 100%; font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 5px; }

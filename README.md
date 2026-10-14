@@ -83,7 +83,7 @@ The choice is saved in `.vscode/settings.json` (`cssBlastRadius.groups`), so the
 
 Your CSS files are matched to the site's stylesheets **by file name**. Hashes, version numbers and `.min` are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`. No git or build setup is needed.
 
-What your edits are compared with is **the live site, as last scanned**.
+What your edits are compared with is **the live site, as last scanned**. In a git repository only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits (the panel says "main has 7 newer commits not in your branch"), and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again. The before/after view shows the live page, then the live page with your branch's changes merged in.
 
 ### 4. Edit CSS
 
@@ -139,7 +139,7 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (130) + extension (14) unit tests
+npm test                                         # backend (138) + extension (16) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
 node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (10 checks)

@@ -183,6 +183,8 @@
     $("number").textContent = fmt(count.exact + count.possible + count.unknown);
     $("summary").textContent = `${m.summary} affected of ${fmt(m.scopePages)} in linked groups`;
     $("meta").textContent = `${m.chips.reduce((n, c) => n + c.changed, 0)} edits in ${m.chips.length} files · checked in ${fmt(m.ms || 0)} ms · compared with ${m.baseLabel}`;
+    $("branch").textContent = m.branchNote ? `ⓘ ${m.branchNote}` : "";
+    $("branch").hidden = !m.branchNote;
     $("warning").textContent = m.lostChanges > 1
       ? "⚠ Some pages lose a style they had — see the edits below"
       : m.lost ? `⚠ ${fmt(m.lost)} pages lose a style they had` : "";

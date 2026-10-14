@@ -5,7 +5,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { DIFF_BASE_LABEL, formatCount } from "./format";
+import { DIFF_BASE_LABEL, branchNote, formatCount } from "./format";
 import { ERR, type ChangeAnswer, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
@@ -164,6 +164,7 @@ export class PagesPanel implements vscode.Disposable {
         scopePages: this.state.status?.scope.pages ?? 0,
         ms, lost, lostChanges, chips, target: t, filters: this.filters,
         baseLabel: DIFF_BASE_LABEL[this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production"] ?? "the live site",
+        branchNote: branchNote(this.state.session?.branch),
       });
       void this.annotateLosses(seq, res, chips);
       if (this.searchQuery) void this.search(this.searchQuery);
@@ -292,7 +293,7 @@ export class PagesPanel implements vscode.Disposable {
 <header>BLAST RADIUS</header>
 <section id="summaryBox">
   <div id="number">0</div><div id="summary"></div>
-  <div id="meta" class="muted"></div><div id="warning" class="warning"></div>
+  <div id="meta" class="muted"></div><div id="branch" class="muted" hidden></div><div id="warning" class="warning"></div>
 </section>
 <nav id="chips"></nav>
 <div id="toolbar">

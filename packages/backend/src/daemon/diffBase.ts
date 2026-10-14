@@ -1,7 +1,8 @@
 // Diff bases (§7.2): what "my edits" are compared against.
 
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -16,6 +17,23 @@ export interface BaseText {
   /** Base actually used, when the requested one isn't available for this file. */
   kind: DiffBaseKind;
   note?: string;
+  /**
+   * Production base on a branch: the site's captured copy, while `text` is
+   * the file where the branch left the deployed branch (so only the branch's
+   * own changes are diffed; the visual diff merges them into this copy).
+   */
+  live?: string;
+}
+
+/** Where the checked-out branch left the branch the site is deployed from. */
+export interface BranchPoint {
+  /** Remote-tracking ref of the deployed branch, e.g. origin/main. */
+  mainRef: string;
+  mergeBase: string;
+  /** Commits on the deployed branch that the checked-out branch doesn't have. */
+  behind: number;
+  /** Checked-out branch; null when detached. */
+  branch: string | null;
 }
 
 export class Git {
@@ -47,16 +65,86 @@ export class Git {
     return inside(this.top, abs) ?? inside(this.realTop, realExisting(abs));
   }
 
-  /** File text at HEAD; undefined when the file isn't in HEAD (new, or no commits). */
-  async show(file: string): Promise<string | undefined> {
+  /** File text at `rev` (default HEAD); undefined when the file isn't there (new, or no commits). */
+  async show(file: string, rev = "HEAD"): Promise<string | undefined> {
     const r = this.rel(file);
     if (!r) return undefined;
     try {
-      const { stdout } = await run("git", ["show", `HEAD:${r}`], { cwd: this.top, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
+      const { stdout } = await run("git", ["show", `${rev}:${r}`], { cwd: this.top, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
       return stdout;
     } catch {
       return undefined;
     }
+  }
+
+  private async git(args: string[]): Promise<string | undefined> {
+    try {
+      return (await run("git", args, { cwd: this.top, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" })).stdout.trim();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The branch the site is deployed from: the default branch of `origin` (or
+   * the first remote), else its main/master, else a local main/master.
+   */
+  async mainRef(): Promise<string | undefined> {
+    const remotes = ((await this.git(["remote"])) ?? "").split("\n").map((r) => r.trim()).filter(Boolean);
+    remotes.sort((a, b) => Number(b === "origin") - Number(a === "origin"));
+    for (const r of remotes) {
+      const head = await this.git(["symbolic-ref", "-q", "--short", `refs/remotes/${r}/HEAD`]);
+      if (head) return head;
+      for (const b of ["main", "master"]) if ((await this.git(["rev-parse", "--verify", "-q", `refs/remotes/${r}/${b}`])) !== undefined) return `${r}/${b}`;
+    }
+    for (const b of ["main", "master"]) if ((await this.git(["rev-parse", "--verify", "-q", `refs/heads/${b}`])) !== undefined) return b;
+    return undefined;
+  }
+
+  /** Where HEAD left the deployed branch; undefined without one (or without shared history). */
+  async branchPoint(): Promise<BranchPoint | undefined> {
+    const mainRef = await this.mainRef();
+    if (!mainRef) return undefined;
+    const [mergeBase, behind, head] = await Promise.all([
+      this.git(["merge-base", "HEAD", mainRef]),
+      this.git(["rev-list", "--count", `HEAD..${mainRef}`]),
+      this.git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    ]);
+    if (!mergeBase) return undefined;
+    return { mainRef, mergeBase, behind: Number(behind) || 0, branch: head && head !== "HEAD" ? head : null };
+  }
+
+  /**
+   * Three-way merge of `other`'s changes since `base` into `current`, as git
+   * would merge them (identical changes on both sides merge cleanly).
+   * Undefined when they conflict or git fails.
+   */
+  async mergeFile(current: string, base: string, other: string): Promise<string | undefined> {
+    const dir = mkdtempSync(join(tmpdir(), "cbr-merge-"));
+    try {
+      const files = ["current", "base", "other"].map((n) => join(dir, n));
+      [current, base, other].forEach((t, i) => writeFileSync(files[i], t));
+      const { stdout } = await run("git", ["merge-file", "-p", "-q", ...files], { cwd: dir, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
+      return stdout;
+    } catch {
+      return undefined; // exit code = number of conflicts
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** CSS files under `dirs` whose working-tree content differs from `rev` (including untracked). */
+  async changedSince(rev: string, dirs: string[]): Promise<string[]> {
+    const specs = dirs.map((d) => this.rel(d)).filter((d): d is string => d !== undefined).map((d) => d || ".");
+    if (specs.length === 0) return [];
+    const [diff, untracked] = await Promise.all([
+      this.git(["diff", "--name-only", "-z", "--no-renames", rev, "--", ...specs]),
+      this.git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...specs]),
+    ]);
+    if (diff === undefined) return [];
+    const out = new Set<string>();
+    for (const r of [...diff.split("\0"), ...(untracked ?? "").split("\0")]) if (r.endsWith(".css")) out.add(resolve(this.top, r));
+    return [...out];
   }
 
   /** CSS files under `dirs` that differ from HEAD (modified, added, deleted, untracked). */

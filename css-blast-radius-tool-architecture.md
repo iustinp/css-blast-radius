@@ -416,7 +416,18 @@ How numbers read:
   union over every changed rule, in every file, compared with a **diff
   base**:
   - production (default) — **the live site as last scanned**: "what would
-    deploying this reach?" Needs no git;
+    deploying this reach?" Needs no git. In a git repository, only **the
+    branch's own changes** count: each file is diffed against its version
+    where the branch left the deployed branch (`merge-base HEAD origin/main`;
+    `origin/HEAD`'s target when set, else `main`/`master`), and changes the
+    live copy already has (e.g. squash-merged earlier) are dropped. Newer
+    commits of the deployed branch that the branch lacks are therefore not
+    "my edits"; the panel and hover say how many there are
+    ("main has 7 newer commits not in your branch"). The visual diff swaps in
+    the live copy before and the live copy with the branch's changes merged
+    in after (`git merge-file`, as a merge would); if the same lines changed
+    on both sides it compares the branch's own versions and warns. The
+    branch point is re-read on commits, checkouts and fetches;
   - `HEAD` — your uncommitted changes;
   - last save, or the start of the session.
 - **Scope:** counts cover only the pages of the page groups linked to the
