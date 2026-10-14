@@ -67,7 +67,15 @@ From the same page you can:
 
 ### 3. Link your project in VS Code (once per project)
 
-1. Install the extension. For development: press F5 in this repo to open an Extension Development Host.
+1. Install the extension:
+   ```bash
+   npm run package:extension   # builds packages/vscode-extension/css-blast-radius-0.1.0.vsix
+   ```
+   In VS Code: Extensions view → **…** menu → **Install from VSIX…** → pick that file, then reload the window.
+   Or from a terminal: `code --install-extension packages/vscode-extension/css-blast-radius-0.1.0.vsix`.
+   For development, press F5 in this repo instead (Extension Development Host).
+
+   The packaged extension remembers where this repo's server is, so it can start it for you. If you move the repo, rebuild the `.vsix` or set **CSS Blast Radius: Server Path**.
 2. Open your project.
 3. Click **Link page groups** in the status bar (or run **CSS Blast Radius: Link Page Groups**) and pick the groups you work on.
 
@@ -150,7 +158,6 @@ Not yet implemented:
 - Login, for hosting the server for a team.
 - Shared team index.
 - Source maps and build adapters (Sass, PostCSS, CSS-in-JS).
-- `.vsix` packaging.
 
 Known limitations:
 - **Not captured:** Shadow DOM and iframes, and pages added after the last scan (rescan the group).

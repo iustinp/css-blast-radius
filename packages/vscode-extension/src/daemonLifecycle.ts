@@ -8,6 +8,19 @@ import { DaemonClient } from "./daemonClient";
 import { PROTOCOL_MAJOR, type InitializeResult } from "./protocol";
 import { isLocalServer, serverOrigin } from "./urls";
 
+/** The backend next to this extension (development), else the one recorded when the .vsix was packaged. */
+function defaultServerPath(): string {
+  const beside = path.resolve(__dirname, "../../backend/dist/cli.js");
+  if (fs.existsSync(beside)) return beside;
+  try {
+    const stamped = JSON.parse(fs.readFileSync(path.join(__dirname, "server-path.json"), "utf8")).cli;
+    if (typeof stamped === "string" && stamped) return stamped;
+  } catch {
+    /* not packaged */
+  }
+  return beside;
+}
+
 export type ConnectionState = "STARTING" | "CONNECTED" | "DISCONNECTED" | "FAILED";
 
 export class DaemonLifecycle implements vscode.Disposable {
@@ -49,7 +62,7 @@ export class DaemonLifecycle implements vscode.Disposable {
     return {
       server: c.get<string>("server") || "http://127.0.0.1:4317",
       autoStart: c.get<boolean>("autoStartServer") ?? true,
-      serverPath: c.get<string>("serverPath") || c.get<string>("daemonPath") || path.resolve(__dirname, "../../backend/dist/cli.js"),
+      serverPath: c.get<string>("serverPath") || c.get<string>("daemonPath") || defaultServerPath(),
       nodePath: c.get<string>("nodePath") || "node",
       groups: c.get<string[]>("groups") || [],
     };
@@ -77,7 +90,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       if (Date.now() - this.lastSpawn > 15_000) {
         this.lastSpawn = Date.now();
         if (!fs.existsSync(settings.serverPath)) {
-          const detail = `Server not found at ${settings.serverPath}. Build the backend or set cssBlastRadius.serverPath.`;
+          const detail = `Server not found at ${settings.serverPath}. Run "npm run serve" in the css-blast-radius folder, or set CSS Blast Radius: Server Path.`;
           this.output.appendLine(detail);
           this.setState("FAILED", detail);
           this.scheduleReconnect();

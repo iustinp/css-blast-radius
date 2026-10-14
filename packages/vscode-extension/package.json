@@ -99,11 +99,13 @@
         "cssBlastRadius.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the server CLI (cli.js). Empty: the backend next to this extension; the old daemonPath setting is a fallback."
+          "description": "Path to the server CLI (packages/backend/dist/cli.js). Empty: the backend this extension was built from; the old daemonPath setting is a fallback."
         },
         "cssBlastRadius.groups": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "scope": "resource",
           "description": "Page group IDs linked to this project, saved in .vscode/settings.json. Only active linked groups count; use Link Page Groups to choose them."
@@ -152,11 +154,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --root .",
-    "package": "vsce package"
+    "package": "tsc -p tsconfig.json && node scripts/stamp-server-path.cjs && vsce package --no-dependencies --allow-missing-repository --skip-license"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.6.2"
   }
 }

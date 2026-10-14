@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm run build --workspace packages/backend && npm run build --workspace packages/vscode-extension",
     "test": "npm run test --workspace packages/backend && npm run test --workspace packages/vscode-extension",
-    "serve": "npm run serve --workspace packages/backend --"
+    "serve": "npm run serve --workspace packages/backend --",
+    "package:extension": "npm run build --workspace packages/backend && npm run package --workspace packages/vscode-extension"
   }
 }
