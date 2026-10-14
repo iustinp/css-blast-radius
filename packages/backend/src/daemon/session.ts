@@ -25,6 +25,9 @@ import { SheetMatcher } from "./sheetMatch.js";
 import {
   ERR,
   RpcError,
+  type AssessmentSummary,
+  type AssessParams,
+  type AssessProgress,
   type CaptureParams,
   type DocResult,
   type DrilldownParams,
@@ -34,6 +37,7 @@ import {
   type OpenLiveParams,
   type PageDiffParams,
   type PageDiffView,
+  type PageImpact,
   type PageItem,
   type PageSetName,
   type PagesResult,
@@ -108,6 +112,33 @@ interface FileState {
   result?: FileResult;
 }
 
+/** Every current edit as the visual diff applies it. */
+interface RenderEdits {
+  edits: SheetEdit[];
+  list: PageDiffView["edits"];
+  changes: CssChange[];
+  models: StylesheetModel[];
+  warnings: string[];
+}
+
+/** A background impact assessment for one (index revision, edit revision). */
+interface AssessJob {
+  key: string;
+  editRevision: number;
+  indexRevision: number | null;
+  queue: string[];
+  queued: Set<string>;
+  done: number;
+  total: number;
+  workers: number;
+  cancelled: boolean;
+  emittedAt: number;
+  prep?: Promise<RenderEdits>;
+}
+
+/** Background renders at once (the renderer runs 3; interactive ones go first). */
+const ASSESS_WORKERS = 3;
+
 const LIMITATIONS = [
   "Pages are analyzed in their captured states (profiles × recipes); other states are not seen.",
   "Interaction states (:hover, :focus…) are assumed reachable and listed as conditions.",
@@ -146,6 +177,8 @@ export class Session extends EventEmitter {
   private watcher?: FSWatcher;
   private refreshTimer?: NodeJS.Timeout;
   private captureState?: { running: boolean; done: number; total: number; error?: string };
+  private assessed: { key: string; results: Map<string, PageImpact> } = { key: "", results: new Map() };
+  private assessJob?: AssessJob;
   private queryN = 0;
   private readonly messages: string[] = [];
   private matcher: SheetMatcher;
@@ -788,13 +821,32 @@ export class Session extends EventEmitter {
   }
 
   async getPages(p: GetPagesParams): Promise<PagesResult> {
+    const { idx, items, groups, sets, pending, editRevision } = await this.listPages(p);
+    this.checkRevision(editRevision, p.editRevision);
+    const assessment = this.rankByImpact(items);
+    const offset = Math.max(0, p.offset ?? 0);
+    const limit = Math.min(Math.max(1, p.limit ?? 200), 2000);
+    return {
+      editRevision,
+      indexRevision: idx.revision.id,
+      level: 1,
+      count: sets.count(pending),
+      groups,
+      total: items.length,
+      offset,
+      pages: items.slice(offset, offset + limit),
+      assessment,
+    };
+  }
+
+  /** The pages of a list in their L1 order (sure matches, then possible, then unchecked; by URL). */
+  private async listPages(p: AssessParams) {
     const idx = this.requireIndex();
     await this.l1Idle();
     let r = this.setsFor(p);
     // Rule-line queries may schedule their own L1 work.
     if (r.pending && (await this.l1Idle())) r = this.setsFor(p);
     const { sets, pending, editRevision } = r;
-    this.checkRevision(editRevision, p.editRevision);
     // Server mode: the linked page groups (a page can be in several); otherwise the first path segment.
     const scope = this.scopeSets;
     const groupsOf = (id: number, url: string): string[] => {
@@ -823,17 +875,173 @@ export class Session extends EventEmitter {
     }
     const order: Record<PageSetName, number> = { exact: 0, possible: 1, unknown: 2 };
     items.sort((a, b) => order[a.set] - order[b.set] || a.url.localeCompare(b.url));
-    const offset = Math.max(0, p.offset ?? 0);
-    const limit = Math.min(Math.max(1, p.limit ?? 200), 2000);
     return {
-      editRevision,
-      indexRevision: idx.revision.id,
-      level: 1,
-      count: sets.count(pending),
+      idx,
+      items,
       groups: [...groups.values()].sort((a, b) => b.exact + b.possible - (a.exact + a.possible) || a.name.localeCompare(b.name)),
-      total: items.length,
-      offset,
-      pages: items.slice(offset, offset + limit),
+      sets,
+      pending,
+      editRevision,
+    };
+  }
+
+  // ---------------------------------------------------- impact assessment
+
+  private assessKey(): string {
+    return `${this.index?.revision.id ?? -1}:${this.editRevision}`;
+  }
+
+  /** Results for the current edits and page scan; older ones are dropped. */
+  private impacts(): Map<string, PageImpact> {
+    const key = this.assessKey();
+    if (this.assessed.key !== key) this.assessed = { key, results: new Map() };
+    return this.assessed.results;
+  }
+
+  private runningAssessment(): AssessJob | undefined {
+    const job = this.assessJob;
+    return job && job.workers > 0 && !job.cancelled && job.key === this.assessKey() ? job : undefined;
+  }
+
+  /**
+   * Once no assessment is running: the results on the pages, the ones that
+   * look different first (most changed elements, then most moved), then the
+   * unassessed, the inconclusive and the unchanged, each in L1 order.
+   */
+  private rankByImpact(items: PageItem[]): AssessmentSummary {
+    const results = this.impacts();
+    const job = this.runningAssessment();
+    const s: AssessmentSummary = { running: !!job, done: job?.done ?? 0, total: job?.total ?? 0, assessed: 0, pending: 0, changed: 0, maxChanged: 0 };
+    for (const it of items) {
+      const im = results.get(it.url);
+      if (!im) {
+        s.pending++;
+        continue;
+      }
+      s.assessed++;
+      if (im.status === "changed") {
+        s.changed++;
+        s.maxChanged = Math.max(s.maxChanged, im.changed);
+      }
+      if (!job) it.impact = im;
+    }
+    if (!job && s.assessed) {
+      const rank = (it: PageItem) => (!it.impact ? 1 : it.impact.status === "changed" ? 0 : it.impact.status === "inconclusive" ? 2 : 3);
+      items.sort((a, b) => rank(a) - rank(b) || (b.impact?.changed ?? 0) - (a.impact?.changed ?? 0) || (b.impact?.moved ?? 0) - (a.impact?.moved ?? 0));
+    }
+    return s;
+  }
+
+  /** Checks every page of a list visually in the background (L2, each device); analysis/getPages then ranks them. */
+  async assess(p: AssessParams): Promise<AssessProgress> {
+    const { items } = await this.listPages(p);
+    const results = this.impacts();
+    let job = this.runningAssessment();
+    if (!job && this.assessJob && this.assessJob.workers > 0) this.assessJob.cancelled = true;
+    const todo = items.map((i) => i.url).filter((u) => !results.has(u));
+    if (!job) {
+      if (!todo.length) return this.assessProgress(undefined);
+      job = this.assessJob = {
+        key: this.assessed.key,
+        editRevision: this.editRevision,
+        indexRevision: this.index?.revision.id ?? null,
+        queue: [],
+        queued: new Set(),
+        done: 0,
+        total: 0,
+        workers: 0,
+        cancelled: false,
+        emittedAt: 0,
+      };
+    }
+    for (const u of todo) {
+      if (job.queued.has(u)) continue;
+      job.queued.add(u);
+      job.queue.push(u);
+      job.total++;
+    }
+    while (job.workers < ASSESS_WORKERS && job.workers < job.queue.length) void this.assessWorker(job);
+    return this.assessProgress(job);
+  }
+
+  private assessProgress(job: AssessJob | undefined): AssessProgress {
+    return {
+      editRevision: job?.editRevision ?? this.editRevision,
+      indexRevision: job ? job.indexRevision : this.index?.revision.id ?? null,
+      running: !!job && job.workers > 0 && !job.cancelled,
+      done: job?.done ?? 0,
+      total: job?.total ?? 0,
+      ...(job?.cancelled ? { cancelled: true } : {}),
+    };
+  }
+
+  private emitAssess(job: AssessJob, final: boolean): void {
+    const now = Date.now();
+    if (!final && now - job.emittedAt < 200) return;
+    job.emittedAt = now;
+    this.emit("assess", this.assessProgress(job));
+  }
+
+  private async assessWorker(job: AssessJob): Promise<void> {
+    job.workers++;
+    try {
+      let prep: RenderEdits | undefined;
+      let failed: string | undefined;
+      try {
+        prep = await (job.prep ??= this.renderEdits());
+      } catch (err: any) {
+        failed = String(err?.message ?? err).split("\n")[0];
+      }
+      while (!job.cancelled && job.queue.length) {
+        if (job.key !== this.assessKey()) {
+          job.cancelled = true;
+          break;
+        }
+        const url = job.queue.shift()!;
+        const impact = prep
+          ? await this.pageImpact(url, prep, job).catch((err: any) => inconclusiveImpact(String(err?.message ?? err).split("\n")[0]))
+          : inconclusiveImpact(`Your edits couldn't be prepared: ${failed}`);
+        if (job.cancelled || job.key !== this.assessKey()) {
+          job.cancelled = true;
+          break;
+        }
+        this.impacts().set(url, impact);
+        job.done++;
+        this.emitAssess(job, false);
+      }
+    } finally {
+      job.workers--;
+      if (job.workers === 0) this.emitAssess(job, true);
+    }
+  }
+
+  private async pageImpact(url: string, prep: RenderEdits, job: AssessJob): Promise<PageImpact> {
+    if (prep.list.length === 0) return { status: "unchanged", changed: 0, moved: 0, devices: [] };
+    if (prep.edits.length === 0) return inconclusiveImpact("Your changed files don't match any stylesheet on the site.");
+    const page = this.pageRow(url);
+    const variants = this.pageVariants(page);
+    if (page.status !== "ok" || !variants.length) return inconclusiveImpact(`The page's scan failed: ${page.error ?? "no stored copy"}`);
+    const { props, unresolved } = this.propsFor(prep.changes, prep.models, page);
+    const devices: PageImpact["devices"] = [];
+    for (const variant of variants) {
+      if (job.cancelled || job.key !== this.assessKey()) break;
+      const d = await this.getRenderer().measure({ page, variant, mode: "shell", edits: prep.edits, props, maxElements: 0, background: true });
+      let status = d.status;
+      let reason = d.reason;
+      if (status === "unchanged" && unresolved.length) {
+        status = "inconclusive";
+        reason = `No stylesheet on this page uses ${unresolved.join(", ")}: what it feeds (inline styles, scripts) wasn't compared.`;
+      }
+      devices.push({ name: variant.name, status, changed: d.changedElements, moved: d.movedElements, ...(reason ? { reason } : {}) });
+    }
+    const status = devices.some((d) => d.status === "changed") ? "changed" : devices.every((d) => d.status === "unchanged") ? "unchanged" : "inconclusive";
+    const reason = status === "inconclusive" ? devices.find((d) => d.reason)?.reason : undefined;
+    return {
+      status,
+      changed: devices.reduce((n, d) => n + d.changed, 0),
+      moved: devices.reduce((n, d) => n + d.moved, 0),
+      devices,
+      ...(reason ? { reason } : {}),
     };
   }
 
@@ -1070,42 +1278,7 @@ export class Session extends EventEmitter {
     const page = this.pageRow(p.url);
     const t0 = performance.now();
     const editRevision = this.editRevision;
-    const edits: SheetEdit[] = [];
-    const list: PageDiffView["edits"] = [];
-    const changes: CssChange[] = [];
-    const models: StylesheetModel[] = [];
-    const warnings: string[] = [];
-    const owner = new Map<string, string>(); // site stylesheet → the file applied to it
-    const todo: Array<{ file: string; keys: string[]; base?: BaseText; cur: string }> = [];
-    for (const f of this.files.values()) {
-      const r = this.resultFor(f);
-      if (r.changes.length === 0) continue;
-      const file = this.relPath(f.path);
-      list.push({ file, changes: r.changes.length });
-      let keys = r.answer.mapping.urls;
-      if (keys.length > 1 && f.base?.kind === "production") {
-        // A name tie: the base is the first match's captured CSS, so the edit only fits sheets with that same content.
-        const hash = this.sheetHashes(f.path)[0];
-        const same = keys.filter((k) => idx.sheets.get(k)?.hash === hash);
-        if (same.length < keys.length) {
-          warnings.push(`${file} matches ${keys.length} site stylesheets with the same name; it's compared only where the site's copy is identical (${same.join(", ")}).`);
-        }
-        keys = same;
-      }
-      const taken = keys.filter((k) => owner.has(k));
-      for (const k of taken) warnings.push(`${file} and ${owner.get(k)} both match ${k}; only ${owner.get(k)} is compared there.`);
-      keys = keys.filter((k) => !owner.has(k));
-      if (keys.length === 0) continue;
-      for (const k of keys) owner.set(k, file);
-      todo.push({ file, keys, base: f.base, cur: r.cur.text });
-      changes.push(...r.changes);
-      models.push(r.cur.model, f.baseModel ?? r.cur.model);
-    }
-    for (const e of todo) {
-      const texts = await this.renderTexts(e.base, e.cur);
-      if (texts.conflict) warnings.push(conflictWarning(e.file, this.branch));
-      edits.push({ sheetKeys: e.keys, baseText: texts.baseText, editedText: texts.editedText });
-    }
+    const { edits, list, changes, models, warnings } = await this.renderEdits();
     const variants = this.pageVariants(page);
     const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
     const view: PageDiffView = {
@@ -1160,6 +1333,48 @@ export class Session extends EventEmitter {
     const box = (b: number[] | null) => (b ? ([b[0], b[1], b[2], b[3]] as [number, number, number, number]) : null);
     view.zones = diff.zones.map((z) => ({ before: box(z.before), after: box(z.after), label: z.label, props: z.props }));
     return finish();
+  }
+
+  /** Every current edit as the visual diff applies it: the site stylesheets each changed file replaces, and its texts. */
+  private async renderEdits(): Promise<RenderEdits> {
+    const idx = this.requireIndex();
+    const edits: SheetEdit[] = [];
+    const list: PageDiffView["edits"] = [];
+    const changes: CssChange[] = [];
+    const models: StylesheetModel[] = [];
+    const warnings: string[] = [];
+    const owner = new Map<string, string>(); // site stylesheet → the file applied to it
+    const todo: Array<{ file: string; keys: string[]; base?: BaseText; cur: string }> = [];
+    for (const f of this.files.values()) {
+      const r = this.resultFor(f);
+      if (r.changes.length === 0) continue;
+      const file = this.relPath(f.path);
+      list.push({ file, changes: r.changes.length });
+      let keys = r.answer.mapping.urls;
+      if (keys.length > 1 && f.base?.kind === "production") {
+        // A name tie: the base is the first match's captured CSS, so the edit only fits sheets with that same content.
+        const hash = this.sheetHashes(f.path)[0];
+        const same = keys.filter((k) => idx.sheets.get(k)?.hash === hash);
+        if (same.length < keys.length) {
+          warnings.push(`${file} matches ${keys.length} site stylesheets with the same name; it's compared only where the site's copy is identical (${same.join(", ")}).`);
+        }
+        keys = same;
+      }
+      const taken = keys.filter((k) => owner.has(k));
+      for (const k of taken) warnings.push(`${file} and ${owner.get(k)} both match ${k}; only ${owner.get(k)} is compared there.`);
+      keys = keys.filter((k) => !owner.has(k));
+      if (keys.length === 0) continue;
+      for (const k of keys) owner.set(k, file);
+      todo.push({ file, keys, base: f.base, cur: r.cur.text });
+      changes.push(...r.changes);
+      models.push(r.cur.model, f.baseModel ?? r.cur.model);
+    }
+    for (const e of todo) {
+      const texts = await this.renderTexts(e.base, e.cur);
+      if (texts.conflict) warnings.push(conflictWarning(e.file, this.branch));
+      edits.push({ sheetKeys: e.keys, baseText: texts.baseText, editedText: texts.editedText });
+    }
+    return { edits, list, changes, models, warnings };
   }
 
   // -------------------------------------------------------------- capture
@@ -1280,12 +1495,17 @@ export class Session extends EventEmitter {
 
   async dispose(): Promise<void> {
     clearTimeout(this.refreshTimer);
+    if (this.assessJob) this.assessJob.cancelled = true;
     await this.watcher?.close();
     if (this.opts.shared) return; // the server owns the store, pool and renderer
     await this.renderer?.close();
     await this.pool.close();
     this.store.close();
   }
+}
+
+function inconclusiveImpact(reason: string): PageImpact {
+  return { status: "inconclusive", changed: 0, moved: 0, devices: [], reason };
 }
 
 function conflictWarning(file: string, bp: BranchPoint | undefined): string {

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
 import { DIFF_BASE_LABEL, branchNote, formatCount } from "./format";
-import { ERR, type ChangeAnswer, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
+import { ERR, type AssessProgress, type ChangeAnswer, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
 
@@ -19,6 +19,7 @@ type FromWebview =
   | { type: "filter"; path?: string; changeId?: string }
   | { type: "search"; query: string }
   | { type: "searchMore"; query: string; offset: number }
+  | { type: "assess" }
   | { type: "page"; url: string };
 
 interface Chip {
@@ -83,6 +84,12 @@ export class PagesPanel implements vscode.Disposable {
         }
       }),
       state.onStatus(() => this.scheduleRefresh()),
+      client.onNotification((method, p: AssessProgress) => {
+        if (method !== "analysis/assessProgress" || !this.ready) return;
+        void this.post({ type: "assessProgress", progress: p });
+        // Done (or out of date): the list comes back ranked by impact.
+        if (!p.running) this.scheduleRefresh();
+      }),
     );
   }
 
@@ -245,8 +252,27 @@ export class PagesPanel implements vscode.Disposable {
     });
   }
 
+  /** Checks every page of the current list visually, in the background (analysis/assess). */
+  private async assess(): Promise<void> {
+    const t = this.target;
+    try {
+      const p = await this.client.call<AssessProgress>("analysis/assess", {
+        path: t.path, changeId: t.changeId, line: t.changeId ? undefined : t.line,
+        side: this.filters.side, set: this.filters.set, group: this.filters.group,
+      });
+      if (t !== this.target) return;
+      void this.post({ type: "assessProgress", progress: p });
+      if (!p.running) this.scheduleRefresh();
+    } catch (err: any) {
+      void this.post({ type: "assessProgress", progress: { running: false, done: 0, total: 0 } });
+      void this.post({ type: "error", message: `Couldn't assess the impact: ${err?.message ?? err}` });
+    }
+  }
+
   private async onMessage(m: FromWebview): Promise<void> {
     switch (m.type) {
+      case "assess":
+        return this.assess();
       case "ready":
         this.ready = true;
         void this.post({ type: "target", target: this.target });
@@ -300,6 +326,7 @@ export class PagesPanel implements vscode.Disposable {
   <div id="sides"></div><div id="sets"></div>
   <select id="group" aria-label="Page group"></select>
   <input id="search" type="search" placeholder="Filter pages by URL" aria-label="Filter pages by URL">
+  <button id="assess" hidden title="Check each page in this list with your edits applied, then sort the list by how much each page changes.">Assess impact</button>
 </div>
 <div id="list"><div id="pages"></div><button id="more" hidden>Show more</button><div id="error" class="warning" hidden></div></div>
 <script nonce="${nonce}" src="${media("panel.js")}"></script>

@@ -61,6 +61,8 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
       });
     case "analysis/pageDiff":
       return run(() => session.pageDiff({ url: need(p, "url"), device: p.device, live: !!p.live }));
+    case "analysis/assess":
+      return run(() => session.assess(p ?? {}));
     default:
       return undefined;
   }
@@ -75,4 +77,5 @@ export const SESSION_NOTIFICATIONS: Array<[event: string, method: string]> = [
   ["captureProgress", "index/captureProgress"],
   ["degraded", "server/degraded"],
   ["externalChange", "analysis/externalChange"],
+  ["assess", "analysis/assessProgress"],
 ];

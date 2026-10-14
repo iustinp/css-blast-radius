@@ -75,8 +75,9 @@ export class DaemonClient {
     });
   }
 
-  onNotification(handler: (method: string, params: any) => void): void {
+  onNotification(handler: (method: string, params: any) => void): { dispose(): void } {
     this.notificationHandlers.add(handler);
+    return { dispose: () => void this.notificationHandlers.delete(handler) };
   }
 
   onClose(handler: () => void): void {

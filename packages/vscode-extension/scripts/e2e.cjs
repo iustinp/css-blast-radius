@@ -353,6 +353,18 @@ async function run() {
       assert(data.result.pages.every((x) => x.groups.includes("Home & About")), "page group names missing from rows");
       assert(data.chips.some((chip) => chip.path === file && chip.changes.length), "no file/change chips");
     });
+    await check("assess: button checks every listed page and the list comes back ranked", async () => {
+      const p = pagesPanel();
+      assert.equal(lastPages(p).result.assessment?.pending, 2, "list should start unassessed");
+      p.webview.receive({ type: "assess" });
+      await waitFor(() => p.posted.some((m) => m.type === "assessProgress" && m.progress.running), "assessment started");
+      const data = await waitFor(() => {
+        const m = lastPages(p);
+        return m?.result.assessment?.assessed === 2 && !m.result.assessment.running && m;
+      }, "ranked page list");
+      assert.deepEqual(data.result.pages.map((x) => x.impact?.status), ["changed", "changed"]);
+      assert.equal(data.result.assessment.changed, 2);
+    });
     await check("diff: iframe URL and server-rendered changed result", async () => {
       pagesPanel().webview.receive({ type: "page", url: "/about.html" });
       const diff = await waitFor(() => panels.find((p) => p.viewType === "cssBlastRadius.diff"), "diff tab");

@@ -45,4 +45,22 @@ input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); }
 .detail { font-size: 11px; margin-top: 2px; }
 .empty { text-align: center; padding: 24px 16px; }
 #more { margin: 8px 16px 16px; border-radius: 3px; }
+#assess { border-radius: 3px; padding: 5px 8px; }
+#assess:disabled { cursor: default; }
+#assess:disabled:not(.running) { color: var(--vscode-descriptionForeground); background: transparent; }
+#assess.running {
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--vscode-progressBar-background, #0e70c0) 45%, transparent) var(--progress, 0%),
+    var(--vscode-button-secondaryBackground) var(--progress, 0%));
+}
+#assess.running.wave {
+  background: linear-gradient(90deg, var(--vscode-button-secondaryBackground) 0%,
+    color-mix(in srgb, var(--vscode-progressBar-background, #0e70c0) 45%, transparent) 50%,
+    var(--vscode-button-secondaryBackground) 100%) 0 0 / 200% 100%;
+  animation: wave 1.4s linear infinite;
+}
+@keyframes wave { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+#list.assessing #pages { opacity: .45; }
+.page.impact { background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) var(--heat), transparent); }
+.page.impact:hover, .page.impact:focus { background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) calc(var(--heat) + 12%), transparent); }
 #error { margin: 8px 16px; }

@@ -30,6 +30,8 @@ export interface MeasureRequest extends Partial<SheetEdit> {
   props: string[];
   screenshots?: boolean;
   maxElements?: number;
+  /** Bulk work (impact assessment): waits behind interactive renders. */
+  background?: boolean;
 }
 
 export interface ElementDiff {
@@ -106,18 +108,21 @@ interface Snapshot {
   index: Map<string, number>;
 }
 
+/** A free slot goes to interactive work first, then to background work. */
 class Semaphore {
-  private queue: Array<() => void> = [];
+  private readonly queue: Array<() => void> = [];
+  private readonly background: Array<() => void> = [];
   private active = 0;
   constructor(private readonly max: number) {}
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.active >= this.max) await new Promise<void>((r) => this.queue.push(r));
-    this.active++;
+  async run<T>(fn: () => Promise<T>, background = false): Promise<T> {
+    if (this.active >= this.max) await new Promise<void>((r) => (background ? this.background : this.queue).push(r));
+    else this.active++;
     try {
       return await fn();
     } finally {
-      this.active--;
-      this.queue.shift()?.();
+      const next = this.queue.shift() ?? this.background.shift();
+      if (next) next();
+      else this.active--;
     }
   }
 }
@@ -165,7 +170,7 @@ export class Renderer {
   }
 
   measure(req: MeasureRequest): Promise<PageDiff> {
-    return this.limit.run(() => this.measureNow(req));
+    return this.limit.run(() => this.measureNow(req), req.background);
   }
 
   private async measureNow(req: MeasureRequest): Promise<PageDiff> {

@@ -183,6 +183,8 @@ export interface PageItem {
   template?: string;
   /** Names of the linked page groups the page is in (server mode). */
   groups?: string[];
+  /** After an impact assessment: what the page looks like with your edits. */
+  impact?: PageImpact;
 }
 
 export interface PagesResult {
@@ -194,6 +196,47 @@ export interface PagesResult {
   total: number;
   offset: number;
   pages: PageItem[];
+  assessment: AssessmentSummary;
+}
+
+/** analysis/assess: the same list as analysis/getPages, checked visually in the background. */
+export type AssessParams = Omit<GetPagesParams, "offset" | "limit" | "editRevision">;
+
+/** One page checked visually with every current edit, on each device (L2, no screenshots). */
+export interface PageImpact {
+  /** changed: some device looks different; inconclusive: none does, but one couldn't be checked. */
+  status: "changed" | "unchanged" | "inconclusive";
+  /** Elements whose own styles change, summed over devices. */
+  changed: number;
+  /** Elements that only move or resize, summed over devices. */
+  moved: number;
+  devices: Array<{ name: string; status: "changed" | "unchanged" | "inconclusive"; changed: number; moved: number; reason?: string }>;
+  reason?: string;
+}
+
+/** The impact assessment of a page list (PagesResult.assessment). */
+export interface AssessmentSummary {
+  running: boolean;
+  /** Progress of the running assessment (every list it was asked for). */
+  done: number;
+  total: number;
+  /** Pages of this list with a result, and without one. */
+  assessed: number;
+  pending: number;
+  /** Pages of this list that look different, and the most changed elements on one of them. */
+  changed: number;
+  maxChanged: number;
+}
+
+/** analysis/assess result and analysis/assessProgress notification. */
+export interface AssessProgress {
+  editRevision: number;
+  indexRevision: number | null;
+  running: boolean;
+  done: number;
+  total: number;
+  /** An edit or a new page scan made the results out of date. */
+  cancelled?: boolean;
 }
 
 export interface DrilldownParams {

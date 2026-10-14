@@ -362,6 +362,16 @@ A failed or unfaithful replay is *inconclusive*, never "no change".
 changes don't mutate the DOM.) Rendering the whole site is never a side
 effect of editing; it is an explicit batch job, e.g. in CI.
 
+**Assess impact** is the one batch the panel offers: a button above the page
+list runs this step (no screenshots, every device) on each listed page, in
+the background, at most three at a time and always behind diff-viewer
+requests. Meanwhile the list stays usable but dimmed and the button shows
+progress. Once done, `analysis/getPages` ranks the list: pages that look
+different first (most changed elements, then most moved), then inconclusive,
+then not yet assessed, then unchanged; the panel shades rows deeper blue for
+more changed elements. Results belong to one index revision and edit
+revision: the next edit stops the job and drops them.
+
 ### 6.7 L3: the live page
 
 Load the real URL (production, staging or a local dev server), run the
@@ -390,7 +400,7 @@ cannot meet the L0 budget. Decorations and the status bar update immediately.
 | Count next to the cursor, on the line being edited | `312 pages`, `+5 / −2 pages`, `Up to 340 pages` | Updates at once (`setDecorations`), before saving: the L0 surface |
 | Status bar item | `Your edits: 340 pages`, or `Link page groups` when none are linked; click opens the panel | Always visible, updates at once |
 | Hover | The full answer: exact/possible/unknown, conditions, reasons, index age, page links | On demand |
-| Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff | On demand |
+| Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff. **Assess impact** ranks it by visual change (§6.6) | On demand |
 | Diff tab (webview embedding the server's `/diff` page; also opens in a browser) | L2: the whole page, before/after on one canvas, changed zones outlined; Space flips, N jumps to the next change; `Check on the live page` (L3) | On demand; refreshes itself as you keep typing |
 | Outside-editor notice | "CSS changed outside the editor: 12 → 40 pages" after a pull, branch switch or another tool | Edits that never went through the editor |
 | CodeLens above each rule (off by default) | The settled count, e.g. `312 pages · show` | Fine once typing pauses |
@@ -723,7 +733,8 @@ migrated or refused, never read silently.
 | `groups/list`, `session/setGroups` | — | List page groups; change the linked groups. Counts cover only linked, active groups |
 | `document/open`, `document/change`, `document/save`, `document/close` | — | Editor events. `change` carries incremental ranges (full text for small files) and returns the L0 answer |
 | `analysis/queryImpacts` | 0 | Counts for a rule, a file or the session |
-| `analysis/getPages` | 1 | Paginated page list, with progress |
+| `analysis/getPages` | 1 | Paginated page list, with progress; ranked by visual impact once assessed |
+| `analysis/assess` | 2 | Check every page of a list visually in the background ("Assess impact"); progress via `analysis/assessProgress` |
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |
 | `session/setDiffBase` | — | Production (the live site as last scanned; default), `HEAD`, last save or session start |
@@ -733,6 +744,7 @@ migrated or refused, never read silently.
 **Notifications:** `analysis/publishImpact` (new answer), `analysis/refined`
 (an answer became more precise, e.g. `Up to 340` → `212`),
 `analysis/drilldownProgress` (streamed L2/L3 results),
+`analysis/assessProgress` (Assess impact: pages done, finished or stopped by an edit),
 `analysis/resultSuperseded`, `analysis/externalChange` (CSS changed on disk
 outside the editor and moved the total), `groups/changed`,
 `index/statusChanged`, `index/revisionSwitched`, `server/degraded`,

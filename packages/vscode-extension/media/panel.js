@@ -19,6 +19,8 @@
   let searchRows = null;
   let searchTotal = 0;
   let searchTimer;
+  let assessment = null; // the list's PagesResult.assessment
+  let assessing = null; // { done, total } while an assessment runs
 
   function load(offset) {
     vscode.postMessage({ type: "load", ...filters, offset, editRevision });
@@ -95,6 +97,50 @@
     sel.hidden = !groups.length;
   }
 
+  const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many}`;
+
+  function impactText(im) {
+    if (im.status === "unchanged") return "No visual change";
+    if (im.status === "inconclusive") return `Couldn't tell: ${im.reason || "the page couldn't be compared"}`;
+    const part = (d) => [d.changed ? plural(d.changed, "element changes", "elements change") : "", d.moved ? `${fmt(d.moved)} move` : ""]
+      .filter(Boolean).join(", ") || (d.status === "inconclusive" ? "couldn't tell" : "no change");
+    return `Looks different · ${im.devices.length > 1 ? im.devices.map((d) => `${d.name}: ${part(d)}`).join(" · ") : part(im)}`;
+  }
+
+  // Deeper blue for more changed elements (log scale); a faint tint when things only move.
+  function heat(im) {
+    if (!im || im.status !== "changed") return 0;
+    if (!im.changed) return 0.08;
+    const max = (assessment && assessment.maxChanged) || im.changed;
+    return Math.min(0.6, 0.14 + 0.46 * Math.log1p(im.changed) / Math.log1p(max));
+  }
+
+  function renderAssess() {
+    const btn = $("assess");
+    const busy = !!assessing;
+    $("list").classList.toggle("assessing", busy);
+    btn.classList.toggle("running", busy);
+    btn.classList.toggle("wave", busy && !assessing.total);
+    btn.hidden = !assessment || !total;
+    if (btn.hidden) return;
+    if (busy) {
+      btn.disabled = true;
+      btn.textContent = assessing.total ? `Assessing impact… ${fmt(assessing.done)} / ${fmt(assessing.total)}` : "Assessing impact…";
+      btn.style.setProperty("--progress", `${assessing.total ? Math.round((100 * assessing.done) / assessing.total) : 0}%`);
+      return;
+    }
+    btn.style.removeProperty("--progress");
+    if (assessment.pending > 0) {
+      btn.disabled = false;
+      btn.textContent = assessment.assessed
+        ? `Assess impact · ${plural(assessment.pending, "more page", "more pages")}`
+        : `Assess impact · ${plural(assessment.pending, "page", "pages")}`;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = `Impact assessed: ${fmt(assessment.changed)} of ${plural(assessment.assessed, "page looks", "pages look")} different`;
+  }
+
   function renderRows() {
     const list = $("pages");
     const visible = searchQuery ? (searchRows || []) : rows;
@@ -103,6 +149,11 @@
     for (const p of visible) {
       const row = el("div", `page ${p.set}`);
       row.tabIndex = 0;
+      const h = heat(p.impact);
+      if (h) {
+        row.classList.add("impact");
+        row.style.setProperty("--heat", `${Math.round(h * 100)}%`);
+      }
       const open = () => vscode.postMessage({ type: "page", url: p.url });
       row.addEventListener("click", open);
       row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
@@ -110,6 +161,7 @@
       const details = [p.groups && p.groups.join(", "), target.changeId && target.title, p.template,
         p.set === "possible" ? "may match" : p.set === "unknown" ? "not checked" : ""].filter(Boolean);
       if (details.length) row.append(el("div", "muted detail", details.join(" · ")));
+      if (p.impact) row.append(el("div", `detail impact-${p.impact.status}${p.impact.status === "changed" ? "" : " muted"}`, impactText(p.impact)));
       if (losses[p.url]) row.append(el("div", "warning detail", `⚠ loses ${losses[p.url].join(", ")}`));
       else if (filters.side === "lost") row.append(el("div", "warning detail", "⚠ loses this style"));
       list.append(row);
@@ -122,6 +174,11 @@
     $("more").textContent = `Show more (${fmt(remaining)} left)`;
   }
 
+  $("assess").addEventListener("click", () => {
+    assessing = { done: 0, total: 0 };
+    renderAssess();
+    vscode.postMessage({ type: "assess" });
+  });
   $("group").addEventListener("change", (e) => { filters.group = e.target.value || undefined; load(0); });
   $("more").addEventListener("click", () => {
     if (searchQuery) vscode.postMessage({ type: "searchMore", query: searchQuery, offset: searchRows.length });
@@ -146,6 +203,9 @@
       losses = {};
       searchRows = null;
       searchTotal = 0;
+      assessment = null;
+      assessing = null;
+      renderAssess();
       $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
       return;
     }
@@ -167,6 +227,15 @@
       renderRows();
       return;
     }
+    if (m.type === "assessProgress") {
+      const p = m.progress;
+      // A late update from an assessment an edit already replaced.
+      if (p.running && p.editRevision !== undefined && editRevision !== undefined && p.editRevision !== editRevision) return;
+      if (p.running) assessing = { done: p.done, total: p.total };
+      else if (!p.total) assessing = null; // nothing to assess, or it failed
+      renderAssess();
+      return;
+    }
     if (m.type === "losses") {
       if (m.editRevision !== editRevision) return;
       for (const [url, labels] of Object.entries(m.pages)) losses[url] = [...new Set([...(losses[url] || []), ...labels])];
@@ -179,6 +248,8 @@
     target = m.target;
     editRevision = m.result.editRevision;
     total = m.result.total;
+    assessment = m.result.assessment || null;
+    assessing = assessment && assessment.running ? { done: assessment.done, total: assessment.total } : null;
     const count = m.result.count;
     $("number").textContent = fmt(count.exact + count.possible + count.unknown);
     $("summary").textContent = `${m.summary} affected of ${fmt(m.scopePages)} in linked groups`;
@@ -198,6 +269,7 @@
     renderSets(count);
     renderGroups(m.result.groups);
     renderRows();
+    renderAssess();
   });
 
   vscode.postMessage({ type: "ready" });
