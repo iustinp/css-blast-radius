@@ -33,10 +33,17 @@ describe("count at the cursor", () => {
   it("renders counts, editing, multiple edits and a selector that stops matching", () => {
     const first = change(1);
     expect(ghostText(answer([first]), first)).toBe("◀ 362 pages");
-    expect(ghostText(answer([first, change(5)]), first)).toBe("◀ 815 pages (2 edits)");
+    expect(ghostText(answer([first, change(5)]), first)).toBe("◀ 362 pages, 815 total (2 edits)");
+    const small = change(3, { pages: count(2) });
+    expect(ghostText(answer([first, small, change(5)], { total: count(56) }), small)).toBe("◀ 2 pages, 56 total (3 edits)");
+    expect(ghostText(answer([first, small], { total: count(0, 56) }), small)).toBe("◀ 2 pages, up to 56 total (2 edits)");
+    const one = change(3, { pages: count(1) });
+    expect(ghostText(answer([one, change(5)], { total: count(1) }), one)).toBe("◀ 1 page, 1 total (2 edits)");
     expect(ghostText(answer([first], { editing: true }), first)).toBe("◀ finish typing…");
     const selector = change(1, { kind: "selector", pages: count(0), lost: count(649) });
     expect(ghostText(answer([selector]), selector)).toBe("◀ matches no page now · 649 lose this style ⚠");
+    expect(ghostText(answer([selector, first], { total: count(56) }), selector))
+      .toBe("◀ matches no page now, 56 total (2 edits) · 649 lose this style ⚠");
     const possible = change(1, { pages: count(0, 13) });
     expect(ghostText(answer([possible]), possible)).toBe("◀ up to 13 pages");
   });
@@ -51,6 +58,10 @@ describe("count at the cursor", () => {
     expect(reasonText("stylesheet-not-mapped")).toContain("only possible");
     const zero = change(1, { pages: count(0), reasons: ["not-in-linked-groups"] });
     expect(ghostText(answer([zero]), zero)).toBe("◀ 0 pages · no page in the linked groups loads this file");
+    expect(ghostText(answer([zero, change(5, { pages: count(0) })], { total: count(0) }), zero))
+      .toBe("◀ 0 pages · no page in the linked groups loads this file (2 edits)");
+    const unseen = change(1, { pages: count(0), reasons: ["token-never-seen:c:is-playing"] });
+    expect(ghostText(answer([unseen, change(5)], { total: count(56) }), unseen)).toBe("◀ 0 pages · .is-playing never seen, 56 total (2 edits)");
   });
 });
 

@@ -87,7 +87,7 @@ What your edits are compared with is **the live site, as last scanned**. In a gi
 
 ### 4. Edit CSS
 
-- **While you type**, before saving, the number of affected pages appears next to the cursor, and the total appears in the status bar.
+- **While you type**, before saving, the number of affected pages appears next to the cursor, and the total appears in the status bar. When the file has other edits too, the cursor shows the edit you're on first, then the file's total: `◀ 2 pages, 56 total (6 edits)`.
 - **Hover** the count to see what changed and what it reaches.
 - Press **Alt+B** (or click the count) to open the page list, grouped by your linked groups.
 - Click **Assess impact** above the list to check every listed page with your edits applied (a few seconds for a couple dozen pages). The list then puts the pages that look different on top, most changed first, shaded deeper blue; pages with no visual change go to the bottom, unshaded. The next edit clears the ranking.

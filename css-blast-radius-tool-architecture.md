@@ -397,7 +397,7 @@ cannot meet the L0 budget. Decorations and the status bar update immediately.
 
 | Surface | Shows | Why |
 |---|---|---|
-| Count next to the cursor, on the line being edited | `312 pages`, `+5 / −2 pages`, `Up to 340 pages` | Updates at once (`setDecorations`), before saving: the L0 surface |
+| Count next to the cursor, on the line being edited | `312 pages`, `+5 / −2 pages`, `Up to 340 pages`; with other edits in the file, this edit first, then all of them: `2 pages, 56 total (6 edits)` | Updates at once (`setDecorations`), before saving: the L0 surface |
 | Status bar item | `Your edits: 340 pages`, or `Link page groups` when none are linked; click opens the panel | Always visible, updates at once |
 | Hover | The full answer: exact/possible/unknown, conditions, reasons, index age, page links | On demand |
 | Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff. **Assess impact** ranks it by visual change (§6.6) | On demand |

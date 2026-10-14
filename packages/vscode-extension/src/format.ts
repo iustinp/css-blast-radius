@@ -51,19 +51,24 @@ export function changeAtCursor(changes: ChangeAnswer[], rules: RuleCount[], line
   return candidates.sort((a, b) => a.size - b.size)[0]?.change ?? changes.find((ch) => ch.line === line);
 }
 
+/**
+ * The count at the cursor: the edit under it first, then, when the file has
+ * other edits, all of them together (`2 pages, 56 total (6 edits)`).
+ */
 export function ghostText(answer: FileAnswer, change: ChangeAnswer): string {
   if (answer.editing) return "◀ finish typing…";
   const lost = change.lost ?? (change.kind === "removed" ? change.pages : undefined);
   const lostN = lost?.exact ?? 0;
-  let text: string;
-  if (lostN && change.kind === "selector" && isZero(change.pages)) {
-    text = `matches no page now · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
-  } else {
-    const count = answer.changes.length > 1 ? answer.total : change.pages;
-    text = formatCount(count, answer.changes.length > 1 ? answer.totalReasons : change.reasons).replace(/^Up to /, "up to ");
-    if (lostN) text += ` · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
+  const lowerUpTo = (s: string) => s.replace(/^Up to /, "up to ");
+  let text = lostN && change.kind === "selector" && isZero(change.pages)
+    ? "matches no page now"
+    : lowerUpTo(formatCount(change.pages, change.reasons));
+  if (answer.changes.length > 1) {
+    // All edits at 0 means this one is too: nothing to add but the edit count.
+    if (!isZero(answer.total)) text += `, ${lowerUpTo(formatCount(answer.total).replace(/\bpages?\b/, "total"))}`;
+    text += ` (${answer.changes.length} edits)`;
   }
-  if (answer.changes.length > 1) text += ` (${answer.changes.length} edits)`;
+  if (lostN) text += ` · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
   return `◀ ${text}`;
 }
 
