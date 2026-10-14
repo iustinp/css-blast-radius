@@ -21,6 +21,9 @@
   let searchTimer;
   let assessment = null; // the list's PagesResult.assessment
   let assessing = null; // { done, total } while an assessment runs
+  let nonePicked = false;
+  let sides; // the one picked edit's sides, when it has more than one
+  let single; // the one picked edit's label
 
   function load(offset) {
     vscode.postMessage({ type: "load", ...filters, offset, editRevision });
@@ -32,20 +35,29 @@
     return node;
   }
 
-  function renderChips(chips, count) {
+  // A picked edit is highlighted; a file with only some of its edits picked gets a dashed outline.
+  function toggle(text, state, msg, title) {
+    const node = button(text, state === "all", () => vscode.postMessage({ type: "toggle", ...msg }));
+    if (state === "some") node.classList.add("partial");
+    node.setAttribute("aria-pressed", state === "all" ? "true" : state === "some" ? "mixed" : "false");
+    node.title = title;
+    return node;
+  }
+
+  function renderChips(chips, count, all) {
     const box = $("chips");
-    box.replaceChildren(button(`All edits · ${fmt(count.exact + count.possible + count.unknown)}`,
-      !target.path, () => vscode.postMessage({ type: "filter" })));
+    const some = chips.some((f) => f.state !== "none");
+    box.replaceChildren(toggle(`All edits · ${fmt(count.exact + count.possible + count.unknown)}`,
+      all ? "all" : some ? "some" : "none", {}, all ? "Click to unpick every edit" : "Click to pick every edit"));
     for (const file of chips) {
       const group = el("div", "file-chips");
       group.append(el("div", "file-name", file.label));
-      group.append(button(`${file.changed} edit${file.changed === 1 ? "" : "s"} · ${file.count}`,
-        target.path === file.path && !target.changeId,
-        () => vscode.postMessage({ type: "filter", path: file.path })));
+      group.append(toggle(`${file.changed} edit${file.changed === 1 ? "" : "s"} · ${file.count}`, file.state, { path: file.path },
+        file.state === "all" ? "Click to unpick this file's edits" : "Click to pick all of this file's edits"));
       for (const ch of file.changes) {
         const label = `${ch.label} · ${ch.count}${ch.lost ? ` · ${fmt(ch.lost)} lose this style ⚠` : ""}`;
-        group.append(button(label, target.path === file.path && target.changeId === ch.id,
-          () => vscode.postMessage({ type: "filter", path: file.path, changeId: ch.id })));
+        group.append(toggle(label, ch.selected ? "all" : "none", { path: file.path, changeId: ch.id },
+          ch.selected ? "Click to unpick this edit" : "Click to pick this edit"));
       }
       box.append(group);
     }
@@ -54,9 +66,9 @@
   function renderSides() {
     const box = $("sides");
     box.replaceChildren();
-    if (!target.sides || target.sides.length < 2) return;
+    if (!sides || sides.length < 2) return;
     const label = { pages: "Reaches now", gained: "Starts reaching", lost: "Stops reaching" };
-    for (const side of target.sides) {
+    for (const side of sides) {
       box.append(button(label[side], (filters.side || "pages") === side, () => {
         filters = { set: "all", side: side === "pages" ? undefined : side };
         load(0);
@@ -158,7 +170,7 @@
       row.addEventListener("click", open);
       row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
       row.append(el("div", "url", p.url));
-      const details = [p.groups && p.groups.join(", "), target.changeId && target.title, p.template,
+      const details = [p.groups && p.groups.join(", "), single, p.template,
         p.set === "possible" ? "may match" : p.set === "unknown" ? "not checked" : ""].filter(Boolean);
       if (details.length) row.append(el("div", "muted detail", details.join(" · ")));
       if (p.impact) row.append(el("div", `detail impact-${p.impact.status}${p.impact.status === "changed" ? "" : " muted"}`, impactText(p.impact)));
@@ -167,7 +179,8 @@
       list.append(row);
     }
     if (!visible.length) list.append(el("div", "empty muted", searchQuery
-      ? searchRows ? "No page matches that URL." : "Searching all affected pages…" : "No affected pages yet."));
+      ? searchRows ? "No page matches that URL." : "Searching all affected pages…"
+      : nonePicked ? "No edits picked. Click an edit above to see the pages it reaches." : "No affected pages yet."));
     list.scrollTop = before;
     const remaining = searchQuery ? searchTotal - visible.length : total - visible.length;
     $("more").hidden = remaining <= 0;
@@ -198,6 +211,8 @@
     if (m.type === "target") {
       target = m.target;
       filters = { set: "all", side: target.side };
+      sides = undefined;
+      single = undefined;
       editRevision = undefined;
       rows = [];
       losses = {};
@@ -246,14 +261,22 @@
     $("error").hidden = true;
     filters = m.filters;
     target = m.target;
+    sides = m.sides;
+    single = m.single;
+    nonePicked = !m.ruleList && m.pickedEdits === 0;
     editRevision = m.result.editRevision;
     total = m.result.total;
     assessment = m.result.assessment || null;
     assessing = assessment && assessment.running ? { done: assessment.done, total: assessment.total } : null;
     const count = m.result.count;
     $("number").textContent = fmt(count.exact + count.possible + count.unknown);
-    $("summary").textContent = `${m.summary} affected of ${fmt(m.scopePages)} in linked groups`;
-    $("meta").textContent = `${m.chips.reduce((n, c) => n + c.changed, 0)} edits in ${m.chips.length} files · checked in ${fmt(m.ms || 0)} ms · compared with ${m.baseLabel}`;
+    $("summary").textContent = m.ruleList
+      ? `${m.summary} reached by ${target.title} (of ${fmt(m.scopePages)} in linked groups)`
+      : `${m.summary} affected of ${fmt(m.scopePages)} in linked groups`;
+    const edits = m.chips.reduce((n, c) => n + c.changed, 0);
+    const files = `${fmt(m.chips.length)} file${m.chips.length === 1 ? "" : "s"}`;
+    $("meta").textContent = `${m.all ? `${plural(edits, "edit", "edits")} in ${files}` : `${fmt(m.pickedEdits)} of ${plural(edits, "edit", "edits")} picked in ${files}`}`
+      + ` · checked in ${fmt(m.ms || 0)} ms · compared with ${m.baseLabel}`;
     $("branch").textContent = m.branchNote ? `ⓘ ${m.branchNote}` : "";
     $("branch").hidden = !m.branchNote;
     $("warning").textContent = m.lostChanges > 1
@@ -264,7 +287,7 @@
       losses = {};
     }
     rows.push(...m.result.pages);
-    renderChips(m.chips, m.allCount || count);
+    renderChips(m.chips, m.allCount || count, m.all);
     renderSides();
     renderSets(count);
     renderGroups(m.result.groups);

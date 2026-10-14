@@ -28,6 +28,7 @@ button {
 }
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 button.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+button.partial { border: 1px dashed var(--vscode-button-background); }
 #toolbar { display: flex; flex-direction: column; gap: 7px; padding: 0 16px 8px; }
 #sides, #sets { display: flex; flex-wrap: wrap; gap: 4px; }
 #sides:empty { display: none; }

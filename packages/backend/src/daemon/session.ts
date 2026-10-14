@@ -10,7 +10,8 @@ import chokidar, { type FSWatcher } from "chokidar";
 import fg from "fast-glob";
 import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
-import { appliedFilter, diffModels, type CssChange } from "../css/diff.js";
+import { appliedFilter, changeIds, diffModels, type CssChange } from "../css/diff.js";
+import { partialText } from "../css/partial.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
 import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0.js";
 import { SiteIndex } from "../index/siteIndex.js";
@@ -32,6 +33,7 @@ import {
   type DocResult,
   type DrilldownParams,
   type DrilldownResult,
+  type EditSelection,
   type GetPagesParams,
   type IndexStatus,
   type OpenLiveParams,
@@ -45,6 +47,7 @@ import {
   type ScopeStatus,
   type SelectorElements,
   type SessionTotal,
+  type SetSelectionResult,
 } from "../rpc/protocol.js";
 
 /** A linked page group (server mode): counts cover the pages of the active ones. */
@@ -85,6 +88,8 @@ interface FileResult {
   stamp: string;
   cur: CurrentModel;
   changes: CssChange[];
+  /** Every change from the base, including those the live site already has (dropped from `changes` on a branch). */
+  allChanges: CssChange[];
   analysis?: Analysis;
   answer: FileAnswer;
 }
@@ -112,16 +117,21 @@ interface FileState {
   result?: FileResult;
 }
 
-/** Every current edit as the visual diff applies it. */
+/** The selected edits as the visual diff applies them. */
 interface RenderEdits {
   edits: SheetEdit[];
   list: PageDiffView["edits"];
+  /** Edits in every changed file, selected or not. */
+  total: number;
   changes: CssChange[];
   models: StylesheetModel[];
   warnings: string[];
 }
 
-/** A background impact assessment for one (index revision, edit revision). */
+/** Assessment results kept for this many (index, edits, selection) states, so toggling edits back is instant. */
+const ASSESS_KEEP = 8;
+
+/** A background impact assessment for one (index revision, edit revision, selection). */
 interface AssessJob {
   key: string;
   editRevision: number;
@@ -177,7 +187,11 @@ export class Session extends EventEmitter {
   private watcher?: FSWatcher;
   private refreshTimer?: NodeJS.Timeout;
   private captureState?: { running: boolean; done: number; total: number; error?: string };
-  private assessed: { key: string; results: Map<string, PageImpact> } = { key: "", results: new Map() };
+  private assessed = new Map<string, Map<string, PageImpact>>();
+  /** The edits picked in the editor's panel (undefined: every edit). */
+  private selection?: EditSelection;
+  private selectionKey = "";
+  selectionRevision = 0;
   private assessJob?: AssessJob;
   private queryN = 0;
   private readonly messages: string[] = [];
@@ -569,8 +583,8 @@ export class Session extends EventEmitter {
     const cur = this.current(f);
     const baseModel = f.baseModel ?? parseStylesheet("");
     const lines = cur.text.split("\n").length;
-    let changes = diffModels(baseModel, cur.model, lines);
-    if (f.applied) changes = f.applied(changes, cur.model);
+    const allChanges = diffModels(baseModel, cur.model, lines);
+    const changes = f.applied ? f.applied(allChanges, cur.model) : allChanges;
     const reasons = new Set<string>(cur.notes);
     if (f.base?.note) reasons.add(`diff-base:${f.base.kind} (${f.base.note})`);
     const ans: FileAnswer = {
@@ -593,8 +607,9 @@ export class Session extends EventEmitter {
     if (!this.engine) {
       reasons.add(REASON.noIndex);
       if (changes.length === 0) reasons.add(REASON.noEffectiveChange);
+      const ids = changeIds(changes);
       ans.changes = changes.map((c, i) => ({
-        id: `${c.kind}:${c.line}:${i}`,
+        id: ids[i],
         kind: c.kind,
         line: c.line,
         selector: (c.after ?? c.before)?.selectorText,
@@ -615,7 +630,7 @@ export class Session extends EventEmitter {
     }
     ans.totalReasons = [...reasons];
     ans.timingMs = Math.round((performance.now() - t0) * 100) / 100;
-    const res: FileResult = { stamp: this.stamp(f, (analysis?.pending.size ?? 0) > 0), cur, changes, analysis, answer: ans };
+    const res: FileResult = { stamp: this.stamp(f, (analysis?.pending.size ?? 0) > 0), cur, changes, allChanges, analysis, answer: ans };
     f.result = res;
     if (analysis?.pending.size) this.scheduleL1(analysis.pending);
     return res;
@@ -779,6 +794,32 @@ export class Session extends EventEmitter {
     return true;
   }
 
+  // ----------------------------------------------------------- selection
+
+  /** Picks the edits that page lists without a path, impact assessment and the diff viewer apply (absent: every edit). */
+  setSelection(sel?: EditSelection | null): SetSelectionResult {
+    const norm = sel ? normalizeSelection(sel) : undefined;
+    const key = norm ? JSON.stringify(norm) : "";
+    if (key !== this.selectionKey) {
+      this.selection = norm;
+      this.selectionKey = key;
+      this.selectionRevision++;
+      this.emit("selection", { selectionRevision: this.selectionRevision });
+    }
+    return { selectionRevision: this.selectionRevision };
+  }
+
+  /** Which of a file's changes (`r.changes`) are selected. */
+  private chosen(f: FileState, r: FileResult): boolean[] {
+    const sel = this.selection;
+    if (!sel) return r.changes.map(() => true);
+    const e = sel.find((x) => x.path === f.path);
+    if (!e) return r.changes.map(() => false);
+    if (!e.changeIds) return r.changes.map(() => true);
+    const ids = new Set(e.changeIds);
+    return r.answer.changes.map((c) => ids.has(c.id));
+  }
+
   // ---------------------------------------------------------- page lists
 
   private requireIndex(): SiteIndex {
@@ -797,9 +838,19 @@ export class Session extends EventEmitter {
       let pending = false;
       for (const f of this.files.values()) {
         const r = this.resultFor(f);
-        if (!r.analysis || r.changes.length === 0) continue;
-        total.orInPlace(r.analysis.total);
-        pending ||= r.analysis.pending.size > 0;
+        const a = r.analysis;
+        if (!a || r.changes.length === 0) continue;
+        const chosen = this.chosen(f, r);
+        if (chosen.every(Boolean)) {
+          total.orInPlace(a.total);
+          pending ||= a.pending.size > 0;
+          continue;
+        }
+        chosen.forEach((yes, i) => {
+          if (!yes) return;
+          total.orInPlace(a.sets[i]);
+          pending ||= !a.changes[i].pages.complete && a.changes[i].pages.possible > 0;
+        });
       }
       return { sets: total, pending, editRevision: this.editRevision };
     }
@@ -888,14 +939,20 @@ export class Session extends EventEmitter {
   // ---------------------------------------------------- impact assessment
 
   private assessKey(): string {
-    return `${this.index?.revision.id ?? -1}:${this.editRevision}`;
+    return `${this.index?.revision.id ?? -1}:${this.editRevision}:${this.selectionKey}`;
   }
 
-  /** Results for the current edits and page scan; older ones are dropped. */
+  /** Results for the current page scan, edits and selection; the last few states are kept. */
   private impacts(): Map<string, PageImpact> {
     const key = this.assessKey();
-    if (this.assessed.key !== key) this.assessed = { key, results: new Map() };
-    return this.assessed.results;
+    const results = this.assessed.get(key) ?? new Map<string, PageImpact>();
+    this.assessed.delete(key);
+    this.assessed.set(key, results);
+    for (const old of this.assessed.keys()) {
+      if (this.assessed.size <= ASSESS_KEEP) break;
+      this.assessed.delete(old);
+    }
+    return results;
   }
 
   private runningAssessment(): AssessJob | undefined {
@@ -942,7 +999,7 @@ export class Session extends EventEmitter {
     if (!job) {
       if (!todo.length) return this.assessProgress(undefined);
       job = this.assessJob = {
-        key: this.assessed.key,
+        key: this.assessKey(),
         editRevision: this.editRevision,
         indexRevision: this.index?.revision.id ?? null,
         queue: [],
@@ -1278,7 +1335,7 @@ export class Session extends EventEmitter {
     const page = this.pageRow(p.url);
     const t0 = performance.now();
     const editRevision = this.editRevision;
-    const { edits, list, changes, models, warnings } = await this.renderEdits();
+    const { edits, list, total, changes, models, warnings } = await this.renderEdits();
     const variants = this.pageVariants(page);
     const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
     const view: PageDiffView = {
@@ -1291,6 +1348,7 @@ export class Session extends EventEmitter {
       editRevision,
       scannedAt: page.capturedAt,
       edits: list,
+      editsTotal: total,
       scale: 1,
       width: 0,
       before: "",
@@ -1305,7 +1363,9 @@ export class Session extends EventEmitter {
       return view;
     };
     if (list.length === 0) {
-      view.reason = this.branch ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.";
+      view.reason = total
+        ? "None of your edits are picked. Pick some in the Blast Radius panel in your editor."
+        : this.branch ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.";
       return finish();
     }
     if (edits.length === 0) {
@@ -1335,7 +1395,11 @@ export class Session extends EventEmitter {
     return finish();
   }
 
-  /** Every current edit as the visual diff applies it: the site stylesheets each changed file replaces, and its texts. */
+  /**
+   * The selected edits as the visual diff applies them: the site stylesheets
+   * each changed file replaces, and its texts. A file with only some edits
+   * selected gets its base text with just those edits' lines applied.
+   */
   private async renderEdits(): Promise<RenderEdits> {
     const idx = this.requireIndex();
     const edits: SheetEdit[] = [];
@@ -1343,13 +1407,37 @@ export class Session extends EventEmitter {
     const changes: CssChange[] = [];
     const models: StylesheetModel[] = [];
     const warnings: string[] = [];
+    let total = 0;
     const owner = new Map<string, string>(); // site stylesheet → the file applied to it
     const todo: Array<{ file: string; keys: string[]; base?: BaseText; cur: string }> = [];
     for (const f of this.files.values()) {
       const r = this.resultFor(f);
       if (r.changes.length === 0) continue;
+      total += r.changes.length;
+      const chosen = this.chosen(f, r);
+      if (!chosen.some(Boolean)) continue;
       const file = this.relPath(f.path);
-      list.push({ file, changes: r.changes.length });
+      let cur = r.cur.text;
+      let applied = r.changes;
+      if (!chosen.every(Boolean)) {
+        // Changes the live site already has (dropped from r.changes on a branch) change nothing there: kept.
+        const visible = new Map(r.changes.map((c, i) => [c, i] as const));
+        const keep = (i: number) => {
+          const v = visible.get(r.allChanges[i]);
+          return v === undefined || chosen[v];
+        };
+        const part = partialText(f.base?.text ?? "", cur, r.allChanges, keep, f.baseModel ?? parseStylesheet(""), r.cur.model);
+        cur = part.text;
+        const extra = new Set(part.alsoApplied.map((i) => r.allChanges[i]).filter((c) => visible.has(c)));
+        applied = r.changes.filter((c, i) => chosen[i] || extra.has(c));
+        if (part.fallback) {
+          warnings.push(`${file}: the selected edits couldn't be separated from its other edits, so all ${r.changes.length} are shown.`);
+        } else if (extra.size) {
+          const names = [...extra].map(changeLabel).join(", ");
+          warnings.push(`${file}: ${names} ${extra.size === 1 ? "is" : "are"} shown too, as ${extra.size === 1 ? "it shares" : "they share"} lines with a selected edit.`);
+        }
+      }
+      list.push({ file, changes: applied.length, of: r.changes.length });
       let keys = r.answer.mapping.urls;
       if (keys.length > 1 && f.base?.kind === "production") {
         // A name tie: the base is the first match's captured CSS, so the edit only fits sheets with that same content.
@@ -1365,8 +1453,8 @@ export class Session extends EventEmitter {
       keys = keys.filter((k) => !owner.has(k));
       if (keys.length === 0) continue;
       for (const k of keys) owner.set(k, file);
-      todo.push({ file, keys, base: f.base, cur: r.cur.text });
-      changes.push(...r.changes);
+      todo.push({ file, keys, base: f.base, cur });
+      changes.push(...applied);
       models.push(r.cur.model, f.baseModel ?? r.cur.model);
     }
     for (const e of todo) {
@@ -1374,7 +1462,7 @@ export class Session extends EventEmitter {
       if (texts.conflict) warnings.push(conflictWarning(e.file, this.branch));
       edits.push({ sheetKeys: e.keys, baseText: texts.baseText, editedText: texts.editedText });
     }
-    return { edits, list, changes, models, warnings };
+    return { edits, list, total, changes, models, warnings };
   }
 
   // -------------------------------------------------------------- capture
@@ -1511,4 +1599,27 @@ function inconclusiveImpact(reason: string): PageImpact {
 function conflictWarning(file: string, bp: BranchPoint | undefined): string {
   const main = bp ? bp.mainRef.replace(/^[^/]+\//, "") : "the deployed branch";
   return `${file}: ${main} also changed the lines your branch edits, so this compares your branch's own version of the file before and after (merge ${main} to see them together).`;
+}
+
+function changeLabel(c: CssChange): string {
+  return (c.after ?? c.before)?.selectorText ?? (c.def ? `@${c.def.kind} ${c.def.name}` : c.kind);
+}
+
+/** Absolute paths, one entry per file (all of it wins), sorted: equal selections compare equal. */
+function normalizeSelection(sel: unknown): EditSelection {
+  if (!Array.isArray(sel)) throw new RpcError(ERR.invalidParams, "selection must be a list of { path, changeIds? }");
+  const byPath = new Map<string, Set<string> | null>();
+  for (const e of sel) {
+    if (!e || typeof e.path !== "string" || (e.changeIds !== undefined && !Array.isArray(e.changeIds))) {
+      throw new RpcError(ERR.invalidParams, "selection must be a list of { path, changeIds? }");
+    }
+    const path = resolve(e.path);
+    const have = byPath.get(path);
+    if (have === null) continue;
+    if (!e.changeIds) byPath.set(path, null);
+    else byPath.set(path, new Set([...(have ?? []), ...e.changeIds.map(String)]));
+  }
+  return [...byPath]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, ids]) => (ids ? { path, changeIds: [...ids].sort() } : { path }));
 }

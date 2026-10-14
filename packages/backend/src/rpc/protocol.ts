@@ -9,7 +9,7 @@ import type { DiffBaseKind } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 1;
+export const PROTOCOL_MINOR = 2;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -160,8 +160,24 @@ export interface RulesResult {
 
 export type PageSetName = "exact" | "possible" | "unknown";
 
+/**
+ * The edits picked in the editor's panel; absent: every edit. A file listed
+ * without changeIds: all of its edits, new ones included. Files not listed:
+ * none. Page lists without a path, impact assessment and the diff viewer
+ * apply it.
+ */
+export type EditSelection = Array<{ path: string; changeIds?: string[] }>;
+
+export interface SetSelectionParams {
+  selection?: EditSelection | null;
+}
+
+export interface SetSelectionResult {
+  selectionRevision: number;
+}
+
 export interface GetPagesParams {
-  /** Omitted: the session total. */
+  /** Omitted: the pages of the selected edits (session/setSelection; every edit by default). */
   path?: string;
   /** A ChangeAnswer id; omitted: the whole file. */
   changeId?: string;
@@ -301,7 +317,10 @@ export interface PageDiffView {
   live: boolean;
   editRevision: number;
   scannedAt: string;
-  edits: Array<{ file: string; changes: number }>;
+  /** Changed files with selected edits: how many are applied (`changes`) of the file's edits (`of`). */
+  edits: Array<{ file: string; changes: number; of: number }>;
+  /** Edits in every changed file, selected or not. */
+  editsTotal: number;
   /** Screenshot pixels per CSS px. */
   scale: number;
   /** Page width in CSS px. */

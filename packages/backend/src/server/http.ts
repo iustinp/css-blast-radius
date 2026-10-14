@@ -45,7 +45,8 @@ interface Project {
   /** Linked group ids (from the project's .vscode settings). */
   linked: string[];
   serial: Promise<unknown>;
-  sentEdit: number;
+  /** editRevision:selectionRevision last announced to diff viewers. */
+  sentEdit: string;
   idle?: NodeJS.Timeout;
 }
 
@@ -316,11 +317,13 @@ export class App {
     });
   }
 
-  /** The project's CSS edits changed: open diff viewers refresh. */
+  /** The project's CSS edits or the selected edits changed: open diff viewers refresh. */
   private edited(p: Project): void {
-    if (p.session.editRevision === p.sentEdit) return;
-    p.sentEdit = p.session.editRevision;
-    this.broadcast("edit", { s: p.id, editRevision: p.sentEdit });
+    const key = `${p.session.editRevision}:${p.session.selectionRevision}`;
+    if (key === p.sentEdit) return;
+    const selection = p.sentEdit.startsWith(`${p.session.editRevision}:`);
+    p.sentEdit = key;
+    this.broadcast("edit", { s: p.id, editRevision: p.session.editRevision, ...(selection ? { selection: true } : {}) });
   }
 
   private progress(p: { done: number; total: number; url: string; ok: boolean }): void {
@@ -345,10 +348,11 @@ export class App {
       pending = (async () => {
         if (!existsSync(root) || !statSync(root).isDirectory()) throw new RpcError(ERR.invalidParams, `folder not found: ${root}`);
         const session = await Session.create({ workspaceRoot: root, shared: this.shared, diffBase: "production", scope: [] });
-        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: session.editRevision };
+        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}` };
         for (const [event, method] of SESSION_NOTIFICATIONS) session.on(event, (x) => p.peers.forEach((c) => c.notify(method, x)));
         session.on("publish", () => this.edited(p));
         session.on("externalChange", () => this.edited(p));
+        session.on("selection", () => this.edited(p));
         this.projects.set(id, p);
         this.changed();
         return p;
@@ -364,6 +368,8 @@ export class App {
   private detach(p: Project, peer: RpcPeer): void {
     p.peers.delete(peer);
     if (p.peers.size > 0 || p.idle) return;
+    // No editor left to show which edits are picked: the diff viewer shows them all.
+    p.session.setSelection(undefined);
     p.idle = setTimeout(() => {
       if (p.peers.size > 0) return;
       this.projects.delete(p.id);

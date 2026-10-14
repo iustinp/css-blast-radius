@@ -373,6 +373,27 @@ async function run() {
       const result = await json(`/api/diff?s=${scope}&url=%2Fabout.html`);
       assert.equal(result.status, "changed", `page diff: ${result.status} ${result.reason || ""}`);
     });
+    await check("pick: unpicking an edit empties the list and the diff, picking it again restores both", async () => {
+      const p = pagesPanel();
+      const id = lastPages(p).chips.find((c) => c.path === file).changes[0].id;
+      const before = p.posted.length;
+      const after = () => [...p.posted.slice(before)].reverse().find((m) => m.type === "pages");
+      p.webview.receive({ type: "toggle", path: file, changeId: id });
+      const none = await waitFor(() => after()?.pickedEdits === 0 && after(), "list with nothing picked");
+      assert.equal(none.all, false);
+      assert.equal(none.chips.find((c) => c.path === file).state, "none");
+      assert.equal(none.result.pages.length, 0);
+      const empty = await json(`/api/diff?s=${scope}&url=%2Fabout.html`);
+      assert.match(empty.reason || "", /None of your edits are picked/);
+      const mark = p.posted.length;
+      p.webview.receive({ type: "toggle" });
+      const all = await waitFor(() => {
+        const m = [...p.posted.slice(mark)].reverse().find((x) => x.type === "pages");
+        return m?.all && m.result.pages.length === 2 && m;
+      }, "list with every edit picked");
+      assert(all.chips.every((c) => c.state === "all" && c.changes.every((ch) => ch.selected)), "chips should all be picked");
+      assert.equal((await json(`/api/diff?s=${scope}&url=%2Fabout.html`)).status, "changed");
+    });
     await check("pause: groups/changed updates linked counts without an editor save", async () => {
       const res = await json(`/api/groups/${homeId}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: false }),

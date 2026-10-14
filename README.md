@@ -90,6 +90,7 @@ What your edits are compared with is **the live site, as last scanned**. In a gi
 - **While you type**, before saving, the number of affected pages appears next to the cursor, and the total appears in the status bar. When the file has other edits too, the cursor shows the edit you're on first, then the file's total: `◀ 2 pages, 56 total (6 edits)`.
 - **Hover** the count to see what changed and what it reaches.
 - Press **Alt+B** (or click the count) to open the page list, grouped by your linked groups.
+- **Pick which edits to look at.** Above the list, each edit is a chip, under a chip per file and an **All edits** chip. Click a chip to pick it, click again to unpick it; you can pick several. Picking a file (or All edits) picks every edit in it; unpicking one edit unpicks its file and All edits (a file with only some edits picked has a dashed outline). The page list, Assess impact and the before/after view then show only the picked edits, so you can see what each one does on its own. The panel opens with everything picked; **Show pages** in a hover picks just that edit.
 - Click **Assess impact** above the list to check every listed page with your edits applied (a few seconds for a couple dozen pages). The list then puts the pages that look different on top, most changed first, shaded deeper blue; pages with no visual change go to the bottom, unshaded. The next edit clears the ranking.
 - **Click a page** to open the before/after comparison in a VS Code tab. It shows the whole page and outlines what changed:
   - **Space** flips between before and after;
@@ -140,10 +141,10 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (142) + extension (16) unit tests
+npm test                                         # backend (159) + extension (22) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
-node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (11 checks)
+node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (12 checks)
 ```
 
 `test/server.test.ts` drives the server end to end: setup, sitemap/pasted groups, scanning, linked-group counts over the editor connection, the before/after diff, live events, exclusions, undo, and the outside-editor change notice. Bench and smoke need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests.

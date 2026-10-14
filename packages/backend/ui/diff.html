@@ -534,10 +534,16 @@ function applyDiffData(data, keepScroll, prevScroll) {
 
   // Header meta summary
   const edits = data.edits || [];
-  if (edits.length) {
-    $("#dEdits").textContent = `Showing all your current edits: ${edits.map((e) => `${e.file} (${plural(e.changes, "change")})`).join(", ")}`;
+  const shown = edits.reduce((n, e) => n + e.changes, 0);
+  const total = data.editsTotal ?? shown;
+  if (edits.length && shown >= total) {
+    $("#dEdits").textContent = `Showing all your current edits: ${edits.map((e) => `${e.file} (${plural(e.changes, "edit")})`).join(", ")}`;
+  } else if (edits.length) {
+    $("#dEdits").textContent = `Showing ${shown.toLocaleString("en-US")} of ${plural(total, "edit")}, as picked in your editor: ${edits
+      .map((e) => `${e.file} (${e.changes === e.of ? plural(e.changes, "edit") : `${e.changes} of ${e.of}`})`)
+      .join(", ")}`;
   } else {
-    $("#dEdits").textContent = "Showing current edits";
+    $("#dEdits").textContent = total ? "No edits picked in your editor" : "Showing current edits";
   }
 
   const timeText = data.live
@@ -816,9 +822,10 @@ function connectSSE() {
       const data = JSON.parse(e.data);
       if (data.s === s) {
         clearTimeout(editDebounce);
+        // Picking edits in the editor is a click, not typing: refresh right away.
         editDebounce = setTimeout(() => {
           fetchDiff(true); // keepScroll = true
-        }, 800);
+        }, data.selection ? 100 : 800);
       }
     } catch {}
   });

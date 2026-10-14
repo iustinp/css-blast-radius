@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { urlsForFile, type CbrConfig } from "../config.js";
-import type { CssChange } from "../css/diff.js";
+import { changeIds, type CssChange } from "../css/diff.js";
 import type { StyleRule, StylesheetModel } from "../css/model.js";
 import { isRootLike, type ComplexSelector } from "../css/selectors.js";
 import type { SiteIndex } from "../index/siteIndex.js";
@@ -395,6 +395,7 @@ export class L0Engine {
     const totalReasons = new Set<string>();
     const unknownC = call.unknownC;
 
+    const ids = changeIds(changes);
     changes.forEach((ch, i) => {
       const ctx = new Ctx(call);
       let s: Sets;
@@ -455,7 +456,7 @@ export class L0Engine {
 
       const pendingHere = [...(a?.complex ?? []), ...(b?.complex ?? [])].some((cs) => call.pending.has(cs.key));
       answers.push({
-        id: `${ch.kind}:${ch.line}:${i}`,
+        id: ids[i],
         kind: ch.kind,
         line: ch.line,
         selector: (a ?? b)?.selectorText,

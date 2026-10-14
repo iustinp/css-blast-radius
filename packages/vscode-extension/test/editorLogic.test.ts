@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { changeAtCursor, ghostText, reasonText, shortReason } from "../src/format";
 import { ExternalNoticeBatch } from "../src/externalNotice";
 import { diffUrl, isLocalServer, serverOrigin } from "../src/urls";
+import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "../src/selection";
 import type { ChangeAnswer, Count, FileAnswer, RuleCount, SessionTotal } from "../src/protocol";
 
 const count = (exact: number, possible = 0): Count => ({ exact, possible, unknown: 0, complete: true });
@@ -89,3 +90,67 @@ describe("outside-editor notification batching", () => {
     expect(notices.take(10_101)).toBeUndefined();
   });
 });
+
+describe("picking edits in the panel", () => {
+  const files: FileEdits[] = [
+    { path: "/a.css", ids: ["a1", "a2", "a3"] },
+    { path: "/b.css", ids: ["b1"] },
+  ];
+  const states = (sel: Picked) => files.map((f) => fileState(sel, f));
+
+  it("starts with everything and toggles everything off and on", () => {
+    let sel: Picked = undefined;
+    expect(states(sel)).toEqual(["all", "all"]);
+    sel = toggleAll(sel, files);
+    expect(states(sel)).toEqual(["none", "none"]);
+    expect(toWire(sel)).toEqual([]);
+    sel = toggleAll(sel, files);
+    expect(sel).toBeUndefined();
+    expect(toWire(sel)).toBeUndefined();
+  });
+
+  it("unpicks the file and All edits when one of their edits is unpicked", () => {
+    const sel = toggleChange(undefined, files, "/a.css", "a2");
+    expect(states(sel)).toEqual(["some", "all"]);
+    expect(isPicked(sel, "/a.css", "a2")).toBe(false);
+    expect(pickedCount(sel, files)).toBe(3);
+    expect(toWire(sel)).toEqual([{ path: "/a.css", changeIds: ["a1", "a3"] }, { path: "/b.css" }]);
+  });
+
+  it("picks the parents again once all their edits are picked", () => {
+    let sel = toggleChange(undefined, files, "/a.css", "a2");
+    sel = toggleChange(sel, files, "/a.css", "a2");
+    expect(sel).toBeUndefined();
+  });
+
+  it("picks or unpicks every edit of a file", () => {
+    let sel = toggleAll(undefined, files);
+    sel = toggleFile(sel, files, "/a.css");
+    expect(states(sel)).toEqual(["all", "none"]);
+    expect(toWire(sel)).toEqual([{ path: "/a.css" }]);
+    sel = toggleChange(sel, files, "/b.css", "b1");
+    expect(sel).toBeUndefined();
+    sel = toggleFile(sel, files, "/b.css");
+    expect(toWire(sel)).toEqual([{ path: "/a.css" }]);
+    // A partly picked file is picked whole on click.
+    sel = toggleChange(sel, files, "/a.css", "a1");
+    expect(states(sel)).toEqual(["some", "none"]);
+    sel = toggleFile(sel, files, "/a.css");
+    expect(states(sel)).toEqual(["all", "none"]);
+  });
+
+  it("keeps the picks while no edits are known (reconnecting)", () => {
+    const sel = toggleChange(undefined, files, "/a.css", "a2");
+    expect(normalize(sel, [])).toBe(sel);
+  });
+
+  it("knows when exactly one edit is picked", () => {
+    let sel = toggleAll(undefined, files);
+    expect(single(sel, files)).toBeUndefined();
+    sel = toggleChange(sel, files, "/a.css", "a3");
+    expect(single(sel, files)).toEqual({ path: "/a.css", id: "a3" });
+    sel = toggleFile(sel, files, "/b.css");
+    expect(single(sel, files)).toBeUndefined();
+  });
+});
+

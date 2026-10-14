@@ -32,6 +32,8 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
       return run(() => session.close(need(p, "path")));
     case "session/setDiffBase":
       return run(() => session.setDiffBase(need(p, "base")));
+    case "session/setSelection":
+      return run(() => session.setSelection(p?.selection));
     case "analysis/queryImpacts":
       return run(() => {
         switch (p?.scope ?? "file") {

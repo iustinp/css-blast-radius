@@ -6,9 +6,10 @@ import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
 import { DIFF_BASE_LABEL, branchNote, formatCount } from "./format";
-import { ERR, type AssessProgress, type ChangeAnswer, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
+import { ERR, type AssessProgress, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
+import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "./selection";
 
 const PAGE_SIZE = 100;
 type Side = "pages" | "gained" | "lost";
@@ -16,7 +17,7 @@ type Side = "pages" | "gained" | "lost";
 type FromWebview =
   | { type: "ready" }
   | { type: "load"; set: PageSetName | "all"; group?: string; side?: Side; offset: number; editRevision?: number }
-  | { type: "filter"; path?: string; changeId?: string }
+  | { type: "toggle"; path?: string; changeId?: string }
   | { type: "search"; query: string }
   | { type: "searchMore"; query: string; offset: number }
   | { type: "assess" }
@@ -25,10 +26,14 @@ type FromWebview =
 interface Chip {
   path: string;
   label: string;
-  changes: Array<{ id: string; label: string; count: string; lost: number }>;
+  changes: Array<{ id: string; label: string; count: string; lost: number; sides: Side[]; selected?: boolean }>;
   count: string;
   changed: number;
+  state?: "all" | "some" | "none";
 }
+
+/** Page-list parameters: a rule's pages, the one picked edit (it has sides), or every picked edit. */
+type ListQuery = { path?: string; changeId?: string; line?: number; side?: Side };
 
 export class PagesPanel implements vscode.Disposable {
   private static current?: PagesPanel;
@@ -45,6 +50,10 @@ export class PagesPanel implements vscode.Disposable {
   private searchMatches: PagesResult["pages"] = [];
   private searchResult?: PagesResult;
   private lastChips: Chip[] = [];
+  /** The picked edits: the list, the impact assessment and the diff viewer follow them. */
+  private picked: Picked = undefined;
+  /** The server predates picking edits (it was started by an older version). */
+  private oldServer = false;
 
   static show(ext: vscode.ExtensionContext, client: DaemonClient, life: DaemonLifecycle, state: ImpactState, target: PagesTarget): void {
     if (!PagesPanel.current) PagesPanel.current = new PagesPanel(ext, client, life, state);
@@ -96,6 +105,10 @@ export class PagesPanel implements vscode.Disposable {
   private open(target: PagesTarget): void {
     this.target = target;
     this.filters = { set: "all", side: target.side };
+    // A rule's pages (line, no change) keep the picked edits; anything else picks what it names.
+    if (target.path && target.changeId) this.picked = new Map([[target.path, new Set([target.changeId])]]);
+    else if (target.path && target.line === undefined) this.picked = new Map([[target.path, "all"]]);
+    else if (!target.path) this.picked = undefined;
     this.panel.reveal(undefined, true);
     if (!this.ready) return;
     void this.post({ type: "target", target });
@@ -143,44 +156,97 @@ export class PagesPanel implements vscode.Disposable {
           label: ch.selector || ch.definition?.name || `Edit on line ${ch.line}`,
           count: formatCount(ch.pages, ch.reasons),
           lost: (ch.lost ?? (ch.kind === "removed" ? ch.pages : undefined))?.exact ?? 0,
+          sides: ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])],
         })),
       };
     });
   }
 
-  private async load(offset: number, editRevision?: number, refresh = false): Promise<void> {
+  private get files(): FileEdits[] {
+    return this.lastChips.map((c) => ({ path: c.path, ids: c.changes.map((ch) => ch.id) }));
+  }
+
+  private query(): ListQuery {
+    const t = this.target;
+    if (t.path && t.line !== undefined && !t.changeId) return { path: t.path, line: t.line };
+    const one = single(this.picked, this.files);
+    return one ? { path: one.path, changeId: one.id, side: this.filters.side } : {};
+  }
+
+  /** The chips with what is picked; the one picked edit, if one is. */
+  private decorate(chips: Chip[]): { chips: Chip[]; one?: { chip: Chip["changes"][number] } } {
+    const files = this.files;
+    const out = chips.map((c, i) => ({
+      ...c,
+      state: fileState(this.picked, files[i]),
+      changes: c.changes.map((ch) => ({ ...ch, selected: isPicked(this.picked, c.path, ch.id) })),
+    }));
+    const one = single(this.picked, files);
+    const chip = one && out.find((c) => c.path === one.path)?.changes.find((ch) => ch.id === one.id);
+    return { chips: out, one: chip && { chip } };
+  }
+
+  /** Tells the server which edits are picked (the diff viewer and the assessment apply them). */
+  private async sendSelection(): Promise<void> {
+    try {
+      await this.client.call("session/setSelection", { selection: toWire(this.picked) ?? null });
+      this.oldServer = false;
+    } catch (err) {
+      if (!(err instanceof RpcCallError && err.code === ERR.methodNotFound)) throw err;
+      this.oldServer = true;
+    }
+  }
+
+  private async load(offset: number, editRevision?: number, refresh = false, union = false): Promise<void> {
     const t = this.target;
     const seq = ++this.loadSeq;
     try {
-      const chips = await this.fileChips(seq);
+      const raw = await this.fileChips(seq);
       if (seq !== this.loadSeq) return;
-      this.lastChips = chips;
+      this.lastChips = raw;
+      this.picked = normalize(this.picked, this.files);
+      // The edit it was opened for is gone (undone, or merged into another): show its file.
+      if (t.path && t.changeId && pickedCount(this.picked, this.files) === 0
+        && !this.files.some((f) => f.path === t.path && f.ids.includes(t.changeId!))) {
+        this.picked = normalize(new Map([[t.path, "all"]]), this.files);
+      }
+      await this.sendSelection();
+      if (seq !== this.loadSeq) return;
+      const q = union ? {} : this.query();
       const res = await this.client.call<PagesResult>("analysis/getPages", {
-        path: t.path, changeId: t.changeId, line: t.changeId ? undefined : t.line,
-        side: this.filters.side, set: this.filters.set, group: this.filters.group,
-        offset, limit: PAGE_SIZE, editRevision,
+        ...q, set: this.filters.set, group: this.filters.group, offset, limit: PAGE_SIZE, editRevision,
       });
       if (seq !== this.loadSeq || t !== this.target) return;
-      const answer = t.path ? this.answers.get(t.path) : undefined;
-      const ms = t.path ? answer?.timingMs : [...this.answers.values()].reduce((n, a) => n + a.timingMs, 0);
-      const lost = chips.reduce((n, f) => n + f.changes.reduce((sum, ch) => sum + ch.lost, 0), 0);
-      const lostChanges = chips.reduce((n, f) => n + f.changes.filter((ch) => ch.lost).length, 0);
+      const { chips, one } = this.decorate(raw);
+      const ms = [...this.answers.values()].reduce((n, a) => n + a.timingMs, 0);
+      const picked = chips.flatMap((f) => f.changes.filter((ch) => ch.selected));
+      const lost = picked.reduce((n, ch) => n + ch.lost, 0);
+      const lostChanges = picked.filter((ch) => ch.lost).length;
+      const ruleList = q.line !== undefined;
       void this.post({
         type: "pages", result: res, append: offset > 0, refresh,
         summary: formatCount(res.count), allCount: this.state.session?.total,
         scopePages: this.state.status?.scope.pages ?? 0,
         ms, lost, lostChanges, chips, target: t, filters: this.filters,
+        all: !this.picked, pickedEdits: pickedCount(this.picked, this.files),
+        ruleList, sides: !ruleList && one && one.chip.sides.length > 1 ? one.chip.sides : undefined,
+        single: !ruleList && one ? one.chip.label : undefined,
         baseLabel: DIFF_BASE_LABEL[this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production"] ?? "the live site",
         branchNote: branchNote(this.state.session?.branch),
       });
+      if (this.oldServer && this.picked && !single(this.picked, this.files)) {
+        void this.post({ type: "error", message: "The CSS Blast Radius server running now is an older version: it shows all your edits, not just the picked ones. Stop it and reload the window to use the new one." });
+      }
       void this.annotateLosses(seq, res, chips);
       if (this.searchQuery) void this.search(this.searchQuery);
     } catch (err: any) {
       if (seq !== this.loadSeq || t !== this.target) return;
       if (err instanceof RpcCallError && err.code === ERR.superseded) {
         if (editRevision !== undefined) return this.load(0, undefined, true);
-        this.target = t.path ? { path: t.path, title: path.basename(t.path) } : { title: "All edits" };
-        return this.load(0, undefined, true);
+        // The rule or the picked edit is gone: list the picked edits' pages.
+        if (t.line !== undefined) this.target = { title: "All edits" };
+        this.answersRevision = "";
+        return this.load(0, undefined, true, true);
       }
       void this.post({ type: "error", message: err instanceof RpcCallError && err.code === ERR.noIndex
         ? "No pages scanned yet. Rescan your linked groups to see the page list." : String(err?.message ?? err) });
@@ -195,7 +261,7 @@ export class PagesPanel implements vscode.Disposable {
       this.searchMatches = [];
       return;
     }
-    const t = this.target;
+    const q = this.query();
     const filters = { ...this.filters };
     const matches: PagesResult["pages"] = [];
     let offset = 0;
@@ -203,8 +269,7 @@ export class PagesPanel implements vscode.Disposable {
     try {
       while (seq === this.searchSeq && loadSeq === this.loadSeq) {
         const res = await this.client.call<PagesResult>("analysis/getPages", {
-          path: t.path, changeId: t.changeId, line: t.changeId ? undefined : t.line,
-          side: filters.side, set: filters.set, group: filters.group, offset, limit: 1000,
+          ...q, set: filters.set, group: filters.group, offset, limit: 1000,
         });
         if (seq !== this.searchSeq || loadSeq !== this.loadSeq) return;
         lastResult = res;
@@ -226,7 +291,7 @@ export class PagesPanel implements vscode.Disposable {
     const visible = new Set(result.pages.map((p) => p.url));
     if (!visible.size) return;
     const labels = new Map<string, Set<string>>();
-    await Promise.all(chips.flatMap((f) => f.changes.filter((ch) => ch.lost).map(async (ch) => {
+    await Promise.all(chips.flatMap((f) => f.changes.filter((ch) => ch.lost && ch.selected !== false).map(async (ch) => {
       let offset = 0;
       while (seq === this.loadSeq) {
         let page: PagesResult;
@@ -257,8 +322,7 @@ export class PagesPanel implements vscode.Disposable {
     const t = this.target;
     try {
       const p = await this.client.call<AssessProgress>("analysis/assess", {
-        path: t.path, changeId: t.changeId, line: t.changeId ? undefined : t.line,
-        side: this.filters.side, set: this.filters.set, group: this.filters.group,
+        ...this.query(), set: this.filters.set, group: this.filters.group,
       });
       if (t !== this.target) return;
       void this.post({ type: "assessProgress", progress: p });
@@ -289,12 +353,17 @@ export class PagesPanel implements vscode.Disposable {
           if (this.searchResult) void this.annotateLosses(this.loadSeq, { ...this.searchResult, pages }, this.lastChips);
         }
         return;
-      case "filter": {
-        if (!m.path) return this.open({ title: "All edits" });
-        if (!this.state.session?.files.some((f) => f.file === m.path)) return;
-        const ch: ChangeAnswer | undefined = this.answers.get(m.path)?.changes.find((c) => c.id === m.changeId);
-        const sides: PagesTarget["sides"] = ch ? ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])] : undefined;
-        return this.open({ path: m.path, changeId: ch?.id, sides, title: ch?.selector || path.basename(m.path) });
+      case "toggle": {
+        const files = this.files;
+        this.picked = !m.path
+          ? toggleAll(this.picked, files)
+          : m.changeId
+            ? toggleChange(this.picked, files, m.path, m.changeId)
+            : toggleFile(this.picked, files, m.path);
+        // Back from a rule's pages or one edit's side to the picked edits' pages.
+        this.target = { title: "Picked edits" };
+        this.filters = { set: "all", group: this.filters.group };
+        return this.load(0);
       }
       case "page":
         if (m.url.startsWith("/") && !m.url.startsWith("//")) DiffTab.open(this.life, m.url);
@@ -336,6 +405,8 @@ export class PagesPanel implements vscode.Disposable {
 
   dispose(): void {
     if (PagesPanel.current === this) PagesPanel.current = undefined;
+    // Nothing shows the picks any more: the diff viewer goes back to every edit.
+    if (this.picked) this.client.call("session/setSelection", { selection: null }).catch(() => undefined);
     ++this.loadSeq;
     ++this.searchSeq;
     clearTimeout(this.refreshTimer);

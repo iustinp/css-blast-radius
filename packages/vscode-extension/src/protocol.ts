@@ -156,6 +156,12 @@ export interface RulesResult {
 
 export type PageSetName = "exact" | "possible" | "unknown";
 
+/**
+ * The edits picked in the panel (session/setSelection); absent: every edit.
+ * A file without changeIds: all of its edits, new ones included.
+ */
+export type EditSelection = Array<{ path: string; changeIds?: string[] }>;
+
 /** What a page list is about: the session, a file, one change, or one rule. */
 export interface PagesTarget {
   path?: string;

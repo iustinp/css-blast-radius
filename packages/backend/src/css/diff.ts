@@ -6,6 +6,7 @@
 // another is a move; remaining removed/added runs are paired in order as
 // selector or condition edits.
 
+import { createHash } from "node:crypto";
 import { diffArrays } from "diff";
 import type { Definition, StyleRule, StylesheetModel } from "./model.js";
 
@@ -239,4 +240,20 @@ export function diffModels(base: StylesheetModel, cur: StylesheetModel, lastLine
     changes.push({ kind: "unrecognized", line: first?.line ?? 1, detail: `@${first?.name ?? "rule"} changed` });
   }
   return changes.sort((x, y) => x.line - y.line);
+}
+
+/**
+ * Ids that survive typing: a change is named by the rule it edits (its key
+ * before the edit; after, for an added rule), its definition or its kind, not
+ * by its line.
+ */
+export function changeIds(changes: CssChange[]): string[] {
+  const seen = new Map<string, number>();
+  return changes.map((c) => {
+    const identity = c.before ? `-${c.before.key}` : c.after ? `+${c.after.key}` : c.def ? `@${c.def.kind}|${c.def.name}` : c.kind;
+    const id = createHash("sha1").update(identity).digest("hex").slice(0, 12);
+    const n = (seen.get(id) ?? 0) + 1;
+    seen.set(id, n);
+    return n > 1 ? `${id}#${n}` : id;
+  });
 }

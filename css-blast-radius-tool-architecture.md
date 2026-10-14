@@ -369,8 +369,25 @@ requests. Meanwhile the list stays usable but dimmed and the button shows
 progress. Once done, `analysis/getPages` ranks the list: pages that look
 different first (most changed elements, then most moved), then inconclusive,
 then not yet assessed, then unchanged; the panel shades rows deeper blue for
-more changed elements. Results belong to one index revision and edit
-revision: the next edit stops the job and drops them.
+more changed elements. Results belong to one index revision, edit
+revision and set of picked edits: the next edit stops the job and drops
+them; the last 8 sets of picked edits keep theirs, so picking back is free.
+
+**Picked edits.** The panel lets the developer pick some of their edits
+(`session/setSelection`); the page list, Assess impact and the diff viewer
+then apply only those, so each edit's effect can be seen on its own. Edits
+have ids that stay the same while typing (a hash of the rule they change).
+To apply a subset, the server diffs the base and edited text line by line
+(lines tagged with their innermost rule, so look-alike lines in different
+rules don't pair up), keeps the hunks owned by the picked edits and
+checks the result: its rules must equal the base's, minus the picked
+removals, plus the picked additions, in the right order, with the right
+`@import`/`@layer`/`@namespace` statements. Statements outside rules go with
+those file-level edits. A hunk that mixes picked and unpicked edits on the
+same lines brings the others along (so does a new `@layer x { }` block and
+the layer order it changes), and the viewer says so;
+if the check fails, every edit is shown, with a warning. Nothing picked
+gives an empty list and an empty diff.
 
 ### 6.7 L3: the live page
 
@@ -400,7 +417,7 @@ cannot meet the L0 budget. Decorations and the status bar update immediately.
 | Count next to the cursor, on the line being edited | `312 pages`, `+5 / −2 pages`, `Up to 340 pages`; with other edits in the file, this edit first, then all of them: `2 pages, 56 total (6 edits)` | Updates at once (`setDecorations`), before saving: the L0 surface |
 | Status bar item | `Your edits: 340 pages`, or `Link page groups` when none are linked; click opens the panel | Always visible, updates at once |
 | Hover | The full answer: exact/possible/unknown, conditions, reasons, index age, page links | On demand |
-| Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff. **Assess impact** ranks it by visual change (§6.6) | On demand |
+| Page panel (Alt+B, or click the count) | L1 list grouped by linked page group; each page opens the diff. Edit chips (All edits → file → edit) pick which edits the list, Assess impact and the diff apply. **Assess impact** ranks it by visual change (§6.6) | On demand |
 | Diff tab (webview embedding the server's `/diff` page; also opens in a browser) | L2: the whole page, before/after on one canvas, changed zones outlined; Space flips, N jumps to the next change; `Check on the live page` (L3) | On demand; refreshes itself as you keep typing |
 | Outside-editor notice | "CSS changed outside the editor: 12 → 40 pages" after a pull, branch switch or another tool | Edits that never went through the editor |
 | CodeLens above each rule (off by default) | The settled count, e.g. `312 pages · show` | Fine once typing pauses |
@@ -738,6 +755,7 @@ migrated or refused, never read silently.
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |
 | `session/setDiffBase` | — | Production (the live site as last scanned; default), `HEAD`, last save or session start |
+| `session/setSelection` | — | The edits picked in the panel (per file: all, or some change ids; `null`: every edit). Page lists without a path, Assess impact and the diff viewer follow it (§6.6) |
 | `index/capture` | — | Rescan some pages, or the linked active groups |
 | `index/getStatus`, `server/health` | — | Readiness, coverage, freshness |
 

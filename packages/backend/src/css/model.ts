@@ -32,6 +32,8 @@ export interface StyleRule {
   key: string;
   line: number;
   endLine: number;
+  /** First and last lines of the enclosing at-rules and rules (what a partial apply keeps with the rule). */
+  ctxLines: number[];
   /** Set when browsers would drop the rule (invalid selector). */
   invalid?: string;
   /** Usage keys found in declarations: var:--x, font:name, anim:name… */
@@ -46,6 +48,8 @@ export interface Definition {
   usageKey: string; // e.g. "font:brand sans"
   sig: string;
   line: number;
+  endLine: number;
+  ctxLines: number[];
   /** Names used by the definition's own declarations (var() in keyframes, @position-try). */
   uses: string[];
 }
@@ -252,14 +256,14 @@ export function assemble(chunks: Chunk[], text = chunks.map((c) => c.body).join(
     }
     for (const r of part.rules) {
       const index = model.rules.length;
-      model.rules.push({ ...r, index, line: r.line + lineBase, endLine: r.endLine + lineBase });
+      model.rules.push({ ...r, index, line: r.line + lineBase, endLine: r.endLine + lineBase, ctxLines: r.ctxLines.map((l) => l + lineBase) });
       for (const k of r.uses) {
         let list = model.usage.get(k);
         if (!list) model.usage.set(k, (list = []));
         list.push(index);
       }
     }
-    for (const d of part.defs) model.defs.push({ ...d, line: d.line + lineBase });
+    for (const d of part.defs) model.defs.push({ ...d, line: d.line + lineBase, endLine: d.endLine + lineBase, ctxLines: d.ctxLines.map((l) => l + lineBase) });
     for (const l of part.layerOrder) {
       if (!seenLayers.has(l)) {
         seenLayers.add(l);
@@ -406,6 +410,8 @@ function parseChunk(text: string): StylesheetModel {
           usageKey: `${DEF_KINDS[name]}:${kind === "property" ? defName : defName.toLowerCase()}`,
           sig: norm(at.toString()),
           line: at.source?.start?.line ?? 0,
+          endLine: at.source?.end?.line ?? at.source?.start?.line ?? 0,
+          ctxLines: ctxLinesOf(at),
           uses: [...uses],
         });
       } else if (!CONDITIONAL.has(name) && !at.nodes?.some((n) => n.type === "rule")) {
@@ -489,11 +495,22 @@ function parseChunk(text: string): StylesheetModel {
       key: `${condKey}|${selectorText}`,
       line: container.source?.start?.line ?? 0,
       endLine: container.source?.end?.line ?? container.source?.start?.line ?? 0,
+      ctxLines: ctxLinesOf(container),
       invalid,
       uses: [...uses],
       declaresVars,
     });
   }
+}
+
+function ctxLinesOf(node: postcss.Node): number[] {
+  const out: number[] = [];
+  for (let p = node.parent; p && p.type !== "root"; p = p.parent as any) {
+    const start = p.source?.start?.line;
+    if (start === undefined) continue;
+    out.push(start, p.source?.end?.line ?? start);
+  }
+  return out;
 }
 
 /** The model with a different rule list; rule indexes and usage tables are rebuilt. */
