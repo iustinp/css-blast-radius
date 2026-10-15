@@ -2,6 +2,7 @@
 
 import * as vscode from "vscode";
 import * as cp from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DaemonClient } from "./daemonClient";
@@ -38,6 +39,9 @@ export class DaemonLifecycle implements vscode.Disposable {
   private readonly onStateEmitter = new vscode.EventEmitter<ConnectionState>();
   readonly onAttached = this.onAttachedEmitter.event;
   readonly onState = this.onStateEmitter.event;
+
+  /** This window (a reload is a new one): the server starts a new "This session" for it. */
+  private readonly windowId = randomUUID();
 
   constructor(private readonly workspaceRoot: string) {
     this.client.onClose(() => {
@@ -136,7 +140,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       return new Error("Extension deactivated");
     }
     try {
-      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, groups, client: "vscode" }, 10_000);
+      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, groups, client: "vscode", windowId: this.windowId }, 10_000);
       if (init.protocolMajor !== PROTOCOL_MAJOR) throw new Error(`Incompatible server (protocol ${init.protocolMajor}, need ${PROTOCOL_MAJOR}).`);
       this.init = init;
       this.retryMs = 500;

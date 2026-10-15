@@ -46,7 +46,7 @@
       },
       {
         "command": "cssBlastRadius.setDiffBase",
-        "title": "Change Diff Base",
+        "title": "Show Which Changes (All, Uncommitted, This Session, Unsaved)",
         "category": "CSS Blast Radius"
       },
       {
@@ -119,8 +119,15 @@
             "session",
             "production"
           ],
-          "default": "",
-          "description": "What your CSS edits are compared with. Empty: the live site as last scanned. Use Change Diff Base to switch during this session."
+          "enumDescriptions": [
+            "Uncommitted (the default)",
+            "Uncommitted: changes since your last commit, saved or not",
+            "Unsaved: typing you haven't saved yet",
+            "This session: changes since the window opened",
+            "All: every CSS change the live site doesn't have yet"
+          ],
+          "default": "HEAD",
+          "description": "The Blast Radius tab selected when a window opens: which of your CSS changes are counted. Switch tabs in the Blast Radius panel or with Show Which Changes."
         },
         "cssBlastRadius.cursorCount": {
           "type": "boolean",

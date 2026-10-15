@@ -156,7 +156,7 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
 
   it("counts the branch's .btn change, not main's newer .card .title nor the already-live #hero", async () => {
     const total = session.sessionTotal();
-    expect(total.branch).toEqual({ name: "feature", mainRef: "origin/main", behind: 1 });
+    expect(total.branch).toEqual({ name: "feature", mainRef: "origin/main", behind: 1, mainShown: false });
     expect(total.files).toHaveLength(1);
     expect(total.files[0].changes).toBe(1);
     expect(total.total.exact).toBe(2);
@@ -164,6 +164,16 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     const res = await session.open(cssPath, fs.readFileSync(cssPath, "utf8"), 1);
     expect(res.answer.changes.map((c) => c.selector)).toEqual([".btn"]);
     expect(res.answer.freshness?.stale).toBe(false);
+  });
+
+  it("can also count main's newer changes (a plain comparison with the site), and stop again", async () => {
+    let total = await session.setDiffBase("production", true);
+    expect(total.branch).toEqual({ name: "feature", mainRef: "origin/main", behind: 1, mainShown: true });
+    const res = await session.open(cssPath, fs.readFileSync(cssPath, "utf8"), 2);
+    expect(res.answer.changes.map((c) => c.selector).sort()).toEqual([".btn", ".card .title"]);
+    total = await session.setDiffBase("production", false);
+    expect(total.branch?.mainShown).toBe(false);
+    expect(total.files[0].changes).toBe(1);
   });
 
   it("shows the edit on the live page with main's newer CSS kept", async () => {

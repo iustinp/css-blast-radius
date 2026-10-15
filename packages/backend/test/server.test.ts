@@ -324,6 +324,57 @@ describe("local server", () => {
     expect(note.params.files).toContain(other);
   }, 15_000);
 
+  it('starts "This session" for each new window, not for a reconnect or a second window', async () => {
+    const proj2 = path.join(tmp, "proj2");
+    fs.mkdirSync(path.join(proj2, "styles"), { recursive: true });
+    const file = path.join(proj2, "styles/main.css");
+    const original = fs.readFileSync(path.join(site, "css/main.css"), "utf8");
+    fs.writeFileSync(file, original);
+    const port = Number(new URL(srv.url).port);
+    // Until the server has seen every window close (not a fixed wait: slow under a full test run).
+    const settle = () => until(() => [...srv.app.projects.values()].every((p) => p.root !== proj2 || p.peers.size === 0));
+    const session = (c: RpcClient) => c.call("analysis/queryImpacts", { scope: "session" });
+
+    const a = await RpcClient.connect(port);
+    const first = await a.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "a" });
+    expect(first.sessionStarted).toBe(true);
+    expect(first.status.git).toBe(false);
+    await a.call("session/setDiffBase", { base: "session" });
+    const edited = original.replace("color: blue;", "color: red;");
+    fs.writeFileSync(file, edited);
+    await until(async () => (await session(a)).total.exact === 2);
+
+    const b = await RpcClient.connect(port);
+    expect((await b.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "b" })).sessionStarted).toBe(false);
+    expect((await session(b)).total.exact).toBe(2);
+    a.close();
+    b.close();
+    await settle();
+    // The window that joined reconnects (sleep, server hiccup): still the same session.
+    const b2 = await RpcClient.connect(port);
+    expect((await b2.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "b" })).sessionStarted).toBe(false);
+    expect((await session(b2)).total.exact).toBe(2);
+    b2.close();
+    await settle();
+
+    // A new window once the others closed (or a reload): the CSS as it is now is the start.
+    const c = await RpcClient.connect(port);
+    const third = await c.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "c" });
+    expect(third.sessionStarted).toBe(true);
+    expect(third.status.diffBase).toBe("session");
+    expect((await session(c)).total.exact).toBe(0);
+    // A file the window restores with unsaved typing: that typing was before this session.
+    const typed = edited.replace("padding: 8px 16px;", "padding: 0;");
+    const opened = await c.call("document/open", { path: file, text: typed, version: 1, atStart: true });
+    expect(opened.session.total.exact).toBe(0);
+    c.close();
+    await settle();
+
+    const again = await RpcClient.connect(port);
+    expect((await again.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "c" })).sessionStarted).toBe(false);
+    again.close();
+  }, 20_000);
+
   it("asks for a rescan when the site changes", async () => {
     const r = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"] });
     expect(r.json.needsRescan).toBe(true);

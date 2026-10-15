@@ -48,6 +48,12 @@ interface Project {
   /** editRevision:selectionRevision last announced to diff viewers. */
   sentEdit: string;
   idle?: NodeJS.Timeout;
+  /** "This session" has a start (the session's creation or a restart for a new window). */
+  begun: boolean;
+  /** Editor windows attached since "This session" started: their reconnects keep it. */
+  windows: Set<string>;
+  /** Restarted for this window, which hasn't attached since (its initialize timed out): its retry gets the news. */
+  unacked?: string;
 }
 
 type PageStatus = "ok" | "failed" | "new" | "capturing" | "excluded";
@@ -348,7 +354,7 @@ export class App {
       pending = (async () => {
         if (!existsSync(root) || !statSync(root).isDirectory()) throw new RpcError(ERR.invalidParams, `folder not found: ${root}`);
         const session = await Session.create({ workspaceRoot: root, shared: this.shared, diffBase: "production", scope: [] });
-        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}` };
+        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}`, begun: false, windows: new Set() };
         for (const [event, method] of SESSION_NOTIFICATIONS) session.on(event, (x) => p.peers.forEach((c) => c.notify(method, x)));
         session.on("publish", () => this.edited(p));
         session.on("externalChange", () => this.edited(p));
@@ -363,6 +369,36 @@ export class App {
     clearTimeout(p.idle);
     p.idle = undefined;
     return p;
+  }
+
+  /**
+   * "This session" starts when the session is created, and again when a new
+   * editor window (or a reload) is the only one attached; a window that
+   * reconnects, or joins another open window, keeps the running session.
+   */
+  private async startSession(p: Project, peer: RpcPeer, windowId: string | undefined): Promise<boolean> {
+    const others = [...p.peers].some((x) => x !== peer);
+    if (!p.begun) {
+      p.begun = true;
+      if (windowId) p.windows.add(windowId);
+      return true;
+    }
+    if (!windowId) return false;
+    if (p.unacked === windowId && !others) return true;
+    if (others || p.windows.has(windowId)) {
+      p.windows.add(windowId);
+      return false;
+    }
+    p.unacked = windowId;
+    const run = () => p.session.restartSession();
+    try {
+      await (p.serial = p.serial.then(run, run));
+    } catch (err) {
+      p.unacked = undefined;
+      throw err;
+    }
+    p.windows = new Set([windowId]);
+    return true;
   }
 
   private detach(p: Project, peer: RpcPeer): void {
@@ -393,7 +429,12 @@ export class App {
             const next = await this.project(root);
             if (project && project !== next) this.detach(project, peer);
             project = next;
+            const windowId = typeof p.windowId === "string" ? p.windowId : undefined;
+            const started = await this.startSession(next, peer, windowId);
+            // Hung up while "This session" restarted: don't keep a dead peer (its retry is told it started).
+            if (peer.closed) throw new RpcError(ERR.invalidRequest, "connection closed");
             project.peers.add(peer);
+            if (windowId && project.unacked === windowId) project.unacked = undefined;
             project.linked = Array.isArray(p.groups) ? p.groups.map(String) : [];
             project.session.setScope(this.scopeFor(project.linked));
             this.changed();
@@ -407,6 +448,7 @@ export class App {
               capabilities: { levels: [0, 1, 2, 3], capture: true, diffBases: DIFF_BASES },
               status: project.session.status(),
               sessionId: project.id,
+              sessionStarted: started,
               serverUrl: this.url,
               groups: this.groupInfos(),
             };

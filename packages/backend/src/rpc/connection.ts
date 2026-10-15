@@ -93,6 +93,8 @@ export function serveRpc(socket: Duplex, opts: ServeRpcOptions): RpcPeer {
   }
 
   socket.on("data", onData);
+  // The other side hung up: HTTP-upgraded sockets stay half-open unless ended here too.
+  socket.on("end", () => socket.end());
   socket.on("close", finish);
   socket.on("error", finish);
   if (opts.head?.length) onData(opts.head);

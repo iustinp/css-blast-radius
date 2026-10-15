@@ -9,7 +9,7 @@ import type { DiffBaseKind } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 2;
+export const PROTOCOL_MINOR = 3;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -64,6 +64,8 @@ export interface InitializeResult {
   status: IndexStatus;
   /** Server mode only: the project's session, the server's URL and every page group. */
   sessionId?: string;
+  /** Server mode: "This session" starts now (a new session, or the first window after the last one closed). */
+  sessionStarted?: boolean;
   serverUrl?: string;
   groups?: GroupInfo[];
 }
@@ -78,6 +80,8 @@ export interface GroupInfo {
 
 export interface InitializeParams {
   workspaceRoot: string;
+  /** One per editor window: a new window (or a reload) starts a new "This session". */
+  windowId?: string;
   /** Linked page group ids (server mode). */
   groups?: string[];
   client?: string;
@@ -102,6 +106,8 @@ export interface IndexStatus {
   /** Markup in the workspace changed since capture: answers are marked stale. */
   markupChanged: boolean;
   diffBase: DiffBaseKind;
+  /** The workspace is in a git repository ("Uncommitted" needs one). */
+  git: boolean;
   capture?: { running: boolean; done: number; total: number; error?: string };
   /** Server mode: the linked page groups counts are limited to. */
   scope?: ScopeStatus;
@@ -119,10 +125,11 @@ export interface SessionTotal {
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
   /**
-   * Live-site base on a git branch: only the branch's own changes count;
-   * `behind` commits of the deployed branch (`mainRef`) are left out.
+   * Live-site base on a git branch: by default only the branch's own changes
+   * count and the `behind` newer commits of the deployed branch (`mainRef`) are
+   * left out; `mainShown`: they count too (a plain comparison with the site).
    */
-  branch?: { name: string | null; mainRef: string; behind: number };
+  branch?: { name: string | null; mainRef: string; behind: number; mainShown: boolean };
 }
 
 export interface DocResult {
@@ -134,6 +141,14 @@ export interface OpenParams {
   path: string;
   text: string;
   version: number;
+  /** Open when "This session" started: this text, saved or not, is where the session starts. */
+  atStart?: boolean;
+}
+
+export interface SetDiffBaseParams {
+  base: DiffBaseKind;
+  /** Live-site base on a branch behind the deployed one: also count the deployed branch's newer changes. */
+  mainChanges?: boolean;
 }
 export interface ChangeParams {
   path: string;
@@ -343,6 +358,8 @@ export interface PageDiffParams {
 export interface ExternalChangeParams {
   files: string[];
   session: SessionTotal;
+  /** The session's total before the change (it moved, or there'd be no notification). */
+  before?: Count;
 }
 
 // Notifications (daemon → client)

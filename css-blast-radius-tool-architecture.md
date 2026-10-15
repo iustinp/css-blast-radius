@@ -441,8 +441,13 @@ How numbers read:
   useful before editing anything.
 - **Session total** (status bar): *how many pages can my edits reach?* The
   union over every changed rule, in every file, compared with a **diff
-  base**:
-  - production (default) — **the live site as last scanned**: "what would
+  base**. The panel shows the bases as tabs, broadest first (All = production,
+  Uncommitted = `HEAD`, This session = session start, Unsaved = last save);
+  one base is active per project session, and it drives the cursor count, the
+  status bar, the list and the visual diff. A window opens on
+  `cssBlastRadius.diffBase` (default `HEAD`; `session` without git) and keeps
+  its tab across reconnects:
+  - production — **the live site as last scanned**: "what would
     deploying this reach?" Needs no git. In a git repository, only **the
     branch's own changes** count: each file is diffed against its version
     where the branch left the deployed branch (`merge-base HEAD origin/main`;
@@ -454,9 +459,20 @@ How numbers read:
     the live copy before and the live copy with the branch's changes merged
     in after (`git merge-file`, as a merge would); if the same lines changed
     on both sides it compares the branch's own versions and warns. The
-    branch point is re-read on commits, checkouts and fetches;
-  - `HEAD` — your uncommitted changes;
-  - last save, or the start of the session.
+    branch point is re-read on commits, checkouts and fetches.
+    `setDiffBase {mainChanges: true}` (the panel's "Show main's N newer
+    commits" box, offered when `behind > 0`) compares with the live copy
+    as is instead, so the deployed branch's newer changes count as undone;
+    `SessionTotal.branch.mainShown` says which;
+  - `HEAD` — your uncommitted changes (saved or not);
+  - session start — a snapshot of the CSS on disk, taken when the session
+    is created and again when a new editor window (`initialize {windowId}`)
+    is the only one attached: a reload starts over, a second window doesn't,
+    nor does a reconnect of any window attached since the start
+    (`InitializeResult.sessionStarted`). The window then
+    reopens its files with `document/open {atStart: true}`, so unsaved text
+    it restores counts as the start;
+  - last save — unsaved typing only.
 - **Scope:** counts cover only the pages of the page groups linked to the
   project (§10.5) that are active. Nothing linked means `0` with reason
   `no-linked-groups`, and the status bar asks to link groups.
@@ -754,7 +770,7 @@ migrated or refused, never read silently.
 | `analysis/assess` | 2 | Check every page of a list visually in the background ("Assess impact"); progress via `analysis/assessProgress` |
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |
-| `session/setDiffBase` | — | Production (the live site as last scanned; default), `HEAD`, last save or session start |
+| `session/setDiffBase` | — | Production (the live site as last scanned), `HEAD`, last save or session start; `mainChanges` also counts the deployed branch's newer commits |
 | `session/setSelection` | — | The edits picked in the panel (per file: all, or some change ids; `null`: every edit). Page lists without a path, Assess impact and the diff viewer follow it (§6.6) |
 | `index/capture` | — | Rescan some pages, or the linked active groups |
 | `index/getStatus`, `server/health` | — | Readiness, coverage, freshness |
@@ -764,7 +780,10 @@ migrated or refused, never read silently.
 `analysis/drilldownProgress` (streamed L2/L3 results),
 `analysis/assessProgress` (Assess impact: pages done, finished or stopped by an edit),
 `analysis/resultSuperseded`, `analysis/externalChange` (CSS changed on disk
-outside the editor and moved the total), `groups/changed`,
+outside the editor and moved the total; carries the total `before`, so the
+notice reads "now 40 pages affected (was 12 pages)". The extension treats an
+open file as reloaded only when it was clean before and after the change, so
+undoing back to the saved text doesn't count), `groups/changed`,
 `index/statusChanged`, `index/revisionSwitched`, `server/degraded`,
 `server/restarting`.
 

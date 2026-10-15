@@ -63,6 +63,40 @@
     }
   }
 
+  let tabsMsg = null;
+
+  // Tabs: what your CSS is compared with. A click shows the tab right away; the list follows.
+  function renderTabs(active) {
+    const box = $("tabs");
+    box.replaceChildren();
+    for (const tab of tabsMsg.tabs) {
+      const node = button(tab.name, tab.base === active, () => {
+        if (tab.base === active) return;
+        renderTabs(tab.base);
+        $("mainBox").hidden = true;
+        $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
+        vscode.postMessage({ type: "tab", base: tab.base });
+      });
+      node.setAttribute("role", "tab");
+      node.setAttribute("aria-selected", tab.base === active ? "true" : "false");
+      node.title = tab.tip;
+      box.append(node);
+    }
+    const main = active === "production" && tabsMsg.main;
+    $("mainBox").hidden = !main;
+    if (!main) return;
+    $("mainChanges").checked = main.shown;
+    $("mainLabel").textContent = `Show ${main.name}'s ${plural(main.behind, "newer commit", "newer commits")} you haven't pulled`;
+    $("mainBox").title = main.shown
+      ? `Their changes count as if your branch undid them. Uncheck to count only your branch's changes.`
+      : `Count them too, as if your branch undid them (a plain comparison of your files with the live site).`;
+  }
+
+  $("mainChanges").addEventListener("change", (e) => {
+    $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
+    vscode.postMessage({ type: "mainChanges", show: e.target.checked });
+  });
+
   function renderSides() {
     const box = $("sides");
     box.replaceChildren();
@@ -222,6 +256,11 @@
       assessing = null;
       renderAssess();
       $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
+      return;
+    }
+    if (m.type === "tabs") {
+      tabsMsg = m;
+      renderTabs(m.base);
       return;
     }
     if (m.type === "error") {

@@ -159,6 +159,13 @@ const LIMITATIONS = [
 const MAX_SNAPSHOT_FILES = 3000;
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
+/** The diff viewer's empty page, per comparison (the live site's depends on the branch). */
+const NO_CHANGES: Partial<Record<DiffBaseKind, string>> = {
+  HEAD: "You have no uncommitted CSS changes right now.",
+  session: "You have no CSS changes since your editor window opened.",
+  saved: "You have no unsaved CSS changes right now.",
+};
+
 export class Session extends EventEmitter {
   readonly cfg: CbrConfig;
   readonly store: Store;
@@ -172,6 +179,8 @@ export class Session extends EventEmitter {
   private branch?: BranchPoint;
   private branchLoad?: Promise<BranchPoint | undefined>;
   private gitMoved = false;
+  /** Live-site base: also count the deployed branch's newer changes (a plain comparison with the site). */
+  private mainChanges = false;
   diffBase: DiffBaseKind;
   editRevision = 0;
   private readonly files = new Map<string, FileState>();
@@ -330,6 +339,7 @@ export class Session extends EventEmitter {
       variants: idx?.variants.map((v) => v.name) ?? [],
       markupChanged: this.markupChanged,
       diffBase: this.diffBase,
+      git: !!this.git,
       capture: this.captureState ? { ...this.captureState } : undefined,
       scope: this.scopeStatus(),
       limitations: LIMITATIONS,
@@ -351,10 +361,15 @@ export class Session extends EventEmitter {
     f.editRevision = ++this.editRevision;
   }
 
-  async open(path: string, text: string, version: number): Promise<DocResult> {
+  async open(path: string, text: string, version: number, atStart = false): Promise<DocResult> {
     const f = this.state(path);
     f.doc = new Doc(f.path, text, version, readText(f.path));
     f.diskText = undefined;
+    if (atStart) {
+      // Restored unsaved edits were made before this session.
+      this.sessionStart.set(f.path, text);
+      if (this.diffBase === "session") f.base = undefined;
+    }
     this.touch(f);
     await this.ensureBase(f);
     return this.docResult(f);
@@ -391,10 +406,32 @@ export class Session extends EventEmitter {
     return this.sessionTotal();
   }
 
-  async setDiffBase(kind: DiffBaseKind): Promise<SessionTotal> {
+  async setDiffBase(kind: DiffBaseKind, mainChanges?: boolean): Promise<SessionTotal> {
     if (!DIFF_BASES.includes(kind)) throw new RpcError(ERR.invalidParams, `unknown diff base: ${kind}`);
     this.diffBase = kind;
+    if (mainChanges !== undefined) this.mainChanges = mainChanges;
     this.branchLoad = undefined;
+    return this.rebase();
+  }
+
+  /**
+   * "This session" starts over for a new editor window: the CSS on disk now
+   * (and the window's files as they reopen) is its start. No window is
+   * attached, so files the last one left open are closed.
+   */
+  async restartSession(): Promise<SessionTotal> {
+    for (const f of [...this.files.values()]) {
+      if (!f.doc) continue;
+      this.files.delete(f.path);
+      this.rulesPending.delete(f.path);
+    }
+    this.editRevision++;
+    this.sessionStart.clear();
+    await this.snapshotSession();
+    return this.rebase();
+  }
+
+  private async rebase(): Promise<SessionTotal> {
     for (const f of this.files.values()) {
       f.base = undefined;
       this.touch(f);
@@ -437,7 +474,7 @@ export class Session extends EventEmitter {
           const live = this.store.getBlob(hash).toString("utf8");
           // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
           const bp = await this.branchPoint();
-          const text = bp ? await this.git!.show(path, bp.mergeBase) : undefined;
+          const text = bp && !this.mainChanges ? await this.git!.show(path, bp.mergeBase) : undefined;
           if (text !== undefined) return { text, kind: "production", live };
           return { text: live, kind: "production" };
         }
@@ -531,7 +568,8 @@ export class Session extends EventEmitter {
       case "production": {
         if (!this.index) break;
         const all = await this.listCss();
-        const bp = await this.branchPoint();
+        const point = await this.branchPoint();
+        const bp = this.mainChanges ? undefined : point;
         // On a branch: the files it changed, unless the site already has that exact content.
         const files = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : all;
         for (const f of files) {
@@ -668,7 +706,7 @@ export class Session extends EventEmitter {
       total: count,
       reasons: [...reasons],
       files,
-      branch: bp && { name: bp.branch, mainRef: bp.mainRef, behind: bp.behind },
+      branch: bp && { name: bp.branch, mainRef: bp.mainRef, behind: bp.behind, mainShown: this.mainChanges },
     };
   }
 
@@ -1365,7 +1403,7 @@ export class Session extends EventEmitter {
     if (list.length === 0) {
       view.reason = total
         ? "None of your edits are picked. Pick some in the Blast Radius panel in your editor."
-        : this.branch ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.";
+        : NO_CHANGES[this.diffBase] ?? (this.branch && !this.mainChanges ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.");
       return finish();
     }
     if (edits.length === 0) {
@@ -1538,6 +1576,8 @@ export class Session extends EventEmitter {
       }
     };
     this.watcher.on("add", onEvent).on("change", onEvent).on("unlink", onEvent);
+    // Changes made while the watcher was still scanning go unreported: look once it's ready.
+    this.watcher.on("ready", () => this.scheduleRefresh());
     this.watcher.on("error", (err) => this.messages.push(`file watcher: ${String(err)}`));
   }
 
@@ -1564,7 +1604,7 @@ export class Session extends EventEmitter {
         }
         const before = new Map<string, string | undefined>();
         for (const [p, f] of this.files) if (!f.doc) before.set(p, f.diskText);
-        const totalBefore = JSON.stringify(this.sessionTotal().total);
+        const totalBefore = this.sessionTotal().total;
         await this.refreshClosed();
         this.publishOpenDocs();
         // CSS changed on disk outside the editor (pull, branch switch, AI tools, other editors).
@@ -1573,7 +1613,7 @@ export class Session extends EventEmitter {
         for (const p of before.keys()) if (!this.files.has(p)) files.push(p);
         if (files.length) {
           const session = this.sessionTotal();
-          if (JSON.stringify(session.total) !== totalBefore) this.emit("externalChange", { files, session });
+          if (JSON.stringify(session.total) !== JSON.stringify(totalBefore)) this.emit("externalChange", { files, session, before: totalBefore });
         }
       } catch (err: any) {
         this.messages.push(`refresh failed: ${err?.message ?? err}`);

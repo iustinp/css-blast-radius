@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { branchNote, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
+import { branchNote, configuredBase, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
 import type { ChangeAnswer, Count } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
@@ -79,7 +79,40 @@ describe("branchNote", () => {
   });
 
   it("stays quiet when the branch is up to date or there is no branch", () => {
+    expect(branchNote({ mainRef: "origin/main", behind: 2, mainShown: true })).toBe("main has 2 newer commits not in your branch; their changes are counted as if your branch undid them.");
     expect(branchNote({ mainRef: "origin/main", behind: 0 })).toBeUndefined();
     expect(branchNote(undefined)).toBeUndefined();
+  });
+});
+
+describe("tabs", () => {
+  it("starts on Uncommitted unless the setting names another tab", () => {
+    expect(configuredBase("")).toBe("HEAD");
+    expect(configuredBase(undefined)).toBe("HEAD");
+    expect(configuredBase("production")).toBe("production");
+    expect(configuredBase("nonsense")).toBe("HEAD");
+    expect(tabName("production")).toBe("All");
+    expect(tabName("session")).toBe("This session");
+  });
+
+  it("falls back from Uncommitted to This session without git", () => {
+    expect(effectiveBase("HEAD", false)).toBe("session");
+    expect(effectiveBase("HEAD", undefined)).toBe("HEAD"); // older servers don't say
+    expect(effectiveBase("saved", false)).toBe("saved");
+  });
+
+  it("says plainly that there's nothing to show, per tab", () => {
+    expect(noChangesText("HEAD", undefined)).toBe("No uncommitted CSS changes.");
+    expect(noChangesText("production", { mainRef: "origin/main", behind: 1, mainShown: false })).toBe("Your branch has no CSS changes.");
+    expect(noChangesText("production", { mainRef: "origin/main", behind: 1, mainShown: true })).toBe("No CSS changes compared with the live site.");
+  });
+});
+
+describe("CSS changed outside the editor", () => {
+  const c = (exact: number, possible = 0): Count => ({ exact, possible, unknown: 0, complete: true });
+  it("says how the count moved", () => {
+    expect(externalChangeText(1, c(40), c(12))).toBe("CSS changed outside the editor (1 file): now 40 pages affected (was 12 pages).");
+    expect(externalChangeText(2, c(0, 5), c(0))).toBe("CSS changed outside the editor (2 files): now up to 5 pages affected (was 0 pages).");
+    expect(externalChangeText(1, c(3))).toBe("CSS changed outside the editor (1 file): 3 pages affected.");
   });
 });

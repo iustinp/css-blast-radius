@@ -23,7 +23,7 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
     case "index/getStatus":
       return run(() => session.status());
     case "document/open":
-      return run(() => session.open(need(p, "path"), need(p, "text"), p.version ?? 0));
+      return run(() => session.open(need(p, "path"), need(p, "text"), p.version ?? 0, p.atStart === true));
     case "document/change":
       return run(() => session.change(need(p, "path"), need(p, "version"), need(p, "changes")));
     case "document/save":
@@ -31,7 +31,7 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
     case "document/close":
       return run(() => session.close(need(p, "path")));
     case "session/setDiffBase":
-      return run(() => session.setDiffBase(need(p, "base")));
+      return run(() => session.setDiffBase(need(p, "base"), typeof p.mainChanges === "boolean" ? p.mainChanges : undefined));
     case "session/setSelection":
       return run(() => session.setSelection(p?.selection));
     case "analysis/queryImpacts":

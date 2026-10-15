@@ -5,7 +5,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
-import { ERR, type DocResult, type SessionTotal } from "./protocol";
+import { ERR, type Count, type DocResult, type SessionTotal } from "./protocol";
+import { sameCount } from "./format";
 import type { ImpactState } from "./state";
 
 interface TextChange {
@@ -23,7 +24,11 @@ interface Tracked {
   opening?: Promise<void>;
   idle: Array<() => void>;
   savedAt?: number;
+  /** Unsaved edits, as of the last event. */
+  dirty: boolean;
+  /** Reloaded from disk (changed outside the editor), and the session's total just before. */
   reloaded?: boolean;
+  reloadFrom?: Count;
 }
 
 /** A CSS file inside the project (the first workspace folder): files from elsewhere would be matched by name and miscounted. */
@@ -43,7 +48,7 @@ export class DocumentSync implements vscode.Disposable {
     private readonly client: DaemonClient,
     private readonly state: ImpactState,
     private readonly log: (msg: string) => void,
-    private readonly onReload: (path: string, session: SessionTotal) => void,
+    private readonly onReload: (path: string, session: SessionTotal, before?: Count) => void,
   ) {
     this.subs.push(
       vscode.workspace.onDidOpenTextDocument((d) => this.open(d)),
@@ -53,10 +58,10 @@ export class DocumentSync implements vscode.Disposable {
     );
   }
 
-  /** (Re)open every CSS document: called after each (re)connect. */
-  async openAll(): Promise<void> {
+  /** (Re)open every CSS document: called after each (re)connect. `atStart`: "This session" starts with this text. */
+  async openAll(atStart = false): Promise<void> {
     this.docs.clear();
-    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map((d) => this.open(d)));
+    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map((d) => this.open(d, atStart)));
   }
 
   isTracked(path: string): boolean {
@@ -75,22 +80,25 @@ export class DocumentSync implements vscode.Disposable {
     this.state.acceptSession(r.session);
     const tracked = this.docs.get(r.answer.file);
     if (tracked?.reloaded) {
+      const before = tracked.reloadFrom;
       tracked.reloaded = false;
-      this.onReload(r.answer.file, this.state.session ?? r.session);
+      tracked.reloadFrom = undefined;
+      if (!before || !sameCount(before, r.session.total)) this.onReload(r.answer.file, this.state.session ?? r.session, before);
     }
   }
 
-  private open(doc: vscode.TextDocument): Promise<void> {
+  private open(doc: vscode.TextDocument, atStart = false): Promise<void> {
     if (!isCssDocument(doc) || !this.client.connected) return Promise.resolve();
     const path = doc.uri.fsPath;
-    const t: Tracked = this.docs.get(path) ?? { doc, version: 0, queue: [], inFlight: 0, idle: [] };
+    const t: Tracked = this.docs.get(path) ?? { doc, version: 0, queue: [], inFlight: 0, idle: [], dirty: doc.isDirty };
     t.doc = doc;
+    t.dirty = doc.isDirty;
     t.reloaded = false;
     this.docs.set(path, t);
     t.queue = [];
     t.version = 1;
     const opening = this.client
-      .call<DocResult>("document/open", { path, text: doc.getText(), version: t.version })
+      .call<DocResult>("document/open", { path, text: doc.getText(), version: t.version, ...(atStart ? { atStart } : {}) })
       .then((r) => this.accept(r))
       .catch((err) => this.log(`document/open ${path}: ${err?.message ?? err}`))
       .finally(() => {
@@ -104,7 +112,13 @@ export class DocumentSync implements vscode.Disposable {
   private change(e: vscode.TextDocumentChangeEvent): void {
     const t = this.docs.get(e.document.uri.fsPath);
     if (!t || e.contentChanges.length === 0) return;
-    if (!e.document.isDirty && Date.now() - (t.savedAt ?? 0) > 1000) t.reloaded = true;
+    // Clean before and after: reloaded from disk. Not an undo back to the saved text (dirty before).
+    const wasDirty = t.dirty;
+    t.dirty = e.document.isDirty;
+    if (!wasDirty && !t.dirty && Date.now() - (t.savedAt ?? 0) > 1000 && !t.reloaded) {
+      t.reloaded = true;
+      t.reloadFrom = this.state.session?.total;
+    }
     for (const c of e.contentChanges) {
       t.queue.push({
         range: {
@@ -147,6 +161,7 @@ export class DocumentSync implements vscode.Disposable {
     const t = this.docs.get(doc.uri.fsPath);
     if (!t) return;
     t.savedAt = Date.now();
+    t.dirty = false;
     t.reloaded = false;
     while (t.opening) await t.opening;
     // Edits made before the save must reach the daemon first; the daemon

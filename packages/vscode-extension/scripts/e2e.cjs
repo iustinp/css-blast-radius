@@ -208,11 +208,11 @@ function makeDoc(text) {
       assert(i >= 0, `can't find ${needle}`);
       return new Position(i, typeof needle === "string" ? lines[i].indexOf(needle) : lines[i].search(needle));
     },
-    edit(start, end, insert) {
+    edit(start, end, insert, dirty = true) {
       const head = lines[start.line].slice(0, start.character);
       const tail = lines[end.line].slice(end.character);
       lines = [...lines.slice(0, start.line), ...(head + insert + tail).split("\n"), ...lines.slice(end.line + 1)];
-      doc.isDirty = true;
+      doc.isDirty = dirty;
       events.change.fire({ document: doc, contentChanges: [{ range: new Range(start, end), text: insert }] });
     },
   };
@@ -257,6 +257,7 @@ async function check(name, run) {
 }
 const pagesPanel = () => panels.find((p) => p.viewType === "cssBlastRadius.pages" && !p.closed);
 const lastPages = (p) => [...p.posted].reverse().find((m) => m.type === "pages");
+const lastOf = (p, type, from = 0) => [...p.posted.slice(from)].reverse().find((m) => m.type === type);
 const ctx = {
   subscriptions: [], extensionUri: uri(extRoot),
   workspaceState: { get: (key) => state.get(key), update: async (key, value) => state.set(key, value) },
@@ -406,6 +407,38 @@ async function run() {
       });
       await waitFor(() => statusItem.text.includes("2 pages"), "count after group resumes");
     });
+    await check("tabs: the panel switches between All, This session and Unsaved; no Uncommitted without git", async () => {
+      const p = pagesPanel();
+      const tabs = await waitFor(() => lastOf(p, "tabs"), "tab row");
+      assert.deepEqual(tabs.tabs.map((t) => t.name), ["All", "This session", "Unsaved"]);
+      assert.equal(tabs.base, "session", "Uncommitted (the default) falls back to This session without git");
+      for (const base of ["saved", "production", "session"]) {
+        const mark = p.posted.length;
+        p.webview.receive({ type: "tab", base });
+        await waitFor(() => lastOf(p, "tabs", mark)?.base === base, `${base} tab`);
+        const list = await waitFor(() => {
+          const m = lastOf(p, "pages", mark);
+          return m && lastOf(p, "tabs", mark).base === base && m.result.total === 2 && m;
+        }, `${base} tab's page list`);
+        assert(list.baseLabel, "list says what it's compared with");
+        assert.equal(lastOf(p, "tabs", mark).main, undefined, "no main branch without git");
+      }
+    });
+    await check("undo: typing undone back to the saved text isn't a change outside the editor", async () => {
+      const text = doc.getText();
+      const insert = "\n  outline: 2px solid red;";
+      const at = text.indexOf(insert);
+      assert(at > 0, "typed text not found");
+      const pos = (offset) => {
+        const parts = text.slice(0, offset).split("\n");
+        return new Position(parts.length - 1, parts[parts.length - 1].length);
+      };
+      const seen = notices.length;
+      doc.edit(pos(at), pos(at + insert.length), "", false);
+      await waitFor(() => statusItem.text.includes("0 pages"), "count back to zero");
+      await new Promise((r) => setTimeout(r, 600));
+      assert.deepEqual(notices.slice(seen), [], "undo was reported as an outside change");
+    });
     await check("outside editor: closed file change triggers one notice", async () => {
       docs.splice(docs.indexOf(doc), 1);
       editors.splice(editors.indexOf(editor), 1);
@@ -415,7 +448,8 @@ async function run() {
       const changed = original.replace(/(\.btn\s*\{[^}]*\bcolor\s*:\s*)blue/i, "$1red");
       assert.notEqual(changed, original, "fixture must contain color: blue");
       fs.writeFileSync(file, changed);
-      await waitFor(() => notices.some((text) => text.includes("CSS changed outside the editor")), "outside-editor notification", 25_000);
+      const notice = await waitFor(() => notices.find((text) => text.includes("CSS changed outside the editor")), "outside-editor notification", 25_000);
+      assert.equal(notice, "CSS changed outside the editor (1 file): now 2 pages affected (was 0 pages).");
     });
     await check("dispose: no shared-server shutdown", async () => {
       for (const item of [...ctx.subscriptions].reverse()) item.dispose();

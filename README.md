@@ -83,7 +83,18 @@ The choice is saved in `.vscode/settings.json` (`cssBlastRadius.groups`), so the
 
 Your CSS files are matched to the site's stylesheets **by file name**. Hashes, version numbers and `.min` are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`. No git or build setup is needed.
 
-What your edits are compared with is **the live site, as last scanned**. In a git repository only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits (the panel says "main has 7 newer commits not in your branch"), and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again. The before/after view shows the live page, then the live page with your branch's changes merged in.
+Which of your changes count is up to the **tabs** at the top of the Blast Radius panel, broadest first:
+
+| Tab | Counts | Compared with |
+|---|---|---|
+| **All** | every CSS change the live site doesn't have yet: committed, uncommitted, unsaved, or made by other tools | the live site, as last scanned |
+| **Uncommitted** (the default) | changes since your last commit, saved or not | the last commit |
+| **This session** | changes since this VS Code window opened (a reload starts over; unsaved typing VS Code restores counts as before) | the files when the window opened |
+| **Unsaved** | typing you haven't saved yet | the last save |
+
+The tab drives everything: the count at the cursor, the status bar, the page list and the before/after view. A new window opens on the tab set in `cssBlastRadius.diffBase` (Uncommitted unless you change it). Without git there's no Uncommitted tab and windows open on This session.
+
+In the **All** tab, in a git repository, only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits, and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again. When `main` has newer commits you haven't pulled, the panel says so and offers **Show main's N newer commits you haven't pulled**: checked, those count too, as if your branch undid them (a plain comparison of your files with the live site). The before/after view shows the live page, then the live page with your changes merged in.
 
 ### 4. Edit CSS
 
@@ -97,12 +108,12 @@ What your edits are compared with is **the live site, as last scanned**. In a gi
   - **N** jumps to the next change;
   - **Check on the live page** loads the real page instead of the stored copy;
   - **Open in browser** opens the same view outside VS Code.
-- If CSS files change outside the editor (a pull, a branch switch, another tool), a notice tells you how the total moved.
+- If CSS files change outside the editor (a pull, a branch switch, another tool) and that moves the total, a notice says how: `now 40 pages affected (was 12 pages)`. Undoing back to the saved text isn't such a change.
 
 Other commands:
 - **Show All Affected Pages**
 - **Rescan Linked Groups**
-- **Change Diff Base** (e.g. compare with the last save or with git `HEAD` instead)
+- **Show Which Changes** (the same as the panel's tabs: All, Uncommitted, This session, Unsaved)
 - **Open Setup Page**
 - **Reconnect to Server**
 
@@ -141,10 +152,10 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (159) + extension (22) unit tests
+npm test                                         # backend (161) + extension (27) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
-node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (12 checks)
+node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (14 checks)
 ```
 
 `test/server.test.ts` drives the server end to end: setup, sitemap/pasted groups, scanning, linked-group counts over the editor connection, the before/after diff, live events, exclusions, undo, and the outside-editor change notice. Bench and smoke need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests.

@@ -8,9 +8,9 @@ import { DocumentSync, isCssDocument } from "./documentSync";
 import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
 import { ExternalNoticeBatch } from "./externalNotice";
-import { changeAtCursor, formatCount } from "./format";
+import { changeAtCursor, configuredBase, effectiveBase, externalChangeText, TABS } from "./format";
 import { PagesPanel } from "./panel";
-import type { CaptureProgressParams, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
+import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
 import { ImpactState } from "./state";
 import { serverOrigin } from "./urls";
 
@@ -40,22 +40,21 @@ export function activate(ctx: vscode.ExtensionContext): void {
     clearTimeout(noticeTimer);
     const notice = notices.take(Date.now());
     if (notice) {
-      const count = notice.files.length;
       void vscode.window.showInformationMessage(
-        `CSS changed outside the editor (${count} file${count === 1 ? "" : "s"}): ${formatCount(notice.session.total)} affected.`,
+        externalChangeText(notice.files.length, notice.session.total, notice.before),
         "Show pages", "Dismiss",
       ).then((choice) => { if (choice === "Show pages") void vscode.commands.executeCommand("cssBlastRadius.showAllPages"); });
-    } else noticeTimer = setTimeout(flushNotices, notices.delay(Date.now()));
+    } else if (notices.waiting) noticeTimer = setTimeout(flushNotices, notices.delay(Date.now()));
   }
 
-  function externalChange(files: string[], session: SessionTotal): void {
+  function externalChange(files: string[], session: SessionTotal, before?: Count): void {
     state.acceptSession(session);
     if (!files.length) return;
-    notices.add(files, state.session ?? session);
+    notices.add(files, state.session ?? session, before);
     flushNotices();
   }
 
-  const sync = new DocumentSync(client, state, log, (file, session) => externalChange([file], session));
+  const sync = new DocumentSync(client, state, log, (file, session, before) => externalChange([file], session, before));
   const surfaces = new EditorSurfaces(client, life, state, sync);
   ctx.subscriptions.push(life, state, sync, surfaces, { dispose: () => { clearTimeout(noticeTimer); notices.clear(); } });
 
@@ -77,15 +76,25 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }));
   }
 
-  async function applyConfiguredBase(refresh = true): Promise<void> {
+  // The panel's tab: what this window compares your CSS with. It starts at the setting's tab and
+  // stays across reconnects; the server applies one per project (windows on one project share it).
+  const settingBase = () => configuredBase(vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get("diffBase"));
+  let tab: { base: DiffBaseKind; mainChanges: boolean } = { base: settingBase(), mainChanges: false };
+
+  async function applyTab(refresh = true, git = state.status?.git): Promise<void> {
     if (!client.connected) return;
-    const base = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<DiffBaseKind | "">("diffBase") || "production";
+    const base = effectiveBase(tab.base, git);
+    state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base, mainChanges: tab.mainChanges }, 120_000));
+    await refreshScope();
+    if (refresh) await refreshAnswers();
+  }
+
+  async function switchTab(next: { base: DiffBaseKind; mainChanges?: boolean }): Promise<void> {
+    tab = { base: next.base, mainChanges: next.mainChanges ?? tab.mainChanges };
     try {
-      state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base }, 120_000));
-      await refreshScope();
-      if (refresh) await refreshAnswers();
+      await applyTab();
     } catch (err: any) {
-      log(`Comparison base: ${err?.message ?? err}`);
+      void vscode.window.showErrorMessage(`Couldn't change what your edits are compared with: ${err?.message ?? err}`);
     }
   }
 
@@ -114,8 +123,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
         state.acceptSession((p as { session: SessionTotal }).session);
         return;
       case "analysis/externalChange": {
-        const change = p as { files: string[]; session: SessionTotal };
-        externalChange(change.files, change.session);
+        const change = p as { files: string[]; session: SessionTotal; before?: Count };
+        externalChange(change.files, change.session, change.before);
         return;
       }
       case "groups/changed":
@@ -159,9 +168,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
     state.reset();
     notices.clear();
     state.setStatus(init.status);
-    const base = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<DiffBaseKind | "">("diffBase");
-    if (base && base !== init.status.diffBase) await applyConfiguredBase(false);
-    await sync.openAll();
+    try {
+      await applyTab(false, init.status.git);
+    } catch (err: any) {
+      log(`Comparison base: ${err?.message ?? err}`);
+    }
+    // A new "This session": what the editor holds now, saved or not, is where it starts.
+    await sync.openAll(init.sessionStarted === true);
     try {
       state.acceptSession(await client.call<SessionTotal>("analysis/queryImpacts", { scope: "session" }));
     } catch (err: any) {
@@ -276,33 +289,24 @@ export function activate(ctx: vscode.ExtensionContext): void {
         }),
       );
     }),
-    vscode.commands.registerCommand("cssBlastRadius.setDiffBase", async () => {
+    vscode.commands.registerCommand("cssBlastRadius.setDiffBase", async (arg?: { base?: DiffBaseKind; mainChanges?: boolean }) => {
       if (!requireConnected()) return;
-      const bases: DiffBaseKind[] = ["production", "HEAD", "saved", "session"];
-      const labels: Record<DiffBaseKind, string> = {
-        production: "The live site (last scan)", HEAD: "Last commit",
-        saved: "Last save", session: "When I opened VS Code",
-      };
-      const current = state.session?.diffBase ?? state.status?.diffBase ?? "production";
+      if (arg?.base && TABS.some((t) => t.base === arg.base)) return switchTab({ base: arg.base, mainChanges: arg.mainChanges });
+      const git = state.status?.git;
       const pick = await vscode.window.showQuickPick(
-        bases.map((base) => ({ label: labels[base], description: base === current ? "current" : undefined, base })),
-        { title: "Compare your CSS edits with…" },
+        TABS.filter((t) => effectiveBase(t.base, git) === t.base).map((t) => ({
+          label: t.name, detail: t.tip, description: t.base === effectiveBase(tab.base, git) ? "current" : undefined, base: t.base,
+        })),
+        { title: "Which changes should CSS Blast Radius show?" },
       );
-      if (!pick) return;
-      try {
-        state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base: pick.base }, 120_000));
-        await refreshScope();
-        await refreshAnswers();
-      } catch (err: any) {
-        void vscode.window.showErrorMessage(`Couldn't change what your edits are compared with: ${err?.message ?? err}`);
-      }
+      if (pick) await switchTab({ base: pick.base });
     }),
     vscode.commands.registerCommand("cssBlastRadius.reconnectServer", () => life.reconnect()),
     vscode.commands.registerCommand("cssBlastRadius.showOutput", () => life.output.show()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("cssBlastRadius.codeLens")) state.invalidateRules(undefined);
       if (e.affectsConfiguration("cssBlastRadius.groups")) void setGroups();
-      if (e.affectsConfiguration("cssBlastRadius.diffBase")) void applyConfiguredBase();
+      if (e.affectsConfiguration("cssBlastRadius.diffBase")) void switchTab({ base: settingBase() });
       if (["server", "autoStartServer", "serverPath", "daemonPath", "nodePath"].some((k) => e.affectsConfiguration(`cssBlastRadius.${k}`))) {
         void life.reconnect();
       }

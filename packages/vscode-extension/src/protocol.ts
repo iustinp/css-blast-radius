@@ -99,6 +99,8 @@ export interface IndexStatus {
   variants: string[];
   markupChanged: boolean;
   diffBase: DiffBaseKind;
+  /** In a git repository (servers before protocol 1.3 leave it out). */
+  git?: boolean;
   capture?: { running: boolean; done: number; total: number; error?: string };
   limitations: string[];
   messages: string[];
@@ -122,6 +124,8 @@ export interface InitializeResult {
   capabilities: { levels: number[]; capture: boolean; diffBases: DiffBaseKind[] };
   status: IndexStatus;
   sessionId: string;
+  /** "This session" starts now: open files' current text (saved or not) is its start. */
+  sessionStarted?: boolean;
   serverUrl: string;
   groups: GroupInfo[];
 }
@@ -133,8 +137,11 @@ export interface SessionTotal {
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
-  /** Live-site base on a git branch: only the branch's own changes count. */
-  branch?: { name: string | null; mainRef: string; behind: number };
+  /**
+   * Live-site base on a git branch, `behind` the deployed one: its newer
+   * changes count only when `mainShown` (missing before protocol 1.3).
+   */
+  branch?: { name: string | null; mainRef: string; behind: number; mainShown?: boolean };
 }
 
 export interface DocResult {

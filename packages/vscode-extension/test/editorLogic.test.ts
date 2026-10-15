@@ -89,6 +89,18 @@ describe("outside-editor notification batching", () => {
     expect(notices.take(10_100)).toEqual({ files: ["a.css", "b.css", "c.css"], session: session(30, 3) });
     expect(notices.take(10_101)).toBeUndefined();
   });
+
+  it("remembers the count before the first change, and stays quiet when it's back to it", () => {
+    const notices = new ExternalNoticeBatch();
+    notices.add(["a.css"], session(9, 1), count(4));
+    notices.add(["b.css"], session(12, 2), count(9));
+    expect(notices.take(0)).toEqual({ files: ["a.css", "b.css"], session: session(12, 2), before: count(4) });
+    notices.add(["a.css"], session(20, 3), count(12));
+    notices.add(["a.css"], session(12, 4), count(20));
+    expect(notices.waiting).toBe(true);
+    expect(notices.take(20_000)).toBeUndefined();
+    expect(notices.waiting).toBe(false);
+  });
 });
 
 describe("picking edits in the panel", () => {

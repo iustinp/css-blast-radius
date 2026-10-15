@@ -5,8 +5,8 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { DIFF_BASE_LABEL, branchNote, formatCount } from "./format";
-import { ERR, type AssessProgress, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
+import { DIFF_BASE_LABEL, TABS, branchNote, effectiveBase, formatCount, mainName } from "./format";
+import { ERR, type AssessProgress, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
 import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "./selection";
@@ -21,6 +21,8 @@ type FromWebview =
   | { type: "search"; query: string }
   | { type: "searchMore"; query: string; offset: number }
   | { type: "assess" }
+  | { type: "tab"; base: DiffBaseKind }
+  | { type: "mainChanges"; show: boolean }
   | { type: "page"; url: string };
 
 interface Chip {
@@ -54,6 +56,8 @@ export class PagesPanel implements vscode.Disposable {
   private picked: Picked = undefined;
   /** The server predates picking edits (it was started by an older version). */
   private oldServer = false;
+  /** The tab (and whether main's newer changes count) the list was last loaded for. */
+  private tabKey?: string;
 
   static show(ext: vscode.ExtensionContext, client: DaemonClient, life: DaemonLifecycle, state: ImpactState, target: PagesTarget): void {
     if (!PagesPanel.current) PagesPanel.current = new PagesPanel(ext, client, life, state);
@@ -197,7 +201,34 @@ export class PagesPanel implements vscode.Disposable {
     }
   }
 
+  private get base(): DiffBaseKind {
+    return this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production";
+  }
+
+  /** The tab row: the active tab, the tabs this project has, and main's newer commits (All tab). */
+  private postTabs(): void {
+    const git = this.state.status?.git;
+    const b = this.state.session?.branch;
+    void this.post({
+      type: "tabs", base: this.base,
+      tabs: TABS.filter((t) => effectiveBase(t.base, git) === t.base),
+      main: b && b.behind > 0 && b.mainShown !== undefined ? { name: mainName(b), behind: b.behind, shown: b.mainShown } : undefined,
+    });
+  }
+
   private async load(offset: number, editRevision?: number, refresh = false, union = false): Promise<void> {
+    // Another tab compares with something else: its edits are other edits, so start from all of them.
+    // (No session yet while reconnecting: the tab isn't known, keep the picks.)
+    const s = this.state.session;
+    const tabKey = s && `${s.diffBase}:${s.branch?.mainShown === true}`;
+    if (tabKey && this.tabKey !== undefined && tabKey !== this.tabKey && offset === 0) {
+      this.picked = undefined;
+      this.target = { title: "All edits" };
+      this.filters = { set: "all", group: this.filters.group };
+      void this.post({ type: "target", target: this.target });
+    }
+    if (tabKey) this.tabKey = tabKey;
+    this.postTabs();
     const t = this.target;
     const seq = ++this.loadSeq;
     try {
@@ -368,6 +399,12 @@ export class PagesPanel implements vscode.Disposable {
       case "page":
         if (m.url.startsWith("/") && !m.url.startsWith("//")) DiffTab.open(this.life, m.url);
         return;
+      case "tab":
+      case "mainChanges":
+        await vscode.commands.executeCommand("cssBlastRadius.setDiffBase",
+          m.type === "tab" ? { base: m.base } : { base: "production", mainChanges: m.show });
+        this.postTabs(); // back to the active tab if switching failed
+        return;
     }
   }
 
@@ -386,9 +423,12 @@ export class PagesPanel implements vscode.Disposable {
 </head>
 <body>
 <header>BLAST RADIUS</header>
+<nav id="tabs" role="tablist" aria-label="Which changes to show"></nav>
 <section id="summaryBox">
   <div id="number">0</div><div id="summary"></div>
-  <div id="meta" class="muted"></div><div id="branch" class="muted" hidden></div><div id="warning" class="warning"></div>
+  <div id="meta" class="muted"></div><div id="branch" class="muted" hidden></div>
+  <label id="mainBox" class="muted" hidden><input type="checkbox" id="mainChanges"> <span id="mainLabel"></span></label>
+  <div id="warning" class="warning"></div>
 </section>
 <nav id="chips"></nav>
 <div id="toolbar">

@@ -1,6 +1,6 @@
 // How numbers read (§7.1 / §8). Pure functions: no vscode import, unit-tested.
 
-import type { ChangeAnswer, Count, FileAnswer, Freshness, RuleCount } from "./protocol";
+import type { ChangeAnswer, Count, DiffBaseKind, FileAnswer, Freshness, RuleCount } from "./protocol";
 
 const plural = (n: number, word = "page") => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
 
@@ -28,6 +28,17 @@ export function formatCount(c: Count, reasons: string[] = []): string {
   else s = plural(c.exact);
   if (c.unknown) s += ` · ${c.unknown.toLocaleString("en-US")} unknown`;
   return s;
+}
+
+export function sameCount(a: Count, b: Count): boolean {
+  return a.exact === b.exact && a.possible === b.possible && a.unknown === b.unknown;
+}
+
+/** `CSS changed outside the editor (1 file): now 40 pages affected (was 12 pages).` */
+export function externalChangeText(files: number, after: Count, before?: Count): string {
+  const head = `CSS changed outside the editor (${files.toLocaleString("en-US")} file${files === 1 ? "" : "s"})`;
+  const count = (c: Count) => formatCount(c).replace(/^Up to/, "up to");
+  return before ? `${head}: now ${count(after)} affected (was ${count(before)}).` : `${head}: ${formatCount(after)} affected.`;
 }
 
 /** End-of-line text for one change. */
@@ -191,17 +202,57 @@ export function reasonText(r: string): string {
   }
 }
 
-/** Shown when the branch lacks newer commits of the deployed branch: they aren't counted as edits. */
-export function branchNote(branch: { mainRef: string; behind: number } | undefined): string | undefined {
+type Branch = { mainRef: string; behind: number; mainShown?: boolean };
+
+/** The deployed branch's name without the remote (`origin/main` → `main`). */
+export const mainName = (branch: Branch) => branch.mainRef.replace(/^[^/]+\//, "");
+
+/** Shown when the branch lacks newer commits of the deployed branch: are they counted? */
+export function branchNote(branch: Branch | undefined): string | undefined {
   if (!branch || branch.behind <= 0) return undefined;
-  const main = branch.mainRef.replace(/^[^/]+\//, "");
   const n = branch.behind.toLocaleString("en-US");
-  return `${main} has ${n} newer commit${branch.behind === 1 ? "" : "s"} not in your branch; only your branch's changes are counted.`;
+  const head = `${mainName(branch)} has ${n} newer commit${branch.behind === 1 ? "" : "s"} not in your branch`;
+  return branch.mainShown
+    ? `${head}; their changes are counted as if your branch undid them.`
+    : `${head}; only your branch's changes are counted.`;
 }
 
 export const DIFF_BASE_LABEL: Record<string, string> = {
-  HEAD: "last commit",
-  saved: "last save",
-  session: "when I opened VS Code",
+  HEAD: "the last commit",
+  saved: "the last save",
+  session: "when this window opened",
   production: "the live site",
 };
+
+/** The panel's tabs, broadest first: each compares your CSS with a different starting point. */
+export const TABS: Array<{ base: DiffBaseKind; name: string; tip: string }> = [
+  { base: "production", name: "All", tip: "Every CSS change the live site doesn't have yet: committed, uncommitted, unsaved or made by other tools." },
+  { base: "HEAD", name: "Uncommitted", tip: "Changes since your last commit, saved or not." },
+  { base: "session", name: "This session", tip: "Changes since this window opened (a reload starts over)." },
+  { base: "saved", name: "Unsaved", tip: "Typing you haven't saved yet." },
+];
+
+export const tabName = (base: string | undefined) => TABS.find((t) => t.base === base)?.name ?? "All";
+
+/** Without git there's no last commit: "Uncommitted" falls back to "This session". */
+export function effectiveBase(base: DiffBaseKind, git: boolean | undefined): DiffBaseKind {
+  return base === "HEAD" && git === false ? "session" : base;
+}
+
+/** The setting's tab (empty: the default, Uncommitted). */
+export function configuredBase(value: unknown): DiffBaseKind {
+  return TABS.some((t) => t.base === value) ? (value as DiffBaseKind) : "HEAD";
+}
+
+export function noChangesText(diffBase: string | undefined, branch: Branch | undefined): string {
+  switch (diffBase) {
+    case "HEAD":
+      return "No uncommitted CSS changes.";
+    case "session":
+      return "No CSS changes since this window opened.";
+    case "saved":
+      return "No unsaved CSS changes.";
+    default:
+      return branch && !branch.mainShown ? "Your branch has no CSS changes." : "No CSS changes compared with the live site.";
+  }
+}
