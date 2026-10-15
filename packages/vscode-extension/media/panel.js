@@ -51,17 +51,18 @@
     svg.setAttribute("viewBox", "0 0 12 12");
     svg.setAttribute("aria-hidden", "true");
     const path = document.createElementNS(SVG, "path");
-    path.setAttribute("d", "M9.5 9.5 2.5 2.5M2.5 2.5h5.5M2.5 2.5v5.5");
+    path.setAttribute("d", "M2.5 9.5 9.5 2.5M9.5 2.5h-5.5M9.5 2.5v5.5");
     svg.append(path);
     return svg;
   }
 
-  // The green ↖ at the end of an edit: opens its file at the change, to adjust it.
+  // The green ↗ at the end of an edit: opens its file at the change, to adjust it.
+  // Hovering it shows the edit's rule (the card), which says the same, so no tooltip.
   function goButton(path, id, text) {
     const node = el("button", text ? "go wide" : "go");
     node.append(arrow());
     if (text) node.append(document.createTextNode(text));
-    node.title = "Go to this rule in the file";
+    if (text) node.title = "Go to this rule in the file";
     node.setAttribute("aria-label", "Go to this rule in the file");
     node.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -103,7 +104,7 @@
   }
 
   // ----------------------------------------------------------- edit card
-  // Hovering an edit shows its whole rule: the declarations it changes in
+  // Hovering an edit's green button shows its whole rule: the declarations it changes in
   // green, the others gray, removed ones struck out. It stays open while the
   // pointer is on it, so its text can be selected and copied.
 
@@ -148,7 +149,7 @@
 
   function placeCard() {
     if (card.hidden || !cardAnchor) return;
-    const r = cardAnchor.getBoundingClientRect();
+    const r = (cardAnchor.querySelector(".go") || cardAnchor).getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
     const vh = document.documentElement.clientHeight;
     const below = vh - r.bottom - 10;
@@ -262,34 +263,37 @@
     }
   }
 
+  // Only the green button opens the card, so picking edits doesn't pop it up.
+  const goOf = (node) => node && node.closest ? node.closest(".edit > .go") : null;
   $("chips").addEventListener("mouseover", (e) => {
-    const item = e.target.closest(".edit");
-    if (!item) return;
+    const go = goOf(e.target);
+    if (!go) return;
+    const item = go.parentElement;
     clearTimeout(hideTimer);
     if (item.dataset.key === cardKey) return;
     clearTimeout(showTimer);
-    // Right away when moving from one edit to the next; after a pause otherwise.
-    showTimer = setTimeout(() => openCard(item), card.hidden ? 450 : 60);
+    // Right away when moving from one edit to the next; after a short pause otherwise.
+    showTimer = setTimeout(() => openCard(item), card.hidden ? 300 : 60);
   });
   $("chips").addEventListener("mouseout", (e) => {
-    const item = e.target.closest(".edit");
-    if (!item || item.contains(e.relatedTarget)) return;
+    const go = goOf(e.target);
+    if (!go || go.contains(e.relatedTarget)) return;
     clearTimeout(showTimer);
     if (!card.hidden) hideSoon();
   });
   $("chips").addEventListener("focusin", (e) => {
-    const item = e.target.closest(".edit");
-    if (item && e.target.matches(":focus-visible")) openCard(item);
+    const go = goOf(e.target);
+    if (go && e.target.matches(":focus-visible")) openCard(go.parentElement);
   });
   $("chips").addEventListener("focusout", (e) => {
-    if (!card.hidden && !card.contains(e.relatedTarget) && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".edit"))) hideSoon();
+    if (!card.hidden && !card.contains(e.relatedTarget) && !goOf(e.relatedTarget)) hideSoon();
   });
   card.addEventListener("mouseenter", () => clearTimeout(hideTimer));
   card.addEventListener("mouseleave", hideSoon);
   card.addEventListener("focusout", (e) => { if (!card.contains(e.relatedTarget)) hideSoon(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !card.hidden) closeCard(); });
   document.addEventListener("mousedown", (e) => {
-    if (!card.hidden && !card.contains(e.target) && !e.target.closest(".edit")) closeCard();
+    if (!card.hidden && !card.contains(e.target) && !goOf(e.target)) closeCard();
   });
   document.addEventListener("scroll", (e) => { if (!card.hidden && !card.contains(e.target)) closeCard(); }, true);
   window.addEventListener("resize", placeCard);
