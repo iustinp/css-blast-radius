@@ -72,6 +72,8 @@
 
   function renderChips(chips, count, all) {
     const box = $("chips");
+    // Rebuilding the list would drop its scroll position: keep the clicked edit in place.
+    const top = box.scrollTop;
     edits.clear();
     const some = chips.some((f) => f.state !== "none");
     box.replaceChildren(toggle(`All edits · ${fmt(count.exact + count.possible + count.unknown)}`,
@@ -92,6 +94,7 @@
       }
       box.append(group);
     }
+    if (box.scrollTop !== top) box.scrollTop = top;
     // The card follows its edit through re-renders (picking, typing).
     if (cardKey === null) return;
     cardAnchor = [...box.querySelectorAll(".edit")].find((n) => n.dataset.key === cardKey) || null;
@@ -415,10 +418,22 @@
     btn.textContent = `Impact assessed: ${fmt(assessment.changed)} of ${plural(assessment.assessed, "page looks", "pages look")} different`;
   }
 
+  // The page list keeps its scroll position through redraws. When one makes it shorter for a moment
+  // (while typing, its loss notes come a little later), it scrolls back once the list is long again.
+  const listBox = $("list");
+  let listTop = 0; // where the user left it
+  let growBack = 0; // until when a shortened list goes back to listTop
+  let ownScroll = 0; // redraws whose scroll events aren't the user's
+  listBox.addEventListener("scroll", () => {
+    if (ownScroll) return;
+    listTop = listBox.scrollTop;
+    growBack = 0;
+  });
+
   function renderRows() {
     const list = $("pages");
     const visible = searchQuery ? (searchRows || []) : rows;
-    const before = list.scrollTop;
+    if (performance.now() > growBack) listTop = listBox.scrollTop;
     list.replaceChildren();
     for (const p of visible) {
       const row = el("div", `page ${p.set}`);
@@ -443,7 +458,10 @@
     if (!visible.length) list.append(el("div", "empty muted", searchQuery
       ? searchRows ? "No page matches that URL." : "Searching all affected pages…"
       : nonePicked ? "No edits picked. Click an edit above to see the pages it reaches." : "No affected pages yet."));
-    list.scrollTop = before;
+    ownScroll++;
+    listBox.scrollTop = listTop;
+    if (listBox.scrollTop < listTop - 1) growBack = performance.now() + 3000;
+    requestAnimationFrame(() => requestAnimationFrame(() => { ownScroll--; }));
     const remaining = searchQuery ? searchTotal - visible.length : total - visible.length;
     $("more").hidden = remaining <= 0;
     $("more").textContent = `Show more (${fmt(remaining)} left)`;
@@ -567,6 +585,7 @@
       detailSeq++;
     }
     rows.push(...m.result.pages);
+    for (const [url, labels] of Object.entries(m.losses || {})) losses[url] = [...new Set([...(losses[url] || []), ...labels])];
     renderChips(m.chips, m.allCount || count, m.all);
     if (!m.append && cardKey !== null) requestDetail(cardKey);
     renderSides();

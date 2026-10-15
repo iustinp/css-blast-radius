@@ -55,6 +55,8 @@ export class PagesPanel implements vscode.Disposable {
   private searchMatches: PagesResult["pages"] = [];
   private searchResult?: PagesResult;
   private lastChips: Chip[] = [];
+  /** Each edit's pages that lose a style ("path\nid" -> URLs), until the answers change: picking edits shows their notes at once. */
+  private lostPages = new Map<string, Set<string>>();
   /** The picked edits: the list, the impact assessment and the diff viewer follow them. */
   private picked: Picked = undefined;
   /** The server predates picking edits (it was started by an older version). */
@@ -150,6 +152,7 @@ export class PagesPanel implements vscode.Disposable {
       if (seq !== this.loadSeq) return [];
       this.answers = new Map(entries.filter((e): e is readonly [string, FileAnswer] => !!e));
       this.answersRevision = revision;
+      this.lostPages = new Map();
     }
     return session.files.map((f) => {
       const a = this.answers.get(f.file);
@@ -259,6 +262,8 @@ export class PagesPanel implements vscode.Disposable {
       const lost = picked.reduce((n, ch) => n + ch.lost, 0);
       const lostChanges = picked.filter((ch) => ch.lost).length;
       const ruleList = q.line !== undefined;
+      // The loss notes come with the list when known, so a pick redraws it once (no shorter list in between).
+      const known = this.knownLosses(res.pages, chips);
       void this.post({
         type: "pages", result: res, append: offset > 0, refresh,
         summary: formatCount(res.count), allCount: this.state.session?.total,
@@ -269,11 +274,12 @@ export class PagesPanel implements vscode.Disposable {
         single: !ruleList && one ? one.chip.label : undefined,
         baseLabel: DIFF_BASE_LABEL[this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production"] ?? "the live site",
         branchNote: branchNote(this.state.session?.branch),
+        losses: known.pages,
       });
       if (this.oldServer && this.picked && !single(this.picked, this.files)) {
         void this.post({ type: "error", message: "The CSS Blast Radius server running now is an older version: it shows all your edits, not just the picked ones. Stop it and reload the window to use the new one." });
       }
-      void this.annotateLosses(seq, res, chips);
+      if (known.missing) void this.annotateLosses(seq, res, chips);
       if (this.searchQuery) void this.search(this.searchQuery);
     } catch (err: any) {
       if (seq !== this.loadSeq || t !== this.target) return;
@@ -317,17 +323,30 @@ export class PagesPanel implements vscode.Disposable {
       this.searchMatches = matches;
       this.searchResult = lastResult;
       void this.post({ type: "searchResults", query: this.searchQuery, total: matches.length, pages: matches.slice(0, PAGE_SIZE) });
-      if (lastResult) void this.annotateLosses(loadSeq, { ...lastResult, pages: matches.slice(0, PAGE_SIZE) }, this.lastChips);
+      if (lastResult) void this.annotateLosses(loadSeq, { ...lastResult, pages: matches.slice(0, PAGE_SIZE) }, this.decorate(this.lastChips).chips);
     } catch (err: any) {
       if (seq === this.searchSeq) void this.post({ type: "error", message: `Couldn't search page URLs: ${err?.message ?? err}` });
     }
   }
 
+  /** The listed pages that lose a style, with the picked edits that make them (from lostPages); `missing`: some edits aren't looked up yet. */
+  private knownLosses(pages: PagesResult["pages"], chips: Chip[]): { pages: Record<string, string[]>; missing: boolean } {
+    const lossy = chips.flatMap((f) => f.changes.filter((ch) => ch.lost && ch.selected !== false)
+      .map((ch) => ({ urls: this.lostPages.get(`${f.path}\n${ch.id}`), label: ch.label })));
+    const out: Record<string, string[]> = {};
+    for (const p of pages) {
+      const labels = [...new Set(lossy.filter((e) => e.urls?.has(p.url)).map((e) => e.label))];
+      if (labels.length) out[p.url] = labels;
+    }
+    return { pages: out, missing: lossy.some((e) => !e.urls) };
+  }
+
+  /** Looks up the picked edits' lost pages not known yet, then sends the listed pages' loss notes. */
   private async annotateLosses(seq: number, result: PagesResult, chips: Chip[]): Promise<void> {
-    const visible = new Set(result.pages.map((p) => p.url));
-    if (!visible.size) return;
-    const labels = new Map<string, Set<string>>();
-    await Promise.all(chips.flatMap((f) => f.changes.filter((ch) => ch.lost && ch.selected !== false).map(async (ch) => {
+    if (!result.pages.length) return;
+    const cache = this.lostPages;
+    await Promise.all(chips.flatMap((f) => f.changes.filter((ch) => ch.lost && ch.selected !== false && !cache.has(`${f.path}\n${ch.id}`)).map(async (ch) => {
+      const urls = new Set<string>();
       let offset = 0;
       while (seq === this.loadSeq) {
         let page: PagesResult;
@@ -337,20 +356,17 @@ export class PagesPanel implements vscode.Disposable {
         } catch {
           return;
         }
-        if (seq !== this.loadSeq) return;
-        for (const item of page.pages) {
-          if (!visible.has(item.url)) continue;
-          if (!labels.has(item.url)) labels.set(item.url, new Set());
-          labels.get(item.url)!.add(ch.label);
-        }
+        for (const item of page.pages) urls.add(item.url);
         offset += page.pages.length;
-        if (!page.pages.length || offset >= page.total) break;
+        if (!page.pages.length || offset >= page.total) {
+          cache.set(`${f.path}\n${ch.id}`, urls);
+          return;
+        }
       }
     })));
-    if (seq === this.loadSeq && labels.size) void this.post({
-      type: "losses", editRevision: result.editRevision,
-      pages: Object.fromEntries([...labels].map(([url, names]) => [url, [...names]])),
-    });
+    if (seq !== this.loadSeq || cache !== this.lostPages) return;
+    const known = this.knownLosses(result.pages, chips);
+    if (Object.keys(known.pages).length) void this.post({ type: "losses", editRevision: result.editRevision, pages: known.pages });
   }
 
   /** The edit card: the edit's whole rule, the edited declarations marked. */
@@ -437,7 +453,7 @@ export class PagesPanel implements vscode.Disposable {
         if (m.query === this.searchQuery) {
           const pages = this.searchMatches.slice(m.offset, m.offset + PAGE_SIZE);
           void this.post({ type: "searchMore", query: m.query, pages });
-          if (this.searchResult) void this.annotateLosses(this.loadSeq, { ...this.searchResult, pages }, this.lastChips);
+          if (this.searchResult) void this.annotateLosses(this.loadSeq, { ...this.searchResult, pages }, this.decorate(this.lastChips).chips);
         }
         return;
       case "toggle": {
