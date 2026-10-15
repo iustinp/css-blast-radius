@@ -11,6 +11,9 @@ export interface Decl {
   prop: string;
   value: string;
   important: boolean;
+  /** Where it starts (1-based), relative to its top-level statement (StyleRule.chunkAt); not part of its identity. */
+  line?: number;
+  column?: number;
 }
 
 export interface Condition {
@@ -31,11 +34,15 @@ export interface StyleRule {
   /** condKey + selector: the identity used to pair rules across versions. */
   key: string;
   line: number;
+  /** Column of its selector (1-based); relative to chunkAt.column when the rule starts on its chunk's first line. */
+  column?: number;
   endLine: number;
   /** First and last lines of the enclosing at-rules and rules (what a partial apply keeps with the rule). */
   ctxLines: number[];
   /** Set when browsers would drop the rule (invalid selector). */
   invalid?: string;
+  /** Where its top-level statement starts in the text (1-based): declaration positions are relative to it. */
+  chunkAt?: { line: number; column: number };
   /** Usage keys found in declarations: var:--x, font:name, anim:name… */
   uses: string[];
   /** Custom properties declared by this rule. */
@@ -175,27 +182,39 @@ function substituteNesting(own: string, parent: string): string {
  * Splits CSS at top-level statement boundaries (end of a top-level block or
  * of a top-level `;` statement), skipping strings and comments.
  */
-export function splitTopLevel(text: string): Array<{ start: number; end: number; line: number }> {
-  const out: Array<{ start: number; end: number; line: number }> = [];
+export function splitTopLevel(text: string): Array<{ start: number; end: number; line: number; column: number }> {
+  const out: Array<{ start: number; end: number; line: number; column: number }> = [];
   let depth = 0;
   let start = 0;
   let line = 1;
+  let lineStart = 0;
   let startLine = 1;
+  let startColumn = 1;
   const n = text.length;
   for (let i = 0; i < n; i++) {
     const c = text.charCodeAt(i);
-    if (c === 10) line++;
-    else if (c === 47 && text.charCodeAt(i + 1) === 42) {
+    if (c === 10) {
+      line++;
+      lineStart = i + 1;
+    } else if (c === 47 && text.charCodeAt(i + 1) === 42) {
       const e = text.indexOf("*/", i + 2);
       const stop = e < 0 ? n : e + 2;
-      for (let k = i; k < stop; k++) if (text.charCodeAt(k) === 10) line++;
+      for (let k = i; k < stop; k++) {
+        if (text.charCodeAt(k) === 10) {
+          line++;
+          lineStart = k + 1;
+        }
+      }
       i = stop - 1;
     } else if (c === 34 || c === 39) {
       for (i++; i < n; i++) {
         const d = text.charCodeAt(i);
         if (d === 92) i++;
         else if (d === c || d === 10) {
-          if (d === 10) line++;
+          if (d === 10) {
+            line++;
+            lineStart = i + 1;
+          }
           break;
         }
       }
@@ -203,13 +222,14 @@ export function splitTopLevel(text: string): Array<{ start: number; end: number;
     else if (c === 125 || (c === 59 && depth === 0)) {
       if (c === 125) depth = Math.max(0, depth - 1);
       if (depth === 0) {
-        out.push({ start, end: i + 1, line: startLine });
+        out.push({ start, end: i + 1, line: startLine, column: startColumn });
         start = i + 1;
         startLine = line;
+        startColumn = start - lineStart + 1;
       }
     }
   }
-  if (start < n && text.slice(start).trim()) out.push({ start, end: n, line: startLine });
+  if (start < n && text.slice(start).trim()) out.push({ start, end: n, line: startLine, column: startColumn });
   return out;
 }
 
@@ -218,8 +238,9 @@ const chunkCache = new Map<string, StylesheetModel>();
 /** One top-level statement, parsed on its own. `part` may carry a parseError. */
 export interface Chunk {
   body: string;
-  /** 1-based line of the chunk's first character. */
+  /** 1-based line and column of the chunk's first character. */
   line: number;
+  column: number;
   part: StylesheetModel;
 }
 
@@ -233,7 +254,7 @@ export function parseChunks(text: string): Chunk[] {
       if (chunkCache.size > 100_000) chunkCache.clear();
       chunkCache.set(body, part);
     }
-    out.push({ body, line: c.line, part });
+    out.push({ body, line: c.line, column: c.column, part });
   }
   return out;
 }
@@ -250,13 +271,14 @@ export function assemble(chunks: Chunk[], text = chunks.map((c) => c.body).join(
     const part = chunk.part;
     // Line numbers inside a part are relative to the chunk's first character.
     const lineBase = chunk.line - 1;
+    const chunkAt = { line: chunk.line, column: chunk.column };
     if (part.parseError) {
       model.parseError ??= { message: part.parseError.message, line: (part.parseError.line ?? 1) + lineBase };
       continue;
     }
     for (const r of part.rules) {
       const index = model.rules.length;
-      model.rules.push({ ...r, index, line: r.line + lineBase, endLine: r.endLine + lineBase, ctxLines: r.ctxLines.map((l) => l + lineBase) });
+      model.rules.push({ ...r, index, line: r.line + lineBase, endLine: r.endLine + lineBase, ctxLines: r.ctxLines.map((l) => l + lineBase), chunkAt });
       for (const k of r.uses) {
         let list = model.usage.get(k);
         if (!list) model.usage.set(k, (list = []));
@@ -445,7 +467,10 @@ function parseChunk(text: string): StylesheetModel {
     for (const child of container.nodes ?? []) {
       if (child.type !== "decl") continue;
       const d = child as postcss.Declaration;
-      decls.push({ prop: d.prop.startsWith("--") ? d.prop : d.prop.toLowerCase(), value: norm(d.value), important: !!d.important });
+      decls.push({
+        prop: d.prop.startsWith("--") ? d.prop : d.prop.toLowerCase(), value: norm(d.value), important: !!d.important,
+        line: d.source?.start?.line, column: d.source?.start?.column,
+      });
     }
     if (decls.length === 0) return;
 
@@ -494,6 +519,7 @@ function parseChunk(text: string): StylesheetModel {
       layer: layerPath(container),
       key: `${condKey}|${selectorText}`,
       line: container.source?.start?.line ?? 0,
+      column: container.source?.start?.column,
       endLine: container.source?.end?.line ?? container.source?.start?.line ?? 0,
       ctxLines: ctxLinesOf(container),
       invalid,

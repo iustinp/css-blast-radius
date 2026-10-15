@@ -63,6 +63,8 @@ const events = {};
 const commands = new Map();
 const panels = [];
 const notices = [];
+const shown = []; // showTextDocument calls
+const clipboard = [];
 const outputs = [];
 const docs = [];
 const editors = [];
@@ -120,7 +122,8 @@ const vscode = {
     parse: (url) => ({ toString: () => url }),
     joinPath: (base, ...parts) => uri(path.join(base.fsPath, ...parts)),
   },
-  env: { openExternal: async () => true },
+  env: { openExternal: async () => true, clipboard: { writeText: async (text) => { clipboard.push(text); } } },
+  TextEditorRevealType: { InCenterIfOutsideViewport: 2 },
   workspace: {
     workspaceFolders: [{ uri: uri(workspace) }],
     get textDocuments() { return docs; },
@@ -138,10 +141,18 @@ const vscode = {
       },
     }),
     asRelativePath: (p) => path.relative(workspace, typeof p === "string" ? p : p.fsPath),
+    openTextDocument: async (u) => {
+      assert.equal(u.fsPath, file, "opened another file");
+      return doc;
+    },
   },
   window: {
     get activeTextEditor() { return activeEditor; },
     get visibleTextEditors() { return editors; },
+    showTextDocument: async (document, options) => {
+      shown.push({ document, options });
+      return { revealRange(range) { shown[shown.length - 1].revealed = range; } };
+    },
     onDidChangeVisibleTextEditors: events.visible.event,
     onDidChangeTextEditorSelection: events.selection.event,
     onDidChangeActiveTextEditor: events.active.event,
@@ -202,7 +213,7 @@ function makeDoc(text) {
     uri: uri(file), languageId: "css", isDirty: false,
     getText: () => lines.join("\n"),
     get lineCount() { return lines.length; },
-    lineAt: (n) => ({ range: { end: new Position(n, lines[n].length) }, text: lines[n] }),
+    lineAt: (n) => ({ range: { end: new Position(n, lines[n].length) }, text: lines[n], firstNonWhitespaceCharacterIndex: lines[n].search(/\S|$/) }),
     find: (needle) => {
       const i = lines.findIndex((line) => typeof needle === "string" ? line.includes(needle) : needle.test(line));
       assert(i >= 0, `can't find ${needle}`);
@@ -221,7 +232,7 @@ function makeDoc(text) {
 
 const doc = makeDoc(original);
 const editor = {
-  document: doc, selections: [{ active: new Position(0, 0) }], decorations: { normal: [], attention: [] },
+  document: doc, viewColumn: 1, selections: [{ active: new Position(0, 0) }], decorations: { normal: [], attention: [] },
   get selection() { return editor.selections[0]; },
   setDecorations(type, value) { editor.decorations[type.name] = value; },
   select(pos) { editor.selections = [{ active: pos }]; events.selection.fire({ textEditor: editor }); },
@@ -353,6 +364,28 @@ async function run() {
       assert.deepEqual(data.result.pages.map((x) => x.url).sort(), ["/about.html", "/index.html"]);
       assert(data.result.pages.every((x) => x.groups.includes("Home & About")), "page group names missing from rows");
       assert(data.chips.some((chip) => chip.path === file && chip.changes.length), "no file/change chips");
+    });
+    await check("edit card: the whole rule, the typed declaration in green; Go to rule and Copy", async () => {
+      const p = pagesPanel();
+      const ch = lastPages(p).chips.find((c) => c.path === file).changes[0];
+      assert.equal(ch.label, ".btn");
+      const mark = p.posted.length;
+      p.webview.receive({ type: "rule", path: file, changeId: ch.id, seq: 7 });
+      const reply = await waitFor(() => lastOf(p, "rule", mark), "edit card");
+      assert.equal(reply.seq, 7);
+      assert(reply.detail, `no rule: ${reply.error}`);
+      assert.deepEqual(reply.detail.rule.decls.map((d) => `${d.state} ${d.text}`),
+        ["same color: blue", "same padding: 8px 16px", "changed outline: 2px solid red"]);
+      const at = doc.find("outline");
+      assert.deepEqual([reply.detail.line, reply.detail.column], [at.line + 1, at.character + 1]);
+      p.webview.receive({ type: "goto", path: file, changeId: ch.id });
+      const go = await waitFor(() => shown[0], "editor opened at the edit");
+      assert.equal(go.document, doc);
+      assert.deepEqual([go.options.selection.start.line, go.options.selection.start.character], [at.line, at.character]);
+      assert.equal(go.options.viewColumn, 1, "should open where the CSS is edited, not over the panel");
+      assert(go.revealed, "the whole rule should be brought into view");
+      p.webview.receive({ type: "copy", text: ".btn { outline: 2px solid red; }" });
+      await waitFor(() => clipboard.length === 1, "copied rule");
     });
     await check("assess: button checks every listed page and the list comes back ranked", async () => {
       const p = pagesPanel();

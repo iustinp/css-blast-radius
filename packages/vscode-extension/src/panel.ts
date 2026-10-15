@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
 import { DIFF_BASE_LABEL, TABS, branchNote, effectiveBase, formatCount, mainName } from "./format";
-import { ERR, type AssessProgress, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
+import { ERR, type AssessProgress, type ChangeDetail, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
 import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "./selection";
@@ -23,12 +23,15 @@ type FromWebview =
   | { type: "assess" }
   | { type: "tab"; base: DiffBaseKind }
   | { type: "mainChanges"; show: boolean }
+  | { type: "rule"; path: string; changeId: string; seq: number }
+  | { type: "goto"; path: string; changeId: string }
+  | { type: "copy"; text: string }
   | { type: "page"; url: string };
 
 interface Chip {
   path: string;
   label: string;
-  changes: Array<{ id: string; label: string; count: string; lost: number; sides: Side[]; selected?: boolean }>;
+  changes: Array<{ id: string; label: string; count: string; lost: number; sides: Side[]; line: number; props?: string[]; selected?: boolean }>;
   count: string;
   changed: number;
   state?: "all" | "some" | "none";
@@ -161,6 +164,8 @@ export class PagesPanel implements vscode.Disposable {
           count: formatCount(ch.pages, ch.reasons),
           lost: (ch.lost ?? (ch.kind === "removed" ? ch.pages : undefined))?.exact ?? 0,
           sides: ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])],
+          line: ch.line,
+          props: ch.changedProps,
         })),
       };
     });
@@ -348,6 +353,57 @@ export class PagesPanel implements vscode.Disposable {
     });
   }
 
+  /** The edit card: the edit's whole rule, the edited declarations marked. */
+  private async rule(file: string, changeId: string, seq: number): Promise<void> {
+    try {
+      const detail = await this.client.call<ChangeDetail>("analysis/getChange", { path: file, changeId });
+      void this.post({ type: "rule", path: file, changeId, seq, detail });
+    } catch (err: any) {
+      const code = err instanceof RpcCallError ? err.code : undefined;
+      void this.post({
+        type: "rule", path: file, changeId, seq,
+        error: code === ERR.methodNotFound
+          ? "The CSS Blast Radius server running now is an older version: stop it and reload the window to see the whole rule here."
+          : code === ERR.superseded ? "This edit just changed: the list is updating." : `Couldn't read the rule: ${err?.message ?? err}`,
+      });
+    }
+  }
+
+  /** Opens the edit's file at the changed declaration (or the rule), to adjust it. */
+  private async goto(file: string, changeId: string): Promise<void> {
+    const chip = this.lastChips.find((c) => c.path === file)?.changes.find((ch) => ch.id === changeId);
+    let at: { line: number; column?: number; rule?: { line: number; endLine: number } } = { line: chip?.line ?? 1 };
+    try {
+      const d = await this.client.call<ChangeDetail>("analysis/getChange", { path: file, changeId });
+      at = { line: d.line, column: d.column, rule: d.rule && !d.rule.removed ? d.rule : undefined };
+    } catch {
+      // An older server, or the edit just changed: the line the list has.
+    }
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+      const line = Math.min(Math.max(at.line, 1), doc.lineCount) - 1;
+      const text = doc.lineAt(line);
+      const pos = new vscode.Position(line, at.column ? Math.min(at.column - 1, text.text.length) : text.firstNonWhitespaceCharacterIndex);
+      const editor = await vscode.window.showTextDocument(doc, { viewColumn: this.editorColumn(doc), selection: new vscode.Range(pos, pos) });
+      // The whole rule in view when it fits.
+      if (at.rule && at.rule.endLine - at.rule.line < 40) {
+        editor.revealRange(new vscode.Range(at.rule.line - 1, 0, at.rule.endLine - 1, 0), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      }
+    } catch (err: any) {
+      void vscode.window.showErrorMessage(`CSS Blast Radius: couldn't open ${vscode.workspace.asRelativePath(file)}: ${err?.message ?? err}`);
+    }
+  }
+
+  /** Where the file shows: its editor if visible, else an editor group other than the panel's. */
+  private editorColumn(doc: vscode.TextDocument): vscode.ViewColumn {
+    const editors = vscode.window.visibleTextEditors;
+    const shown = editors.find((e) => e.document.uri.toString() === doc.uri.toString() && e.viewColumn);
+    if (shown?.viewColumn) return shown.viewColumn;
+    const other = editors.find((e) => e.viewColumn && e.viewColumn !== this.panel.viewColumn);
+    if (other?.viewColumn) return other.viewColumn;
+    return this.panel.viewColumn === vscode.ViewColumn.One ? vscode.ViewColumn.Beside : vscode.ViewColumn.One;
+  }
+
   /** Checks every page of the current list visually, in the background (analysis/assess). */
   private async assess(): Promise<void> {
     const t = this.target;
@@ -399,6 +455,13 @@ export class PagesPanel implements vscode.Disposable {
       case "page":
         if (m.url.startsWith("/") && !m.url.startsWith("//")) DiffTab.open(this.life, m.url);
         return;
+      case "rule":
+        return this.rule(m.path, m.changeId, m.seq);
+      case "goto":
+        return this.goto(m.path, m.changeId);
+      case "copy":
+        await vscode.env.clipboard.writeText(String(m.text));
+        return;
       case "tab":
       case "mainChanges":
         await vscode.commands.executeCommand("cssBlastRadius.setDiffBase",
@@ -431,6 +494,7 @@ export class PagesPanel implements vscode.Disposable {
   <div id="warning" class="warning"></div>
 </section>
 <nav id="chips"></nav>
+<div id="card" role="dialog" aria-label="The edit's rule" hidden></div>
 <div id="toolbar">
   <div id="sides"></div><div id="sets"></div>
   <select id="group" aria-label="Page group"></select>

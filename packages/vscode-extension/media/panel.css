@@ -47,6 +47,38 @@ button {
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 button.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 button.partial { border: 1px dashed var(--vscode-button-background); }
+.edit { display: inline-flex; align-items: stretch; max-width: 100%; }
+.edit > button:first-child { border-radius: 10px 0 0 10px; min-width: 0; }
+button.go {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: none;
+  padding: 0 7px 0 6px; border: 1px solid #238636; border-radius: 0 10px 10px 0;
+  color: #fff; background: #238636;
+}
+button.go:hover { background: #2ea043; border-color: #2ea043; }
+button.go svg { width: 10px; height: 10px; fill: none; stroke: #fff; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+button.go.wide { border-radius: 3px; padding: 2px 8px; }
+#card {
+  position: fixed; z-index: 10; min-width: min(320px, calc(100vw - 16px)); overflow: auto; padding: 8px 10px;
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+  border-radius: 4px; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, .35));
+  user-select: text;
+}
+#card[hidden] { display: none; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.card-where { font-size: 11px; overflow-wrap: anywhere; }
+.card-actions { display: flex; gap: 4px; flex: none; }
+.card-actions button { border-radius: 3px; padding: 2px 8px; }
+.card-note { font-size: 12px; margin-bottom: 6px; }
+.card-code { font: 12px/1.5 var(--vscode-editor-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
+.card-code .ln { padding: 0 4px; border-radius: 2px; }
+#card .changed { color: var(--vscode-gitDecoration-addedResourceForeground, #3fb950); }
+.card-code .ln.changed { background: color-mix(in srgb, #2ea043 14%, transparent); }
+#card .same { color: var(--vscode-disabledForeground, #8b8b8b); }
+#card .removed { color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149); }
+.card-code .ln.removed { text-decoration: line-through; }
+.was { margin-left: 12px; font-size: 11px; color: var(--vscode-descriptionForeground); user-select: none; }
 #toolbar { display: flex; flex-direction: column; gap: 7px; padding: 0 16px 8px; }
 #sides, #sets { display: flex; flex-wrap: wrap; gap: 4px; }
 #sides:empty { display: none; }

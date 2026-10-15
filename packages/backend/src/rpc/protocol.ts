@@ -7,9 +7,13 @@ import type { Count, FileAnswer, RuleCount } from "../engine/contract.js";
 import type { PageDiff } from "../l2/render.js";
 import type { DiffBaseKind } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
+import type { ChangeKind } from "../css/diff.js";
+import type { ChangeDescription } from "../css/describe.js";
+
+export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 3;
+export const PROTOCOL_MINOR = 4;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -189,6 +193,20 @@ export interface SetSelectionParams {
 
 export interface SetSelectionResult {
   selectionRevision: number;
+}
+
+/** analysis/getChange: one edit of a file (`changeId` from its FileAnswer). */
+export interface ChangeDetailParams {
+  path: string;
+  changeId: string;
+}
+
+/** The edit's rule, every declaration in file order, and where to adjust it. */
+export interface ChangeDetail extends ChangeDescription {
+  editRevision: number;
+  path: string;
+  id: string;
+  kind: ChangeKind;
 }
 
 export interface GetPagesParams {

@@ -101,6 +101,16 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
     expect(declChange!.selector).toBe(".btn");
     expect(declChange!.pages.exact).toBe(2);
     expect(declChange!.pages.complete).toBe(true);
+
+    // The edit card: the whole rule, the edited declaration marked, and where it is.
+    const line = edited.split("\n").findIndex((l) => l.includes("padding: 24px 48px")) + 1;
+    const detail = session.changeDetail(mainCssPath, declChange!.id);
+    expect(detail).toMatchObject({ kind: "declarations", line, column: 3, rule: { selector: ".btn", removed: false } });
+    expect(detail.rule!.decls).toEqual([
+      { text: "color: blue", state: "same", line: line - 1, column: 3 },
+      { text: "padding: 24px 48px", state: "changed", was: "8px 16px", line, column: 3 },
+    ]);
+    expect(() => session.changeDetail(mainCssPath, "gone")).toThrow(expect.objectContaining({ code: ERR.superseded }));
   });
 
   // c. Selector rename

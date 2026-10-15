@@ -11,6 +11,7 @@ import fg from "fast-glob";
 import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
 import { appliedFilter, changeIds, diffModels, type CssChange } from "../css/diff.js";
+import { describeChange } from "../css/describe.js";
 import { partialText } from "../css/partial.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
 import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0.js";
@@ -30,6 +31,7 @@ import {
   type AssessParams,
   type AssessProgress,
   type CaptureParams,
+  type ChangeDetail,
   type DocResult,
   type DrilldownParams,
   type DrilldownResult,
@@ -712,6 +714,16 @@ export class Session extends EventEmitter {
 
   fileAnswer(path: string): FileAnswer {
     return this.resultFor(this.requireFile(path)).answer;
+  }
+
+  /** One edit's rule (every declaration, the edited ones marked) and where to adjust it. */
+  changeDetail(path: string, changeId: string): ChangeDetail {
+    const f = this.requireFile(path);
+    const r = this.resultFor(f);
+    const i = r.answer.changes.findIndex((c) => c.id === changeId);
+    if (i < 0) throw new RpcError(ERR.superseded, `change ${changeId} no longer exists`, { editRevision: f.editRevision });
+    const c = r.changes[i];
+    return { editRevision: f.editRevision, path: f.path, id: changeId, kind: c.kind, ...describeChange(c) };
   }
 
   ruleCounts(path: string): RulesResult {

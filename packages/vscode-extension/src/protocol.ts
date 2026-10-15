@@ -55,6 +55,29 @@ export interface ChangeAnswer {
   detail?: string;
 }
 
+/** analysis/getChange: one edit's rule, every declaration in file order (newer servers). */
+export interface ChangeDetail {
+  editRevision: number;
+  path: string;
+  id: string;
+  kind: ChangeKind;
+  /** Where to adjust it (1-based): the first changed declaration, else the rule. */
+  line: number;
+  column?: number;
+  rule?: {
+    selector: string;
+    oldSelector?: string;
+    conditions: string[];
+    oldConditions?: string[];
+    removed: boolean;
+    decls: Array<{ text: string; state: "changed" | "same" | "removed"; was?: string; line?: number; column?: number }>;
+    line: number;
+    endLine: number;
+  };
+  /** Edits outside style rules: @font-face, @keyframes, layer order… */
+  summary?: string;
+}
+
 export interface RuleCount {
   line: number;
   endLine: number;

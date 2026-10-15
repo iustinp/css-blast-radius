@@ -767,6 +767,7 @@ migrated or refused, never read silently.
 | `document/open`, `document/change`, `document/save`, `document/close` | — | Editor events. `change` carries incremental ranges (full text for small files) and returns the L0 answer |
 | `analysis/queryImpacts` | 0 | Counts for a rule, a file or the session |
 | `analysis/getPages` | 1 | Paginated page list, with progress; ranked by visual impact once assessed |
+| `analysis/getChange` | — | One edit's whole rule for the panel's edit card: its declarations in file order, each marked part of the edit, unchanged or removed (with the old value), and the line and column to jump to (protocol minor 4) |
 | `analysis/assess` | 2 | Check every page of a list visually in the background ("Assess impact"); progress via `analysis/assessProgress` |
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |

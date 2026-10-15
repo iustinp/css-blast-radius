@@ -24,6 +24,7 @@
   let nonePicked = false;
   let sides; // the one picked edit's sides, when it has more than one
   let single; // the one picked edit's label
+  const edits = new Map(); // "path\nid" -> { path, id, label, props, file, line }
 
   function load(offset) {
     vscode.postMessage({ type: "load", ...filters, offset, editRevision });
@@ -44,8 +45,34 @@
     return node;
   }
 
+  const SVG = "http://www.w3.org/2000/svg";
+  function arrow() {
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("viewBox", "0 0 12 12");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(SVG, "path");
+    path.setAttribute("d", "M9.5 9.5 2.5 2.5M2.5 2.5h5.5M2.5 2.5v5.5");
+    svg.append(path);
+    return svg;
+  }
+
+  // The green ↖ at the end of an edit: opens its file at the change, to adjust it.
+  function goButton(path, id, text) {
+    const node = el("button", text ? "go wide" : "go");
+    node.append(arrow());
+    if (text) node.append(document.createTextNode(text));
+    node.title = "Go to this rule in the file";
+    node.setAttribute("aria-label", "Go to this rule in the file");
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: "goto", path, changeId: id });
+    });
+    return node;
+  }
+
   function renderChips(chips, count, all) {
     const box = $("chips");
+    edits.clear();
     const some = chips.some((f) => f.state !== "none");
     box.replaceChildren(toggle(`All edits · ${fmt(count.exact + count.possible + count.unknown)}`,
       all ? "all" : some ? "some" : "none", {}, all ? "Click to unpick every edit" : "Click to pick every edit"));
@@ -56,12 +83,213 @@
         file.state === "all" ? "Click to unpick this file's edits" : "Click to pick all of this file's edits"));
       for (const ch of file.changes) {
         const label = `${ch.label} · ${ch.count}${ch.lost ? ` · ${fmt(ch.lost)} lose this style ⚠` : ""}`;
-        group.append(toggle(label, ch.selected ? "all" : "none", { path: file.path, changeId: ch.id },
-          ch.selected ? "Click to unpick this edit" : "Click to pick this edit"));
+        const item = el("span", "edit");
+        item.dataset.key = `${file.path}\n${ch.id}`;
+        edits.set(item.dataset.key, { path: file.path, id: ch.id, label: ch.label, props: ch.props, file: file.label, line: ch.line });
+        item.append(toggle(label, ch.selected ? "all" : "none", { path: file.path, changeId: ch.id },
+          ch.selected ? "Click to unpick this edit" : "Click to pick this edit"), goButton(file.path, ch.id));
+        group.append(item);
       }
       box.append(group);
     }
+    // The card follows its edit through re-renders (picking, typing).
+    if (cardKey === null) return;
+    cardAnchor = [...box.querySelectorAll(".edit")].find((n) => n.dataset.key === cardKey) || null;
+    if (!cardAnchor) closeCard();
+    else placeCard();
   }
+
+  // ----------------------------------------------------------- edit card
+  // Hovering an edit shows its whole rule: the declarations it changes in
+  // green, the others gray, removed ones struck out. It stays open while the
+  // pointer is on it, so its text can be selected and copied.
+
+  const card = $("card");
+  const details = new Map(); // "path\nid" -> the host's reply
+  let cardKey = null;
+  let cardAnchor = null;
+  let detailSeq = 0;
+  let showTimer;
+  let hideTimer;
+
+  function requestDetail(key) {
+    const e = edits.get(key);
+    if (e) vscode.postMessage({ type: "rule", path: e.path, changeId: e.id, seq: detailSeq });
+  }
+
+  function openCard(item) {
+    // The list re-rendered while waiting to open: that chip is gone.
+    if (!item.isConnected || !edits.has(item.dataset.key)) return;
+    clearTimeout(hideTimer);
+    cardKey = item.dataset.key;
+    cardAnchor = item;
+    if (!details.has(cardKey)) requestDetail(cardKey);
+    renderCard();
+    if (cardKey === null) return;
+    card.hidden = false;
+    placeCard();
+  }
+
+  function closeCard() {
+    clearTimeout(showTimer);
+    clearTimeout(hideTimer);
+    cardKey = null;
+    cardAnchor = null;
+    card.hidden = true;
+  }
+
+  function hideSoon() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(closeCard, 250);
+  }
+
+  function placeCard() {
+    if (card.hidden || !cardAnchor) return;
+    const r = cardAnchor.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const below = vh - r.bottom - 10;
+    const above = r.top - 10;
+    card.style.setProperty("max-width", `${Math.max(200, Math.min(560, vw - 16))}px`);
+    card.style.setProperty("max-height", `${Math.max(120, Math.max(below, above))}px`);
+    const w = card.offsetWidth;
+    const h = card.offsetHeight;
+    const top = h <= below || below >= above ? r.bottom + 4 : r.top - 4 - h;
+    card.style.setProperty("left", `${Math.max(8, Math.min(r.left, vw - w - 8))}px`);
+    card.style.setProperty("top", `${Math.max(4, top)}px`);
+  }
+
+  // The rule as CSS: what Copy puts on the clipboard (a removed rule as it was).
+  function cssText(r) {
+    const lines = [];
+    let ind = "";
+    for (const c of r.conditions) {
+      lines.push(`${ind}${c} {`);
+      ind += "  ";
+    }
+    lines.push(`${ind}${r.selector} {`);
+    for (const x of r.decls) if (r.removed || x.state !== "removed") lines.push(`${ind}  ${x.text};`);
+    lines.push(`${ind}}`);
+    for (let i = 0; i < r.conditions.length; i++) {
+      ind = ind.slice(2);
+      lines.push(`${ind}}`);
+    }
+    return lines.join("\n");
+  }
+
+  function cardNote(d) {
+    const r = d.rule;
+    if (!r) return el("div", "card-note", d.summary || "");
+    if (r.removed) return el("div", "card-note", "Rule removed: none of it applies any more.");
+    const whole = {
+      added: "New rule: all of it is part of the edit.",
+      selector: "New selector: every declaration now reaches other elements.",
+      condition: "New conditions: every declaration applies in other situations.",
+      moved: "Rule moved: it now comes before or after other rules.",
+    }[d.kind];
+    if (whole) return el("div", "card-note", whole);
+    const note = el("div", "card-note");
+    const parts = [["changed", "changed"], ["removed", "removed"], ["same", "unchanged"]]
+      .map(([state, word]) => [state, r.decls.filter((x) => x.state === state).length, word])
+      .filter(([, n]) => n > 0);
+    parts.forEach(([state, n, word], i) => {
+      if (i) note.append(document.createTextNode(" · "));
+      note.append(el("span", state, `${fmt(n)} ${word}`));
+    });
+    return note;
+  }
+
+  function cardCode(d) {
+    const r = d.rule;
+    const box = el("div", "card-code");
+    let ind = "";
+    const line = (text, cls, was) => {
+      const node = el("div", `ln ${cls}`, ind + text);
+      if (was !== undefined) node.append(el("span", "was", `was ${was}`));
+      box.append(node);
+    };
+    const whole = d.kind !== "declarations";
+    if (r.oldConditions) line(r.oldConditions.join(" › ") || "(no @media or other conditions)", "removed");
+    for (const c of r.conditions) {
+      line(`${c} {`, r.removed ? "removed" : r.oldConditions || d.kind === "added" ? "changed" : "ctx");
+      ind += "  ";
+    }
+    if (r.oldSelector) line(r.oldSelector, "removed");
+    line(`${r.selector} {`, r.removed ? "removed" : whole ? "changed" : "ctx");
+    for (const x of r.decls) line(`  ${x.text};`, x.state, x.was);
+    line("}", r.removed ? "removed" : "ctx");
+    for (let i = 0; i < r.conditions.length; i++) {
+      ind = ind.slice(2);
+      line("}", r.removed ? "removed" : "ctx");
+    }
+    return box;
+  }
+
+  function renderCard() {
+    const e = edits.get(cardKey);
+    if (!e) return closeCard();
+    const m = details.get(cardKey);
+    const d = m && m.detail;
+    card.replaceChildren();
+    const head = el("div", "card-head");
+    head.append(el("div", "card-where muted", `${e.file} · line ${fmt(d ? d.line : e.line)}`));
+    const actions = el("div", "card-actions");
+    if (d && d.rule) {
+      const copy = el("button", "", "Copy");
+      copy.title = d.rule.removed ? "Copy the rule as it was" : "Copy the rule";
+      copy.addEventListener("click", () => {
+        vscode.postMessage({ type: "copy", text: cssText(d.rule) });
+        copy.textContent = "Copied";
+        setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+      });
+      actions.append(copy);
+    }
+    actions.append(goButton(e.path, e.id, "Go to rule"));
+    head.append(actions);
+    card.append(head);
+    if (!m) {
+      card.append(el("div", "card-note muted", "Reading the rule…"));
+    } else if (m.error) {
+      // An older server: what the list knows.
+      card.append(el("div", "card-code", e.props && e.props.length ? `${e.label}\n  changed: ${e.props.join(", ")}` : e.label));
+      card.append(el("div", "card-note warning", m.error));
+    } else {
+      card.append(cardNote(d));
+      if (d.rule) card.append(cardCode(d));
+    }
+  }
+
+  $("chips").addEventListener("mouseover", (e) => {
+    const item = e.target.closest(".edit");
+    if (!item) return;
+    clearTimeout(hideTimer);
+    if (item.dataset.key === cardKey) return;
+    clearTimeout(showTimer);
+    // Right away when moving from one edit to the next; after a pause otherwise.
+    showTimer = setTimeout(() => openCard(item), card.hidden ? 450 : 60);
+  });
+  $("chips").addEventListener("mouseout", (e) => {
+    const item = e.target.closest(".edit");
+    if (!item || item.contains(e.relatedTarget)) return;
+    clearTimeout(showTimer);
+    if (!card.hidden) hideSoon();
+  });
+  $("chips").addEventListener("focusin", (e) => {
+    const item = e.target.closest(".edit");
+    if (item && e.target.matches(":focus-visible")) openCard(item);
+  });
+  $("chips").addEventListener("focusout", (e) => {
+    if (!card.hidden && !card.contains(e.relatedTarget) && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(".edit"))) hideSoon();
+  });
+  card.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+  card.addEventListener("mouseleave", hideSoon);
+  card.addEventListener("focusout", (e) => { if (!card.contains(e.relatedTarget)) hideSoon(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !card.hidden) closeCard(); });
+  document.addEventListener("mousedown", (e) => {
+    if (!card.hidden && !card.contains(e.target) && !e.target.closest(".edit")) closeCard();
+  });
+  document.addEventListener("scroll", (e) => { if (!card.hidden && !card.contains(e.target)) closeCard(); }, true);
+  window.addEventListener("resize", placeCard);
 
   let tabsMsg = null;
 
@@ -258,6 +486,16 @@
       $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
       return;
     }
+    if (m.type === "rule") {
+      if (m.seq !== detailSeq) return; // asked before the last edit
+      const key = `${m.path}\n${m.changeId}`;
+      details.set(key, m);
+      if (key === cardKey) {
+        renderCard();
+        placeCard();
+      }
+      return;
+    }
     if (m.type === "tabs") {
       tabsMsg = m;
       renderTabs(m.base);
@@ -324,9 +562,13 @@
     if (!m.append) {
       rows = [];
       losses = {};
+      // The edits may have changed: cards ask again (the open one keeps showing until the answer).
+      details.clear();
+      detailSeq++;
     }
     rows.push(...m.result.pages);
     renderChips(m.chips, m.allCount || count, m.all);
+    if (!m.append && cardKey !== null) requestDetail(cardKey);
     renderSides();
     renderSets(count);
     renderGroups(m.result.groups);
