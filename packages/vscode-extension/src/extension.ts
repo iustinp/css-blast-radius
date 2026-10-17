@@ -8,7 +8,7 @@ import { DocumentSync, isCssDocument } from "./documentSync";
 import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
 import { ExternalNoticeBatch } from "./externalNotice";
-import { changeAtCursor, configuredBase, effectiveBase, externalChangeText, TABS } from "./format";
+import { changeAtCursor, configuredBase, editSides, effectiveBase, externalChangeText, TABS } from "./format";
 import { PagesPanel } from "./panel";
 import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
 import { ImpactState } from "./state";
@@ -219,8 +219,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     const rules = a && r?.editRevision === a.editRevision && r.indexRevision === a.indexRevision ? r.rules : [];
     const ch = a && changeAtCursor(a.changes, rules, ed.selection.active.line + 1);
     if (!ch) return { title: "All edits" };
-    const sides: PagesTarget["sides"] = ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])];
-    return { path: file, changeId: ch.id, sides, title: ch.selector || `Edit on line ${ch.line}` };
+    const sides = editSides(ch);
+    return { path: file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined, title: ch.selector || `Edit on line ${ch.line}` };
   };
 
   ctx.subscriptions.push(

@@ -12,6 +12,7 @@ import {
   tabName,
   branchNote,
   changeAtCursor,
+  editSides,
   formatCount,
   formatAge,
   ghostText,
@@ -319,7 +320,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     if (ch.definition) md.appendMarkdown(`${ch.definition.kind} \`${ch.definition.name}\` ${ch.definition.change}\n\n`);
     if (ch.changedProps?.length) md.appendMarkdown(`Properties: ${ch.changedProps.map((p) => `\`${p}\``).join(", ")}\n\n`);
     md.appendMarkdown(`**${formatCount(ch.pages, ch.reasons)}** affected\n\n`);
-    if (ch.gained && ch.lost) md.appendMarkdown(`Starts reaching: ${countLine(ch.gained)}  \nStops reaching: ${countLine(ch.lost)}\n\n`);
+    if (ch.gained && ch.lost) md.appendMarkdown(`Pages that gain the rule: ${countLine(ch.gained)}  \nPages that lose it: ${countLine(ch.lost)}\n\n`);
     else if (ch.kind === "removed" && ch.lost) md.appendMarkdown(`Pages that lose the rule: ${countLine(ch.lost)}\n\n`);
     if (ch.conditions.length) md.appendMarkdown(`Conditions: ${ch.conditions.map((c) => `\`${c}\``).join(", ")}\n\n`);
     for (const r of ch.reasons) md.appendMarkdown(`- ${reasonText(r)}\n`);
@@ -327,11 +328,11 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     if (ch.detail) md.appendMarkdown(`\n${ch.detail}\n`);
     md.appendMarkdown(`\n\n_Open a page to see what actually changes._\n\n`);
     md.appendMarkdown(this.footer(a));
-    const sides: PagesTarget["sides"] = ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])];
+    const sides = editSides(ch);
     const base = { path: a.file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined };
     const links = [commandLink("Show pages", "cssBlastRadius.showPages", { ...base, title: ch.selector ?? label } satisfies PagesTarget)];
-    if (ch.gained && !isZero(ch.gained)) links.push(commandLink("gained", "cssBlastRadius.showPages", { ...base, side: "gained", title: ch.selector ?? label } satisfies PagesTarget));
-    if (ch.lost && !isZero(ch.lost)) links.push(commandLink("lost", "cssBlastRadius.showPages", { ...base, side: "lost", title: ch.selector ?? label } satisfies PagesTarget));
+    if (sides.includes("gained") && !isZero(ch.gained!)) links.push(commandLink("pages that gain it", "cssBlastRadius.showPages", { ...base, side: "gained", title: ch.selector ?? label } satisfies PagesTarget));
+    if (sides.includes("lost") && !isZero(ch.lost!)) links.push(commandLink("pages that lose it", "cssBlastRadius.showPages", { ...base, side: "lost", title: ch.selector ?? label } satisfies PagesTarget));
     links.push(commandLink("Show all affected pages", "cssBlastRadius.showAllPages", {}));
     md.appendMarkdown(`\n\n${links.join(" · ")} · ${process.platform === "darwin" ? "⌥B" : "Alt+B"}`);
   }

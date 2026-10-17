@@ -22,7 +22,7 @@
   let assessment = null; // the list's PagesResult.assessment
   let assessing = null; // { done, total } while an assessment runs
   let nonePicked = false;
-  let sides; // the one picked edit's sides, when it has more than one
+  let sides; // the one picked edit's page lists ({side, count}), when it has more than one
   let single; // the one picked edit's label
   const edits = new Map(); // "path\nid" -> { path, id, label, props, file, line }
 
@@ -336,12 +336,21 @@
     const box = $("sides");
     box.replaceChildren();
     if (!sides || sides.length < 2) return;
-    const label = { pages: "Reaches now", gained: "Starts reaching", lost: "Stops reaching" };
-    for (const side of sides) {
-      box.append(button(label[side], (filters.side || "pages") === side, () => {
+    // Only a changed selector has these: it can start or stop matching on a page.
+    const label = { pages: "All affected", gained: "Gain the rule", lost: "Lose the rule" };
+    const tip = {
+      pages: "Every page this edit touches: where the old selector matched, where the new one matches, or both. "
+        + "Pages matched both before and after are only in this list: there the rule may now style other elements.",
+      gained: "Pages where only the new selector matches: the rule's styles now show up on them, where they didn't before.",
+      lost: "Pages where only the old selector matched: the rule's styles disappear from them.",
+    };
+    for (const { side, count } of sides) {
+      const node = button(`${label[side]} · ${count}`, (filters.side || "pages") === side, () => {
         filters = { set: "all", side: side === "pages" ? undefined : side };
         load(0);
-      }));
+      });
+      node.title = tip[side];
+      box.append(node);
     }
   }
 

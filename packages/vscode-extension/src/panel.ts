@@ -5,7 +5,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { DIFF_BASE_LABEL, TABS, branchNote, effectiveBase, formatCount, mainName } from "./format";
+import { DIFF_BASE_LABEL, TABS, branchNote, editSides, effectiveBase, formatCount, mainName, span } from "./format";
 import { ERR, type AssessProgress, type ChangeDetail, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
@@ -31,7 +31,7 @@ type FromWebview =
 interface Chip {
   path: string;
   label: string;
-  changes: Array<{ id: string; label: string; count: string; lost: number; sides: Side[]; line: number; props?: string[]; selected?: boolean }>;
+  changes: Array<{ id: string; label: string; count: string; lost: number; sides: Array<{ side: Side; count: string }>; line: number; props?: string[]; selected?: boolean }>;
   count: string;
   changed: number;
   state?: "all" | "some" | "none";
@@ -166,7 +166,7 @@ export class PagesPanel implements vscode.Disposable {
           label: ch.selector || ch.definition?.name || `Edit on line ${ch.line}`,
           count: formatCount(ch.pages, ch.reasons),
           lost: (ch.lost ?? (ch.kind === "removed" ? ch.pages : undefined))?.exact ?? 0,
-          sides: ["pages", ...(ch.gained ? (["gained"] as const) : []), ...(ch.lost ? (["lost"] as const) : [])],
+          sides: editSides(ch).map((side) => ({ side, count: span(side === "pages" ? ch.pages : ch[side]!) })),
           line: ch.line,
           props: ch.changedProps,
         })),

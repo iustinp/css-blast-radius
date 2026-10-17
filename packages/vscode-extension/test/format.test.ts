@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { branchNote, configuredBase, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
+import { branchNote, configuredBase, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
 import type { ChangeAnswer, Count } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
@@ -20,6 +20,15 @@ describe("formatCount", () => {
     expect(formatCount(c(0), ["token-never-seen:c:promo"])).toBe("0 pages · .promo never seen");
     expect(formatCount(c(0), ["no-effective-change"])).toBe("0 pages · no effective change");
     expect(formatCount(c(0), ["some-new-code"])).toBe("0 pages · some new code");
+  });
+});
+
+describe("editSides", () => {
+  it("splits only a changed selector into the pages that gain and lose the rule", () => {
+    expect(editSides(change({ kind: "selector", pages: c(10), gained: c(3), lost: c(7) }))).toEqual(["pages", "gained", "lost"]);
+    expect(editSides(change({ kind: "added", pages: c(4), gained: c(4) }))).toEqual(["pages"]);
+    expect(editSides(change({ kind: "removed", pages: c(4), lost: c(4) }))).toEqual(["pages"]);
+    expect(editSides(change({ pages: c(51) }))).toEqual(["pages"]);
   });
 });
 

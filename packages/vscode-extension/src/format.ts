@@ -54,6 +54,15 @@ export function formatChange(ch: ChangeAnswer): string {
   return formatCount(ch.pages, ch.reasons);
 }
 
+/**
+ * The page lists one edit splits into. Only a changed selector has more than one:
+ * the pages that gain the rule (only the new selector matches) and those that lose it
+ * (only the old one matched). A new or removed rule's side would repeat its pages.
+ */
+export function editSides(ch: ChangeAnswer): Array<"pages" | "gained" | "lost"> {
+  return ch.gained && ch.lost ? ["pages", "gained", "lost"] : ["pages"];
+}
+
 /** A server change has a starting line; server rule ranges extend it to the cursor. */
 export function changeAtCursor(changes: ChangeAnswer[], rules: RuleCount[], line: number): ChangeAnswer | undefined {
   const candidates = changes.flatMap((ch) => rules
