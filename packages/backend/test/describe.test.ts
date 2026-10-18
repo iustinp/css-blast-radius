@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseStylesheet } from "../src/css/model.js";
 import { diffModels } from "../src/css/diff.js";
-import { changeLines, commonLines, describeChange } from "../src/css/describe.js";
+import { changeLines, describeChange } from "../src/css/describe.js";
 
 const one = (before: string, after: string) => {
   const changes = diffModels(parseStylesheet(before), parseStylesheet(after), after.split("\n").length);
@@ -74,13 +74,16 @@ describe("editor line highlights (analysis/liveEdits)", () => {
     expect(changeLines(added)).toEqual([[2, 4]]);
   });
 
-  it("on a branch, marks only lines the branch changed that the live site also lacks", () => {
+  it("on a branch, compares with the live site's rule, marking only what the branch changed", () => {
     const start = ".btn {\n  color: red;\n  padding: 4px;\n}";
-    const live = parseStylesheet(".btn {\n  color: blue;\n  padding: 4px;\n}").rules[0];
+    const live = parseStylesheet(".btn {\n  color: blue;\n  padding: 4px;\n  margin: 0;\n}").rules[0];
     const [mine] = changes(start, ".btn {\n  color: red;\n  padding: 8px;\n}");
-    expect(commonLines(mine, { ...mine, before: live })).toEqual([[3, 3]]);
-    // Nothing in common (the live site's rule can't tell): the branch's own lines.
-    const same = parseStylesheet(".btn {\n  color: red;\n  padding: 8px;\n}").rules[0];
-    expect(commonLines(mine, { ...mine, before: same })).toEqual([[3, 3]]);
+    const narrowed = { ...mine, live, changedProps: ["padding"] };
+    expect(changeLines(narrowed)).toEqual([[3, 3]]);
+    // The live site's newer color and its margin aren't this branch's edits.
+    expect(describeChange(narrowed).rule?.decls).toEqual([
+      { text: "color: red", state: "same", line: 2, column: 3 },
+      { text: "padding: 8px", state: "changed", was: "4px", line: 3, column: 3 },
+    ]);
   });
 });

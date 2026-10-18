@@ -94,7 +94,7 @@ Which of your changes count is up to the **tabs** at the top of the Blast Radius
 
 The tab drives everything: the count at the cursor, the status bar, the page list and the before/after view. A new window opens on the tab set in `cssBlastRadius.diffBase` (Uncommitted unless you change it). Without git there's no Uncommitted tab and windows open on This session.
 
-In the **All** tab, in a git repository, only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits, and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again. When `main` has newer commits you haven't pulled, the panel says so and offers **Show main's N newer commits you haven't pulled**: checked, those count too, as if your branch undid them (a plain comparison of your files with the live site). The before/after view shows the live page, then the live page with your changes merged in.
+In the **All** tab, in a git repository, only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits, and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again, not even part of a rule: if you added two variables to `:root` and the site already has one of them, only the other counts. When `main` has newer commits you haven't pulled, the panel says so and offers **Show main's N newer commits you haven't pulled**: checked, those count too, as if your branch undid them (a plain comparison of your files with the live site). The before/after view shows the live page, then the live page with your changes merged in.
 
 ### 4. Edit CSS
 

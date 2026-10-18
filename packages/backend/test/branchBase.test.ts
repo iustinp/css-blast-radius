@@ -40,6 +40,16 @@ describe("appliedFilter: branch changes the site already has", () => {
     const kept = appliedFilter(live)(changes, cur);
     expect(kept.map((c) => (c.after ?? c.before)?.selectorText)).toEqual([".b"]);
   });
+
+  it("narrows an edit to what the site lacks, and drops it when the site has all of it", () => {
+    const from = browserModel(":root {\n  --gap: 1px;\n}\n.a {\n  color: red;\n  margin: 0;\n}\n");
+    const cur = browserModel(":root {\n  --gap: 1px;\n  --hero-max: 42px;\n  --stat: 78.8px;\n}\n.a {\n  color: red;\n  margin: 4px;\n}\n");
+    // The site got --hero-max and margin another way (and its own newer color).
+    const live = browserModel(":root {\n  --gap: 1px;\n  --hero-max: 42px;\n  --stat: 78.75px;\n}\n.a {\n  color: blue;\n  margin: 4px;\n}\n");
+    const kept = appliedFilter(live)(diffModels(from, cur, 9), cur);
+    expect(kept.map((c) => [c.after?.selectorText, c.changedProps])).toEqual([[":root", ["--stat"]]]);
+    expect(kept[0].live?.selectorText).toBe(":root");
+  });
 });
 
 describe("Git branch point", () => {
@@ -215,6 +225,18 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     await session.open(cssPath, title, 4);
     live = await session.liveEdits();
     expect(live.files[0].edits.find((e) => e.selector === ".card .title")!.ranges).toEqual([[lineOf(title, "letter-spacing"), lineOf(title, "letter-spacing")]]);
+
+    // Typing main's own value too (already live) plus a new one: the All tab, its card and the highlight show only the new one.
+    await session.setDiffBase("production");
+    const both = typed.replace("font-weight: bold;", "font-weight: 300;\n  letter-spacing: 1px;");
+    const res = await session.open(cssPath, both, 5);
+    const ch = res.answer.changes.find((c) => c.selector === ".card .title")!;
+    expect(ch.changedProps).toEqual(["letter-spacing"]);
+    expect(session.changeDetail(cssPath, ch.id).rule!.decls.map((d) => `${d.state} ${d.text}`)).toEqual(["same font-weight: 300", "changed letter-spacing: 1px"]);
+    live = await session.liveEdits();
+    expect(live.files[0].edits.find((e) => e.selector === ".card .title")!.ranges).toEqual([[lineOf(both, "letter-spacing"), lineOf(both, "letter-spacing")]]);
+    await session.setDiffBase("HEAD");
+    await session.open(cssPath, typed, 6);
 
     // Closed: the file on disk.
     await session.close(cssPath);

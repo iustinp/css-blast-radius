@@ -30,6 +30,12 @@ export interface CssChange {
   /** Properties whose value changed, was added or removed. */
   changedProps?: string[];
   def?: { kind: string; name: string; usageKey: string; change: "added" | "removed" | "changed" };
+  /**
+   * On a branch, a `declarations` edit's rule as the live site has it:
+   * `changedProps` then lists only what the branch changed and the live site
+   * still lacks (set by appliedFilter).
+   */
+  live?: StyleRule;
   /** Line in the current text (1-based) the change is reported on. */
   line: number;
   detail?: string;
@@ -155,17 +161,33 @@ export function diffRules(oldRules: StyleRule[], newRules: StyleRule[], lastLine
 /**
  * Drops changes whose result `live` already has: on a branch, edits that
  * reached the site another way (e.g. squash-merged) change nothing there.
- * Moves are kept (order isn't compared).
+ * A kept `declarations` edit is narrowed, in place (callers match it against
+ * the full list), to the properties the live site lacks; when it lacks none
+ * the edit is dropped. Moves are kept (order isn't compared).
  */
 export function appliedFilter(live: StylesheetModel): (changes: CssChange[], cur: StylesheetModel) => CssChange[] {
   const rules = new Set(live.rules.map((r) => `${r.key}\0${r.declSig}`));
   const has = (r?: StyleRule) => !!r && rules.has(`${r.key}\0${r.declSig}`);
+  // Only keys used once: with several rules of the same key, which one an edit is about is unclear.
+  const byKey = new Map<string, StyleRule | null>();
+  for (const r of live.rules) byKey.set(r.key, byKey.has(r.key) ? null : r);
+  const narrow = (c: CssChange): boolean => {
+    const was = byKey.get(c.after!.key);
+    if (!was) return true;
+    const lacks = new Set(changedProps(was, c.after!));
+    const props = (c.changedProps ?? []).filter((p) => lacks.has(p));
+    if (!props.length) return false;
+    c.live = was;
+    c.changedProps = props;
+    return true;
+  };
   const defs = (m: StylesheetModel, k: string) => m.defs.filter((d) => defKey(d) === k).map((d) => d.sig).join("\n");
   const otherSig = (m: StylesheetModel) => m.other.map((o) => o.sig).join("\n");
   return (changes, cur) =>
     changes.filter((c) => {
       switch (c.kind) {
         case "declarations":
+          return !has(c.after) && narrow(c);
         case "added":
           return !has(c.after);
         case "removed":

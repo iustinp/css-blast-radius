@@ -59,11 +59,12 @@ function placer(rule: StyleRule): (d: Decl) => { line?: number; column?: number 
  * declaration with `was`; `whole`: the rule itself changed (selector,
  * conditions, position or a new rule), so every declaration is part of it.
  */
-function mergeDecls(before: Decl[], after: Decl[], whole: boolean, at: ReturnType<typeof placer>): RuleDecl[] {
+function mergeDecls(before: Decl[], after: Decl[], whole: boolean, at: ReturnType<typeof placer>, only?: Set<string>): RuleDecl[] {
   const out: RuleDecl[] = [];
-  const changed = (d: Decl, was?: Decl): RuleDecl => ({
-    text: text(d), state: "changed", ...(was && value(was) !== value(d) ? { was: value(was) } : {}), ...at(d),
-  });
+  const counts = (d: Decl) => !only || only.has(d.prop);
+  const changed = (d: Decl, was?: Decl): RuleDecl => counts(d)
+    ? { text: text(d), state: "changed", ...(was && value(was) !== value(d) ? { was: value(was) } : {}), ...at(d) }
+    : { text: text(d), state: "same", ...at(d) };
   let removed: Decl[] = [];
   let added: Decl[] = [];
   const flush = () => {
@@ -82,7 +83,7 @@ function mergeDecls(before: Decl[], after: Decl[], whole: boolean, at: ReturnTyp
     for (const r of removed) {
       const a = pair.get(r);
       if (!a) {
-        out.push({ text: text(r), state: "removed" });
+        if (counts(r)) out.push({ text: text(r), state: "removed" });
         continue;
       }
       for (const end = added.indexOf(a); next <= end; next++) out.push(changed(added[next], was.get(added[next])));
@@ -114,7 +115,9 @@ export function describeChange(c: CssChange): ChangeDescription {
     const b = c.before;
     // A new selector, new conditions, a move or a new rule: the whole rule reaches other elements.
     const whole = c.kind !== "declarations";
-    const decls = mergeDecls(b?.decls ?? [], a.decls, whole, placer(a));
+    // On a branch: compared with the live site, only what the branch changed that the site lacks.
+    const vsLive = !whole && c.live;
+    const decls = mergeDecls((vsLive ? c.live : b)?.decls ?? [], a.decls, whole, placer(a), vsLive ? new Set(c.changedProps) : undefined);
     const first = !whole ? decls.find((d) => d.state === "changed" && d.line !== undefined) : undefined;
     const conditions = a.conditions.map((x) => x.text);
     // Otherwise the rule's selector: on one line of minified CSS, the line alone isn't enough.
@@ -160,18 +163,6 @@ export function describeChange(c: CssChange): ChangeDescription {
  */
 export function changeLines(c: CssChange): Array<[number, number]> {
   return toRanges(lineSet(c));
-}
-
-/**
- * The lines both comparisons mark: what an edit changed since `c`'s base and
- * still differs from `other`'s (the live site's rule). Falls back to `c`'s
- * lines when they share none.
- */
-export function commonLines(c: CssChange, other: CssChange): Array<[number, number]> {
-  const mine = lineSet(c);
-  const theirs = new Set(lineSet(other));
-  const both = mine.filter((l) => theirs.has(l));
-  return toRanges(both.length ? both : mine);
 }
 
 function lineSet(c: CssChange): number[] {

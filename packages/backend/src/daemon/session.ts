@@ -11,7 +11,7 @@ import fg from "fast-glob";
 import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
 import { appliedFilter, changeIds, diffModels, type CssChange } from "../css/diff.js";
-import { changeLines, commonLines, describeChange } from "../css/describe.js";
+import { changeLines, describeChange } from "../css/describe.js";
 import { partialText } from "../css/partial.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
 import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0.js";
@@ -112,10 +112,8 @@ interface FileState {
   diskText?: string;
   base?: BaseText;
   baseModel?: StylesheetModel;
-  /** Branch on the live-site base: drops changes the site already has. */
+  /** Branch on the live-site base: drops changes the site already has, and the parts of changes it has. */
   applied?: (changes: CssChange[], cur: StylesheetModel) => CssChange[];
-  /** Branch on the live-site base: the live site's rules by key (the editor's highlights). */
-  liveRules?: Map<string, StyleRule>;
   /** Bumped whenever the text or the base changes. */
   version: number;
   /** editRevision of the last text/base change. */
@@ -163,18 +161,6 @@ const LIMITATIONS = [
   "Shadow DOM and iframe content are not captured.",
   "Pages added to the site since the last capture are not counted.",
 ];
-
-/** Rules by key, leaving out keys used more than once (which of them an edit matches is unclear). */
-function rulesByKey(m: StylesheetModel): Map<string, StyleRule> {
-  const out = new Map<string, StyleRule>();
-  const twice = new Set<string>();
-  for (const r of m.rules) {
-    if (out.has(r.key)) twice.add(r.key);
-    else out.set(r.key, r);
-  }
-  for (const k of twice) out.delete(k);
-  return out;
-}
 
 const MAX_SNAPSHOT_FILES = 3000;
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
@@ -483,7 +469,6 @@ export class Session extends EventEmitter {
     f.baseModel = browserModel(f.base.text ?? "");
     const live = f.base.live !== undefined ? browserModel(f.base.live) : undefined;
     f.applied = live && appliedFilter(live);
-    f.liveRules = live && rulesByKey(live);
     f.version++;
   }
 
@@ -676,11 +661,7 @@ export class Session extends EventEmitter {
       lf = gen === this.liveGen ? this.live.get(p) : undefined;
       if (!lf) {
         lf = { path: p, version: 0, editRevision: this.editRevision, base, baseModel: browserModel(base.text ?? "") };
-        if (base.live !== undefined) {
-          const live = browserModel(base.live);
-          lf.applied = appliedFilter(live);
-          lf.liveRules = rulesByKey(live);
-        }
+        if (base.live !== undefined) lf.applied = appliedFilter(browserModel(base.live));
         if (gen === this.liveGen) this.live.set(p, lf);
       }
     }
@@ -723,12 +704,7 @@ export class Session extends EventEmitter {
         if (!f) continue;
         const r = this.resultFor(f);
         if (!r.changes.length) continue;
-        // On a branch the base is where it started: of the lines the edit changed, those the live site's own rule lacks.
-        const ranges = (c: CssChange) => {
-          const was = c.kind === "declarations" && c.after ? f.liveRules?.get(c.after.key) : undefined;
-          return was ? commonLines(c, { ...c, before: was }) : changeLines(c);
-        };
-        const edits = r.changes.map((c, i) => ({ ...r.answer.changes[i], ranges: ranges(c) }));
+        const edits = r.changes.map((c, i) => ({ ...r.answer.changes[i], ranges: changeLines(c) }));
         files.push({ file: f.path, open: !!f.doc, pages: r.answer.total, edits });
       }
     }
