@@ -88,7 +88,7 @@ The setup page and the panel's **All** tab show where the scan stands: `Scan mat
 2. Open your project.
 3. Click **Link page groups** in the status bar (or run **CSS Blast Radius: Link Page Groups**) and pick the groups you work on.
 
-The choice is saved in `.vscode/settings.json` (`cssBlastRadius.groups`), so the team shares it.
+The server remembers the choice for each project folder (in `links.json` in its data folder), so nothing is added to your repo.
 
 Your CSS files are matched to the site's stylesheets **by file name**. Hashes, version numbers and `.min` are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`. No git or build setup is needed.
 
@@ -142,7 +142,7 @@ Other commands:
 - **Reconnect to Server**
 - **Compare with Live Site** (also in a CSS file's right-click menu)
 
-Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `groups`, `diffBase`, `cursorCount`, `warnLostPages`, `codeLens` (off), `liveSite.lineHighlights`, `liveSite.fileBadges`, `liveSite.changeBars`, and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
+Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `diffBase`, `cursorCount`, `warnLostPages`, `codeLens` (off), `liveSite.lineHighlights`, `liveSite.fileBadges`, `liveSite.changeBars`, and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
 
 ## Packages
 

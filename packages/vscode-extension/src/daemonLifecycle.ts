@@ -68,7 +68,6 @@ export class DaemonLifecycle implements vscode.Disposable {
       autoStart: c.get<boolean>("autoStartServer") ?? true,
       serverPath: c.get<string>("serverPath") || c.get<string>("daemonPath") || defaultServerPath(),
       nodePath: c.get<string>("nodePath") || "node",
-      groups: c.get<string[]>("groups") || [],
     };
   }
 
@@ -88,7 +87,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       this.setState("FAILED", err.message);
       return;
     }
-    let error = await this.tryAttach(settings.server, settings.groups);
+    let error = await this.tryAttach(settings.server);
     if (!error) return;
     if (settings.autoStart && isLocalServer(url) && (error as NodeJS.ErrnoException).code === "ECONNREFUSED") {
       if (Date.now() - this.lastSpawn > 15_000) {
@@ -118,7 +117,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       let delay = 100;
       while (!this.disposed && Date.now() < until) {
         await new Promise((r) => setTimeout(r, delay));
-        error = await this.tryAttach(settings.server, settings.groups);
+        error = await this.tryAttach(settings.server);
         if (!error) return;
         delay = Math.min(Math.round(delay * 1.5), 900);
       }
@@ -129,7 +128,7 @@ export class DaemonLifecycle implements vscode.Disposable {
     this.scheduleReconnect();
   }
 
-  private async tryAttach(server: string, groups: string[]): Promise<Error | undefined> {
+  private async tryAttach(server: string): Promise<Error | undefined> {
     try {
       await this.client.connect(server, 1500);
     } catch (err: any) {
@@ -140,7 +139,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       return new Error("Extension deactivated");
     }
     try {
-      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, groups, client: "vscode", windowId: this.windowId }, 10_000);
+      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, client: "vscode", windowId: this.windowId }, 10_000);
       if (init.protocolMajor !== PROTOCOL_MAJOR) throw new Error(`Incompatible server (protocol ${init.protocolMajor}, need ${PROTOCOL_MAJOR}).`);
       this.init = init;
       this.retryMs = 500;

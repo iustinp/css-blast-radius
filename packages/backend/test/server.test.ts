@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { startServer, type RunningServer } from "../src/server/http.js";
 import { normalizeSheetName } from "../src/daemon/sheetMatch.js";
 import { wildcard } from "../src/server/sitemap.js";
+import { Links } from "../src/server/links.js";
 import { pagePath, validateSettings } from "../src/server/settings.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -103,6 +104,20 @@ describe("helpers", () => {
     expect(pagePath("https://www.example.com/a/b?x=1#top", s)).toBe("/a/b?x=1");
     expect(pagePath("blog/a.html", s)).toBe("/blog/a.html");
     expect(pagePath("mailto:a@b.c", s)).toBeUndefined();
+  });
+
+  it("keeps each project's linked groups across restarts", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cbr-links-"));
+    try {
+      new Links(dir).set("/work/site/", ["a", "b", "a"]);
+      const again = new Links(dir);
+      expect(again.get("/work/site")).toEqual(["a", "b"]);
+      expect(again.get("/work/other")).toEqual([]);
+      again.set("/work/site", []);
+      expect(new Links(dir).get("/work/site")).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("validates site settings in plain language", () => {
@@ -219,7 +234,7 @@ describe("local server", () => {
 
   it("connects an editor, scopes counts to linked groups and follows group changes", async () => {
     rpc = await RpcClient.connect(Number(new URL(srv.url).port));
-    const init = await rpc.call("initialize", { workspaceRoot: proj, groups: [] });
+    const init = await rpc.call("initialize", { workspaceRoot: proj });
     sessionId = init.sessionId;
     expect(init.serverUrl).toBe(srv.url);
     expect(init.groups.map((g: any) => g.name).sort()).toEqual(["All pages", "Home"]);
@@ -235,6 +250,9 @@ describe("local server", () => {
     expect(total.total.exact).toBe(2); // .btn is on the home and about pages
     total = await rpc.call("session/setGroups", { groups: [homeId] });
     expect(total.total.exact).toBe(2);
+    // Kept by the server, not in the project.
+    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "links.json"), "utf8")).projects).toEqual({ [proj]: [homeId] });
+    expect(fs.existsSync(path.join(proj, ".vscode"))).toBe(false);
 
     await api("PATCH", `/api/groups/${homeId}`, { active: false });
     await until(() => rpc.notes.some((n) => n.method === "groups/changed"));
@@ -338,8 +356,10 @@ describe("local server", () => {
     const session = (c: RpcClient) => c.call("analysis/queryImpacts", { scope: "session" });
 
     const a = await RpcClient.connect(port);
-    const first = await a.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "a" });
+    const first = await a.call("initialize", { workspaceRoot: proj2, windowId: "a" });
     expect(first.sessionStarted).toBe(true);
+    expect(first.status.scope.linked).toBe(false);
+    await a.call("session/setGroups", { groups: [allId] });
     expect(first.status.git).toBe(false);
     await a.call("session/setDiffBase", { base: "session" });
     const edited = original.replace("color: blue;", "color: red;");
@@ -347,22 +367,23 @@ describe("local server", () => {
     await until(async () => (await session(a)).total.exact === 2);
 
     const b = await RpcClient.connect(port);
-    expect((await b.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "b" })).sessionStarted).toBe(false);
+    expect((await b.call("initialize", { workspaceRoot: proj2, windowId: "b" })).sessionStarted).toBe(false);
     expect((await session(b)).total.exact).toBe(2);
     a.close();
     b.close();
     await settle();
     // The window that joined reconnects (sleep, server hiccup): still the same session.
     const b2 = await RpcClient.connect(port);
-    expect((await b2.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "b" })).sessionStarted).toBe(false);
+    expect((await b2.call("initialize", { workspaceRoot: proj2, windowId: "b" })).sessionStarted).toBe(false);
     expect((await session(b2)).total.exact).toBe(2);
     b2.close();
     await settle();
 
     // A new window once the others closed (or a reload): the CSS as it is now is the start.
     const c = await RpcClient.connect(port);
-    const third = await c.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "c" });
+    const third = await c.call("initialize", { workspaceRoot: proj2, windowId: "c" });
     expect(third.sessionStarted).toBe(true);
+    expect(third.status.scope).toMatchObject({ linked: true, groups: [{ id: allId }] });
     expect(third.status.diffBase).toBe("session");
     expect((await session(c)).total.exact).toBe(0);
     // A file the window restores with unsaved typing: that typing was before this session.
@@ -373,7 +394,7 @@ describe("local server", () => {
     await settle();
 
     const again = await RpcClient.connect(port);
-    expect((await again.call("initialize", { workspaceRoot: proj2, groups: [allId], windowId: "c" })).sessionStarted).toBe(false);
+    expect((await again.call("initialize", { workspaceRoot: proj2, windowId: "c" })).sessionStarted).toBe(false);
     again.close();
   }, 20_000);
 

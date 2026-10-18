@@ -58,7 +58,7 @@ process.env.TMPDIR = scratch;
 let server = "";
 let homeId = "";
 let backend;
-const settings = { server, autoStartServer: false, groups: [], diffBase: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
+const settings = { server, autoStartServer: false, diffBase: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
 const events = {};
 const commands = new Map();
 const panels = [];
@@ -71,6 +71,7 @@ const editors = [];
 const state = new Map();
 let activeEditor;
 let pickedIds = [];
+const quickPicks = [];
 let scope = "unset";
 
 class EventEmitter {
@@ -153,8 +154,8 @@ const vscode = {
     onDidChangeConfiguration: events.config.event,
     getConfiguration: () => ({
       get: (key) => settings[key],
-      update: async (key, value, target) => {
-        assert.equal(target, vscode.ConfigurationTarget.Workspace, "group links must be saved in workspace settings");
+      update: async (key, value) => {
+        assert.notEqual(key, "groups", "group links are kept by the server, not in the project's settings");
         settings[key] = value;
         events.config.fire({ affectsConfiguration: (name) => name === `cssBlastRadius.${key}` });
       },
@@ -190,6 +191,7 @@ const vscode = {
     showErrorMessage: async (message) => { notices.push(message); return undefined; },
     showQuickPick: async (items) => {
       const options = await items;
+      quickPicks.push(options);
       assert(options.some((x) => x.label.includes("Open setup page")), "missing setup link");
       return options.filter((x) => pickedIds.includes(x.id));
     },
@@ -334,11 +336,13 @@ async function run() {
       assert.equal(data.result.total, 0);
       assert.equal(data.result.count.exact, 0);
     });
-    await check("link picker: group selection changes the workspace setting", async () => {
+    await check("link picker: the server keeps the link, nothing is written into the project", async () => {
       pickedIds = [homeId];
       await vscode.commands.executeCommand("cssBlastRadius.linkGroups");
-      assert.deepEqual(settings.groups, [homeId]);
       await waitFor(async () => (await json("/api/state")).projects.find((p) => p.root === workspace)?.groups.includes(homeId), "server group link");
+      assert(!fs.existsSync(path.join(workspace, ".vscode")), "a .vscode folder was created in the project");
+      await vscode.commands.executeCommand("cssBlastRadius.linkGroups");
+      assert.deepEqual(quickPicks.at(-1).filter((x) => x.picked).map((x) => x.id), [homeId], "the picker should show the server's link");
       assert(!statusItem.text.includes("Link page groups"), statusItem.text);
     });
     await check("typing: .btn decoration and status count update before save", async () => {
@@ -473,7 +477,7 @@ async function run() {
       });
       assert.equal(res.active, false);
       await waitFor(() => !statusItem.text.includes("2 pages") && statusItem.text.includes("0 pages"), "count after group pause");
-      assert.deepEqual(settings.groups, [homeId], "link should remain saved while group is paused");
+      assert.deepEqual((await json("/api/state")).projects.find((p) => p.root === workspace)?.groups, [homeId], "link should remain while the group is paused");
       await json(`/api/groups/${homeId}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: true }),
       });

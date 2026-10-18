@@ -191,15 +191,6 @@
           "default": "",
           "description": "Path to the server CLI (packages/backend/dist/cli.js). Empty: the backend this extension was built from; the old daemonPath setting is a fallback."
         },
-        "cssBlastRadius.groups": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "scope": "resource",
-          "description": "Page group IDs linked to this project, saved in .vscode/settings.json. Only active linked groups count; use Link Page Groups to choose them."
-        },
         "cssBlastRadius.diffBase": {
           "type": "string",
           "enum": [

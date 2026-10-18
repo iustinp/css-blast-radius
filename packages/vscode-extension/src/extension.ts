@@ -100,9 +100,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }
   }
 
-  async function setGroups(): Promise<void> {
+  /** Links the project to these groups (the server keeps the choice, outside the project). */
+  async function setGroups(groups: string[]): Promise<void> {
     if (!client.connected) return;
-    const groups = vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<string[]>("groups") ?? [];
     try {
       state.acceptSession(await client.call<SessionTotal>("session/setGroups", { groups }));
       await refreshScope();
@@ -110,6 +110,18 @@ export function activate(ctx: vscode.ExtensionContext): void {
     } catch (err: any) {
       log(`linking groups: ${err?.message ?? err}`);
     }
+  }
+
+  /** A group was paused, renamed or deleted: the server already rescoped the project, so fetch the new counts. */
+  async function refreshCounts(): Promise<void> {
+    if (!client.connected) return;
+    try {
+      state.acceptSession(await client.call<SessionTotal>("analysis/queryImpacts", { scope: "session" }));
+    } catch (err: any) {
+      log(`Page count: ${err?.message ?? err}`);
+    }
+    await refreshScope();
+    await refreshAnswers();
   }
 
   client.onNotification((method, p) => {
@@ -134,7 +146,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         return;
       case "groups/changed":
         if (life.init) life.init.groups = (p as { groups: GroupInfo[] }).groups;
-        void setGroups();
+        void refreshCounts();
         return;
       case "index/statusChanged": {
         const s = p as IndexStatus;
@@ -245,7 +257,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       if (!requireConnected()) return;
       try {
         const groups = await client.call<GroupInfo[]>("groups/list");
-        const linked = new Set(vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get<string[]>("groups") ?? []);
+        const linked = new Set((state.status?.scope?.groups ?? []).map((g) => g.id));
         const setup = { label: "$(link-external) Open setup page", description: "Add or manage groups", id: "" };
         const picks = await vscode.window.showQuickPick(
           [...groups.map((g) => ({
@@ -258,9 +270,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
         if (!picks) return;
         if (picks.some((p) => !p.id)) void vscode.commands.executeCommand("cssBlastRadius.openSetupPage");
         const selected = picks.filter((p) => !!p.id).map((p) => p.id);
-        if (selected.length || !picks.some((p) => !p.id)) {
-          await vscode.workspace.getConfiguration("cssBlastRadius", folderUri).update("groups", selected, vscode.ConfigurationTarget.Workspace);
-        }
+        if (selected.length || !picks.some((p) => !p.id)) await setGroups(selected);
       } catch (err: any) {
         void vscode.window.showErrorMessage(`Couldn't load page groups: ${err?.message ?? err}`);
       }
@@ -311,7 +321,6 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("cssBlastRadius.showOutput", () => life.output.show()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("cssBlastRadius.codeLens")) state.invalidateRules(undefined);
-      if (e.affectsConfiguration("cssBlastRadius.groups")) void setGroups();
       if (e.affectsConfiguration("cssBlastRadius.diffBase")) void switchTab({ base: settingBase() });
       if (["server", "autoStartServer", "serverPath", "daemonPath", "nodePath"].some((k) => e.affectsConfiguration(`cssBlastRadius.${k}`))) {
         void life.reconnect();

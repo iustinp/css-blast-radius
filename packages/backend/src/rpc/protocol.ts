@@ -13,7 +13,7 @@ import type { ChangeDescription } from "../css/describe.js";
 export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 6;
+export const PROTOCOL_MINOR = 7;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -117,8 +117,6 @@ export interface InitializeParams {
   workspaceRoot: string;
   /** One per editor window: a new window (or a reload) starts a new "This session". */
   windowId?: string;
-  /** Linked page group ids (server mode). */
-  groups?: string[];
   client?: string;
 }
 
