@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { badgeText, branchNote, configuredBase, editLabel, editsText, losesPages, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
-import type { ChangeAnswer, Count } from "../src/protocol";
+import { badgeText, branchNote, configuredBase, editLabel, editsText, losesPages, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, scanLine, shortReason, span, tokenText } from "../src/format";
+import type { ChangeAnswer, Count, WatchStatus } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
 const change = (p: Partial<ChangeAnswer>): ChangeAnswer => ({ id: "x", kind: "declarations", line: 1, pages: c(0), conditions: [], reasons: [], ...p });
@@ -147,5 +147,38 @@ describe("live-site helpers", () => {
     expect(badgeText(7)).toBe("7");
     expect(badgeText(99)).toBe("99");
     expect(badgeText(100)).toBe("+");
+  });
+});
+
+describe("scanLine", () => {
+  const w = (code: Partial<WatchStatus["code"]>, content: Partial<WatchStatus["content"]> = { state: "up-to-date" }, intervalSec = 60): WatchStatus => ({
+    enabled: true, intervalSec, checking: false,
+    code: { state: "up-to-date", ...code }, content: { state: "up-to-date", ...content },
+  });
+
+  it("says nothing when the server doesn't follow the site", () => {
+    expect(scanLine(undefined)).toBeUndefined();
+    expect(scanLine({ ...w({}), enabled: false })).toBeUndefined();
+  });
+
+  it("names the commit the scan matches", () => {
+    const l = scanLine(w({ branch: "main", mainCommit: "6d6292826e63" }))!;
+    expect(l.text).toBe("Scan matches main (6d62928) · up to date");
+    expect(l.busy).toBe(false);
+    expect(l.tip).toContain("every minute");
+  });
+
+  it("shows what is being caught up", () => {
+    const l = scanLine(w({ state: "updating", branch: "main", behind: 7, approx: true, pages: 115 }, { state: "updating", pages: 116 }, 300))!;
+    expect(l.text).toBe("Scan is about 7 commits behind main · updating 115 pages · updating 116 pages edited on the site");
+    expect(l.busy).toBe(true);
+    expect(l.tip).toContain("every 5 minutes");
+    expect(scanLine(w({ state: "waiting", branch: "main" }))!.text).toBe("Main changed, waiting for the site to serve it");
+  });
+
+  it("explains problems in the tooltip", () => {
+    const l = scanLine(w({ state: "no-repo", message: "Open the site's repository in VS Code." }, { state: "unavailable" }))!;
+    expect(l.text).toBe("Can't follow the site's code: repository not found");
+    expect(l.tip.startsWith("Open the site's repository")).toBe(true);
   });
 });

@@ -137,6 +137,35 @@ export interface GroupInfo {
   pages: number;
 }
 
+/** The server keeping the scan equal to the live site (missing before 1.6). */
+export interface WatchStatus {
+  enabled: boolean;
+  intervalSec: number;
+  checking: boolean;
+  checkedAt?: string;
+  code: {
+    state: "off" | "no-repo" | "up-to-date" | "waiting" | "updating" | "error";
+    /** The repository folder and the branch the site is deployed from. */
+    repo?: string;
+    branch?: string;
+    /** The commit the scan matches (approx: guessed from the scan's date). */
+    scanCommit?: string;
+    /** The branch's latest commit. */
+    mainCommit?: string;
+    /** Commits the scan is behind the branch. */
+    behind?: number;
+    approx?: boolean;
+    /** Pages being rescanned. */
+    pages?: number;
+    message?: string;
+  };
+  content: {
+    state: "off" | "up-to-date" | "updating" | "unavailable" | "error";
+    pages?: number;
+    message?: string;
+  };
+}
+
 export interface InitializeResult {
   protocolMajor: number;
   protocolMinor: number;
@@ -151,6 +180,7 @@ export interface InitializeResult {
   sessionStarted?: boolean;
   serverUrl: string;
   groups: GroupInfo[];
+  watch?: WatchStatus;
 }
 
 export interface SessionTotal {

@@ -20,6 +20,25 @@ export interface SiteSettings {
   /** Absolute path of a folder holding the built site's HTML, or "". */
   siteFolder: string;
   devices: Device[];
+  /** Keeping the scan up to date with the site (absent: on, every minute). */
+  watch?: WatchSettings;
+}
+
+export interface WatchSettings {
+  enabled: boolean;
+  intervalSec: number;
+  /** The site's repository folder, when the editor's projects don't include it. */
+  repo?: string;
+}
+
+export const DEFAULT_WATCH: WatchSettings = { enabled: true, intervalSec: 60 };
+
+/** The watch settings, with the check interval kept between 15 s and an hour. */
+export function watchSettings(s: SiteSettings): WatchSettings {
+  const w = s.watch ?? DEFAULT_WATCH;
+  const n = Math.round(Number(w.intervalSec));
+  const intervalSec = Number.isFinite(n) ? Math.min(3600, Math.max(15, n)) : DEFAULT_WATCH.intervalSec;
+  return { enabled: w.enabled !== false, intervalSec, ...(typeof w.repo === "string" && w.repo ? { repo: w.repo } : {}) };
 }
 
 /** An error whose message is shown to the user as is. */

@@ -60,10 +60,19 @@ Open <http://127.0.0.1:4317>.
 
 From the same page you can:
 - **Pause** a group you aren't working on: it stops counting and isn't rescanned. **Resume** it to bring it back.
-- **Rescan** a group after a deploy. Sitemap groups also pick up new pages and drop removed ones.
+- **Rescan** a group (after a deploy, if keeping the scan up to date is off). Sitemap groups also pick up new pages and drop removed ones.
 - **Delete** a group (you can undo for 5 minutes).
 - Open a group to see each page's status. Rescan failed pages, or exclude a page so a sitemap rescan doesn't bring it back.
 - Check **Stylesheets on the site** to see which of your project files each site stylesheet was matched to.
+
+#### Keeping the scan up to date
+
+The **All** tab compares your CSS with the pages as last scanned, so the scan should match the live site. While the server runs, **Keep the scan up to date** (on by default, on the setup page) checks the site every minute and rescans only the pages a change reaches, without any CI/CD hook:
+
+- **Code**: it finds the site's git repository among your VS Code projects (for an Edge Delivery site, the one whose remote is `<owner>/<repo>` from the `ref--repo--owner.aem.page` address; or enter the folder), and asks the remote for the deployed branch's latest commit (the site's branch for Edge Delivery, else the default branch), fetching it when it moved. It compares each file every page loaded with that commit: a changed script or block rescans the pages that loaded it; a changed stylesheet rescans only the pages the blast-radius engine says it reaches, and the other pages just record the new stylesheet. It waits until the site serves the new files (up to 90 s for CDN caches) before acting.
+- **Page edits**: it reads the site's `/query-index.json` and each fragment's date (`/nav.plain.html`, …), and rescans a page edited after its scan, or showing an edited fragment.
+
+The setup page and the panel's **All** tab show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo}`, `POST /api/watch/check`.
 
 ### 3. Link your project in VS Code (once per project)
 
@@ -168,13 +177,13 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (168) + extension (27) unit tests
+npm test                                         # backend (184) + extension (35) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
-node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (15 checks)
+node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (16 checks)
 ```
 
-`test/server.test.ts` drives the server end to end: setup, sitemap/pasted groups, scanning, linked-group counts over the editor connection, the before/after diff, live events, exclusions, undo, and the outside-editor change notice. Bench and smoke need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests.
+`test/server.test.ts` drives the server end to end: setup, sitemap/pasted groups, scanning, linked-group counts over the editor connection, the before/after diff, live events, exclusions, undo, and the outside-editor change notice. `test/watch.test.ts` keeps a scan up to date against a local git remote and a local site: script, stylesheet (waiting for the site, then rescanning only reached pages), page and nav edits. Bench and smoke need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests.
 
 ## Status
 
@@ -183,7 +192,7 @@ Implemented:
 - The local server with the setup page, page groups, linked groups per project, name-based stylesheet matching against the live site, and the before/after diff viewer.
 
 Not yet implemented:
-- CI refresh after production deploys (today: **Rescan** on the setup page).
+- Following the site while the server is off (it catches up when it starts), or from CI.
 - Login, for hosting the server for a team.
 - Shared team index.
 - Source maps and build adapters (Sass, PostCSS, CSS-in-JS).

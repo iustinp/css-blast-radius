@@ -9,9 +9,10 @@ import { readFile } from "node:fs/promises";
 import { extname, sep } from "node:path";
 import fg from "fast-glob";
 import { fileForUrlPath, type CbrConfig, type Profile, type Recipe } from "../config.js";
+import { blobId } from "../daemon/diffBase.js";
 import { parseStylesheet, usageKeysFor, type StylesheetModel } from "../css/model.js";
 import { analyzeComplex } from "../css/selectors.js";
-import { IndexBuilder, SiteIndex } from "../index/siteIndex.js";
+import { IndexBuilder, SiteIndex, type PagePatch } from "../index/siteIndex.js";
 import type { PageRow, Store, VariantInfo } from "../index/store.js";
 import { decodeTree, firstMatch, type CompactTree } from "../l1/tree.js";
 import { assetKey, openShell } from "../l2/shell.js";
@@ -31,6 +32,10 @@ export interface CaptureOptions {
   signal?: AbortSignal;
   /** Revisions still being read (e.g. by a running daemon): not pruned. */
   keep?: number[];
+  /** Partial runs: carried-forward pages whose recorded files change. */
+  patches?: PagePatch[];
+  /** Partial runs: stylesheet key → its new captured content hash. */
+  sheets?: Record<string, string>;
 }
 
 export interface CaptureResult {
@@ -197,31 +202,37 @@ export class Capturer {
       partial ? prev : undefined,
     );
     const rev = this.store.createRevision(partial ? "partial" : "full", builder.variants);
+    if (partial) {
+      for (const p of opts.patches ?? []) builder.patchPage(p);
+      for (const [key, hash] of Object.entries(opts.sheets ?? {})) builder.setSheetHash(key, hash);
+    }
 
     let failed = 0;
     let done = 0;
     try {
-      this.browser = await chromium.launch({ headless: true });
-      const contexts = new Map<string, BrowserContext>();
-      for (const v of this.variants) {
-        if (contexts.has(v.profile)) continue;
-        contexts.set(v.profile, await this.newContext(v.profileDef));
-      }
-      const queue = [...targets];
-      const worker = async () => {
-        for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
-          if (opts.signal?.aborted) throw new Error("capture cancelled");
-          const ok = await this.capturePage(url, builder, contexts);
-          if (!ok) failed++;
-          opts.onProgress?.({ done: ++done, total: targets.length, url, ok });
+      if (targets.length) {
+        this.browser = await chromium.launch({ headless: true });
+        const contexts = new Map<string, BrowserContext>();
+        for (const v of this.variants) {
+          if (contexts.has(v.profile)) continue;
+          contexts.set(v.profile, await this.newContext(v.profileDef));
         }
-      };
-      await Promise.all(Array.from({ length: Math.max(1, this.cfg.capture.concurrency) }, worker));
+        const queue = [...targets];
+        const worker = async () => {
+          for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
+            if (opts.signal?.aborted) throw new Error("capture cancelled");
+            const ok = await this.capturePage(url, builder, contexts);
+            if (!ok) failed++;
+            opts.onProgress?.({ done: ++done, total: targets.length, url, ok });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.max(1, this.cfg.capture.concurrency) }, worker));
+      }
       const notes = {
         durationMs: Date.now() - t0,
         captured: targets.length,
         failed,
-        chromium: this.browser.version(),
+        chromium: this.browser?.version() ?? null,
         unsupportedSyntaxChecks: this.unsupportedSyntax,
         fidelity: this.fidelity.length
           ? { sampled: this.fidelity.length, min: Math.min(...this.fidelity), mean: this.fidelity.reduce((a, b) => a + b, 0) / this.fidelity.length }
@@ -254,6 +265,7 @@ export class Capturer {
       trees: {},
       shells: {},
       assets: {},
+      loaded: {},
       capturedAt: new Date().toISOString(),
     };
     const notes: string[] = [];
@@ -400,6 +412,14 @@ export class Capturer {
     const r = await serveSite(this.cfg, route);
     if (!r) return;
     const type = req.resourceType();
+    if (r.status < 400 && type !== "document") {
+      try {
+        const u = new URL(url);
+        if (u.origin === this.cfg.origin) row.loaded![u.pathname] = blobId(r.body);
+      } catch {
+        /* not a URL */
+      }
+    }
     if (r.status < 400 && (RECORDED_TYPES.has(type) || r.ct.includes("text/css"))) {
       row.assets[url] = `${this.store.putBlob(r.body)} ${r.ct}`;
       if (type === "stylesheet" || r.ct.includes("text/css")) cssTexts.set(url, r.body.toString("utf8"));

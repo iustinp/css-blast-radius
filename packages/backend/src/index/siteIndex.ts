@@ -164,6 +164,15 @@ export class SiteIndex {
   }
 }
 
+/** A page whose recorded files change without recapturing it. */
+export interface PagePatch {
+  url: string;
+  /** Asset URL → "blob hash content-type", as a capture records it. */
+  assets?: Record<string, string>;
+  /** Site path → git blob id. */
+  loaded?: Record<string, string>;
+}
+
 /** Accumulates one capture run; can start from a previous revision (partial recapture). */
 export class IndexBuilder {
   readonly size: number;
@@ -231,6 +240,25 @@ export class IndexBuilder {
 
   setPage(row: PageRow): void {
     this.pages.set(row.id, row);
+  }
+
+  /** Updates a carried-forward page's recorded files (a change that doesn't reach it). */
+  patchPage(p: PagePatch): void {
+    const id = this.ids.get(p.url);
+    const row = id === undefined ? undefined : this.pages.get(id);
+    if (!row || row.status === "removed") return;
+    this.pages.set(row.id, {
+      ...row,
+      assets: { ...row.assets, ...p.assets },
+      // An older scan didn't list what pages load: don't start a partial list.
+      ...(p.loaded && row.loaded ? { loaded: { ...row.loaded, ...p.loaded } } : {}),
+    });
+  }
+
+  /** The stylesheet's captured content is now `hash`. */
+  setSheetHash(url: string, hash: string): void {
+    const s = this.sheets.get(url);
+    if (s) s.hash = hash;
   }
 
   private post(map: Map<string, PageSet>, key: string, id: number): void {

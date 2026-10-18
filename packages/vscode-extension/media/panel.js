@@ -309,6 +309,7 @@
         if (tab.base === active) return;
         renderTabs(tab.base);
         $("mainBox").hidden = true;
+        $("scanLine").hidden = true;
         $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
         vscode.postMessage({ type: "tab", base: tab.base });
       });
@@ -316,6 +317,13 @@
       node.setAttribute("aria-selected", tab.base === active ? "true" : "false");
       node.title = tab.tip;
       box.append(node);
+    }
+    const scan = active === "production" && tabsMsg.scan;
+    $("scanLine").hidden = !scan;
+    if (scan) {
+      $("scanLine").textContent = scan.text;
+      $("scanLine").title = scan.tip;
+      $("scanLine").classList.toggle("busy", scan.busy);
     }
     const main = active === "production" && tabsMsg.main;
     $("mainBox").hidden = !main;

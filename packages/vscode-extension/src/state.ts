@@ -1,7 +1,7 @@
 // Latest answers, ordered so an older answer never replaces a newer one (§6.8).
 
 import * as vscode from "vscode";
-import type { FileAnswer, IndexStatus, RulesResult, SessionTotal } from "./protocol";
+import type { FileAnswer, IndexStatus, RulesResult, SessionTotal, WatchStatus } from "./protocol";
 
 const rev = (n: number | null | undefined) => n ?? -1;
 
@@ -11,11 +11,15 @@ export class ImpactState implements vscode.Disposable {
   session?: SessionTotal;
   status?: IndexStatus;
   degraded?: string;
+  /** Whether the server keeps the scan equal to the site. */
+  watch?: WatchStatus;
 
   private readonly fileEmitter = new vscode.EventEmitter<string>();
   private readonly sessionEmitter = new vscode.EventEmitter<void>();
   private readonly statusEmitter = new vscode.EventEmitter<void>();
   private readonly rulesEmitter = new vscode.EventEmitter<string | undefined>();
+  private readonly watchEmitter = new vscode.EventEmitter<void>();
+  readonly onWatch = this.watchEmitter.event;
   readonly onFile = this.fileEmitter.event;
   readonly onSession = this.sessionEmitter.event;
   readonly onStatus = this.statusEmitter.event;
@@ -65,6 +69,11 @@ export class ImpactState implements vscode.Disposable {
     this.statusEmitter.fire();
   }
 
+  setWatch(w: WatchStatus | undefined): void {
+    this.watch = w;
+    this.watchEmitter.fire();
+  }
+
   setDegraded(msg: string | undefined): void {
     this.degraded = msg;
     this.statusEmitter.fire();
@@ -93,5 +102,6 @@ export class ImpactState implements vscode.Disposable {
     this.sessionEmitter.dispose();
     this.statusEmitter.dispose();
     this.rulesEmitter.dispose();
+    this.watchEmitter.dispose();
   }
 }

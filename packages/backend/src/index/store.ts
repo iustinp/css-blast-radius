@@ -31,6 +31,11 @@ export interface PageRow {
   shells: Record<number, string>;
   /** URL → asset blob hash, for replaying the page's subresources (L2). */
   assets: Record<string, string>;
+  /**
+   * Every same-site file the page loaded (scripts, stylesheets, fragments,
+   * images…): path → git blob id of what was served. Absent in older scans.
+   */
+  loaded?: Record<string, string>;
   /** Shell box agreement on the fidelity sample (0..1), when checked. */
   fidelity?: number;
   capturedAt: string;

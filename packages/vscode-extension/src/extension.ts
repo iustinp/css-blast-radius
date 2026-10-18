@@ -11,7 +11,7 @@ import { ExternalNoticeBatch } from "./externalNotice";
 import { LiveEdits } from "./liveEdits";
 import { changeAtCursor, configuredBase, editSides, effectiveBase, externalChangeText, TABS } from "./format";
 import { PagesPanel } from "./panel";
-import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
+import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal, WatchStatus } from "./protocol";
 import { ImpactState } from "./state";
 import { serverOrigin } from "./urls";
 
@@ -129,6 +129,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
         externalChange(change.files, change.session, change.before);
         return;
       }
+      case "scan/watch":
+        state.setWatch(p as WatchStatus);
+        return;
       case "groups/changed":
         if (life.init) life.init.groups = (p as { groups: GroupInfo[] }).groups;
         void setGroups();
@@ -170,6 +173,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     state.reset();
     notices.clear();
     state.setStatus(init.status);
+    state.setWatch(init.watch);
     try {
       await applyTab(false, init.status.git);
     } catch (err: any) {

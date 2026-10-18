@@ -5,7 +5,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { DIFF_BASE_LABEL, TABS, branchNote, editSides, effectiveBase, formatCount, mainName, span } from "./format";
+import { DIFF_BASE_LABEL, TABS, branchNote, editSides, effectiveBase, formatCount, mainName, scanLine, span } from "./format";
 import { ERR, type AssessProgress, type ChangeDetail, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
@@ -102,6 +102,7 @@ export class PagesPanel implements vscode.Disposable {
         }
       }),
       state.onStatus(() => this.scheduleRefresh()),
+      state.onWatch(() => { if (this.ready) this.postTabs(); }),
       client.onNotification((method, p: AssessProgress) => {
         if (method !== "analysis/assessProgress" || !this.ready) return;
         void this.post({ type: "assessProgress", progress: p });
@@ -221,6 +222,7 @@ export class PagesPanel implements vscode.Disposable {
       type: "tabs", base: this.base,
       tabs: TABS.filter((t) => effectiveBase(t.base, git) === t.base),
       main: b && b.behind > 0 && b.mainShown !== undefined ? { name: mainName(b), behind: b.behind, shown: b.mainShown } : undefined,
+      scan: scanLine(this.state.watch),
     });
   }
 
@@ -507,6 +509,7 @@ export class PagesPanel implements vscode.Disposable {
   <div id="number">0</div><div id="summary"></div>
   <div id="meta" class="muted"></div><div id="branch" class="muted" hidden></div>
   <label id="mainBox" class="muted" hidden><input type="checkbox" id="mainChanges"> <span id="mainLabel"></span></label>
+  <div id="scanLine" class="muted" hidden></div>
   <div id="warning" class="warning"></div>
 </section>
 <nav id="chips"></nav>

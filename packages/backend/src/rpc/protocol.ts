@@ -13,7 +13,7 @@ import type { ChangeDescription } from "../css/describe.js";
 export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 5;
+export const PROTOCOL_MINOR = 6;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -72,6 +72,37 @@ export interface InitializeResult {
   sessionStarted?: boolean;
   serverUrl?: string;
   groups?: GroupInfo[];
+  /** Server mode: whether the scan follows the site (also sent as scan/watch). */
+  watch?: WatchStatus;
+}
+
+/** Keeping the scan equal to the site: code from the site's git branch, page edits from its query index. */
+export interface WatchStatus {
+  enabled: boolean;
+  intervalSec: number;
+  checking: boolean;
+  checkedAt?: string;
+  code: {
+    state: "off" | "no-repo" | "up-to-date" | "waiting" | "updating" | "error";
+    /** The repository folder and the branch the site is deployed from. */
+    repo?: string;
+    branch?: string;
+    /** The commit the scan matches (approx: guessed from the scan's date). */
+    scanCommit?: string;
+    /** The branch's latest commit. */
+    mainCommit?: string;
+    /** Commits the scan is behind the branch. */
+    behind?: number;
+    approx?: boolean;
+    /** Pages being rescanned. */
+    pages?: number;
+    message?: string;
+  };
+  content: {
+    state: "off" | "up-to-date" | "updating" | "unavailable" | "error";
+    pages?: number;
+    message?: string;
+  };
 }
 
 /** A page group as the editor sees it. */

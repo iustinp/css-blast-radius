@@ -4,12 +4,26 @@
 // the site settings changed since the last scan, or it's a "rescan all".
 
 import { Capturer, type CaptureProgress, type CaptureResult } from "../capture/capture.js";
+import type { PagePatch } from "../index/siteIndex.js";
 import type { Store } from "../index/store.js";
 import type { Groups } from "./groups.js";
 import { buildConfig, isConfigured, siteKey, type SiteSettings } from "./settings.js";
 import { readSitemap } from "./sitemap.js";
 
-export type JobSpec = { kind: "group"; groupId: string } | { kind: "pages"; urls: string[]; label?: string } | { kind: "all" };
+export interface PagesJob {
+  kind: "pages";
+  urls: string[];
+  label?: string;
+  /** Shown when the job is done (default: "N pages rescanned"). */
+  doneLabel?: string;
+  /** Pages kept as they are, whose recorded files change (see Capturer). */
+  patches?: PagePatch[];
+  sheets?: Record<string, string>;
+  /** Called once the job has run (or failed). */
+  done?: () => void;
+}
+
+export type JobSpec = { kind: "group"; groupId: string } | PagesJob | { kind: "all" };
 
 export interface JobState {
   label: string;
@@ -82,12 +96,15 @@ export class Jobs {
   private same(a: JobSpec, b: JobSpec): boolean {
     if (a.kind !== b.kind) return false;
     if (a.kind === "group" && b.kind === "group") return a.groupId === b.groupId;
-    if (a.kind === "pages" && b.kind === "pages") return a.urls.length === b.urls.length && a.urls.every((u, i) => u === b.urls[i]);
+    if (a.kind === "pages" && b.kind === "pages") {
+      if (a.done || b.done || a.patches || b.patches) return false;
+      return a.urls.length === b.urls.length && a.urls.every((u, i) => u === b.urls[i]);
+    }
     return true;
   }
 
   enqueue(spec: JobSpec): void {
-    if (spec.kind === "pages" && spec.urls.length === 0) return;
+    if (spec.kind === "pages" && spec.urls.length === 0 && !spec.patches?.length) return spec.done?.();
     if (this.queue.some((q) => this.same(q, spec))) return;
     this.queue.push(spec);
     this.host.changed();
@@ -133,6 +150,7 @@ export class Jobs {
         } finally {
           this.current = undefined;
           this.host.changed();
+          if (spec.kind === "pages") spec.done?.();
         }
       }
     } finally {
@@ -196,12 +214,13 @@ export class Jobs {
       targets = [...groups.activeUrls()];
     } else {
       label = spec.label ?? `Scanning ${plural(spec.urls.length, "page")}`;
-      done = spec.urls.length === 1 ? `${spec.urls[0]} rescanned` : `${plural(spec.urls.length, "page")} rescanned`;
+      done = spec.doneLabel ?? (spec.urls.length === 1 ? `${spec.urls[0]} rescanned` : `${plural(spec.urls.length, "page")} rescanned`);
       this.current = { spec, label, phase: "capturing", done: 0, total: 0, pending: new Set() };
       targets = [...new Set(spec.urls)];
     }
 
-    if (targets.length === 0) {
+    const patches = spec.kind === "pages" ? spec.patches : undefined;
+    if (targets.length === 0 && !patches?.length) {
       this.finish(`${label.replace(/^Scanning /, "")}: no pages to scan.`, true, groupId);
       return;
     }
@@ -220,6 +239,8 @@ export class Jobs {
     const res = await new Capturer(cfg, store).run({
       urls: forceFull ? undefined : targets,
       keep: this.host.keepRevisions(),
+      patches,
+      sheets: spec.kind === "pages" ? spec.sheets : undefined,
       onProgress: (p) => {
         c.done = p.done;
         c.total = p.total;
@@ -233,6 +254,7 @@ export class Jobs {
     for (const id of scanned) groups.scanned(id, at);
     await this.host.published(res);
     const failed = res.failed ? `, ${res.failed} failed` : "";
+    if (patches?.length && res.captured === 0) return this.finish(`${done}.${notes.length ? ` ${notes.join(" ")}` : ""}`, true, groupId);
     this.finish(`${done}: ${plural(res.captured, "page")}${failed}.${notes.length ? ` ${notes.join(" ")}` : ""}`, res.failed === 0, groupId);
   }
 }

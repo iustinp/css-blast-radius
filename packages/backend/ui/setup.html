@@ -54,6 +54,13 @@
   .chip { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; background: #fff; cursor: pointer; user-select: none; }
   .chip.on { background: var(--accent-soft); border-color: #54aeff; color: var(--accent); }
 
+  .watch-row { display: flex; gap: 12px; align-items: baseline; padding: 10px 16px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .watch-row:first-of-type { border-top: 0; }
+  .watch-row .k { width: 92px; flex: none; font-weight: 600; }
+  .watch-row .v { flex: 1; min-width: 260px; }
+  .watch-row .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .watch-row input[type=text] { width: 380px; max-width: 100%; }
+
   .sheets-sec { border-top: 1px solid var(--line-soft); padding: 12px 16px; }
   .sheets-summary { cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; user-select: none; }
   .sheets-summary::-webkit-details-marker { color: var(--muted); }
@@ -223,6 +230,8 @@ const S = {
   search: "",
   limit: 50,
   siteEditing: false,
+  watchRepoEditing: false,
+  watchRepoDraft: undefined,
   src: "sitemap",
   pending: null,
   modalMode: "group"   // "group" or "pages"
@@ -456,6 +465,65 @@ function siteCard() {
   </div>`;
 }
 
+const WATCH_PILLS = {
+  "up-to-date": ["ok", "Up to date"],
+  waiting: ["blue", "Waiting for the site"],
+  updating: ["blue", "Updating"],
+  "no-repo": ["warn", "Repository not found"],
+  unavailable: ["", "Not available"],
+  error: ["bad", "Problem"],
+  off: ["", "Off"],
+};
+const watchPill = (st) => {
+  const [cls, label] = WATCH_PILLS[st] || ["", st];
+  return `<span class="pill ${cls}">${st === "updating" || st === "waiting" ? `<span class="spinner" style="width:9px;height:9px;margin-right:4px"></span>` : ""}${esc(label)}</span>`;
+};
+const shortSha = (sha) => (sha ? `<span class="mono">${esc(sha.slice(0, 7))}</span>` : "");
+
+function watchCard() {
+  const w = state.watch;
+  if (!w) return "";
+  const intervals = [[30, "30 seconds"], [60, "minute"], [120, "2 minutes"], [300, "5 minutes"], [900, "15 minutes"]];
+  if (!intervals.some(([s]) => s === w.intervalSec)) intervals.push([w.intervalSec, `${w.intervalSec} seconds`]);
+  const head = `<div class="card-h">
+      <label class="switch" title="${w.enabled ? "Stop following the site" : "Follow the site"}"><input type="checkbox" id="watchToggle" ${w.enabled ? "checked" : ""}><span></span></label>
+      <h2>Keep the scan up to date</h2>
+      <span class="muted small">Follows the site's code (its git branch) and page edits, and rescans only the pages a change reaches.</span>
+      <span class="sp"></span>
+      ${w.enabled ? `<span class="small muted">Check every <select id="watchInterval">${intervals.map(([s, l]) => `<option value="${s}" ${s === w.intervalSec ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></span>
+      <button class="btn small" id="watchCheck" ${w.checking ? "disabled" : ""}>${w.checking ? "Checking…" : "Check now"}</button>` : ""}
+    </div>`;
+  if (!w.enabled) {
+    return `<div class="card">${head}<div class="watch-row"><span class="muted small">Off: the scan stays as it was when last scanned, even when the site changes.</span></div></div>`;
+  }
+  const c = w.code || { state: "off" };
+  const repoName = c.repo ? c.repo.split("/").filter(Boolean).pop() : "";
+  let codeSub = "";
+  if (c.branch && c.mainCommit) {
+    const behind = c.behind > 0 ? ` · the scan is ${c.approx ? "about " : ""}${plural(c.behind, "commit")} behind${c.approx ? " (judged by the scan's date)" : ""}` : "";
+    codeSub = `<span class="mono">${esc(repoName)}</span> · <span class="mono">${esc(c.branch)}</span> at ${shortSha(c.mainCommit)}${c.state !== "up-to-date" && c.scanCommit ? `, scan at ${shortSha(c.scanCommit)}` : ""}${behind}`;
+  }
+  const editing = S.watchRepoEditing || c.state === "no-repo";
+  const repoForm = editing
+    ? `<div style="margin-top:6px"><input type="text" id="watchRepoInput" placeholder="/Users/me/github/my-site" value="${esc(S.watchRepoDraft ?? (state.site?.watch?.repo || ""))}">
+        <button class="btn small primary" id="watchRepoSave">Use this folder</button>
+        ${S.watchRepoEditing ? `<button class="btn small" id="watchRepoCancel">Cancel</button>` : ""}</div>`
+    : c.repo ? ` <button class="btn link small" id="watchRepoEdit">Change folder</button>` : "";
+  const code = `<div class="watch-row">
+      <span class="k">Code</span>${watchPill(c.state)}
+      <div class="v">${esc(c.message || (c.state === "up-to-date" ? "The scan matches the branch the site is deployed from." : ""))}
+        ${codeSub || repoForm ? `<div class="sub">${codeSub}${repoForm}</div>` : ""}
+      </div>
+    </div>`;
+  const ct = w.content || { state: "off" };
+  const content = `<div class="watch-row">
+      <span class="k">Page edits</span>${watchPill(ct.state)}
+      <div class="v">${esc(ct.message || "")}</div>
+    </div>`;
+  const checked = w.checkedAt ? `<div class="watch-row"><span class="small muted">Last checked ${timeAgo(w.checkedAt)}. Only runs while this server runs; changes made meanwhile are caught up on the next check.</span></div>` : "";
+  return `<div class="card">${head}${code}${content}${checked}</div>`;
+}
+
 function renderList() {
   const groups = state.groups || [];
   const totals = state.totals || { pages: 0, activeGroups: 0, pausedGroups: 0, pausedPages: 0, diskBytes: 0 };
@@ -490,7 +558,10 @@ function renderList() {
     projHtml = `<div class="small muted" style="margin-top:14px">No VS Code project connected yet. Open a project in VS Code with the CSS Blast Radius extension, then link it to groups from the status bar.</div>`;
   }
 
-  $("#view").innerHTML = siteCard() + `
+  const repoInput = $("#watchRepoInput");
+  const repoFocus = repoInput && document.activeElement === repoInput ? repoInput.selectionStart : null;
+  if (repoInput) S.watchRepoDraft = repoInput.value;
+  $("#view").innerHTML = siteCard() + watchCard() + `
     <div class="card">
       <div class="card-h">
         <h2>Page groups</h2>
@@ -511,6 +582,11 @@ function renderList() {
       </div>
     </div>
     ${projHtml}`;
+  const again = $("#watchRepoInput");
+  if (again && repoFocus !== null) {
+    again.focus();
+    again.setSelectionRange(repoFocus, repoFocus);
+  }
 }
 
 function renderGroup(g) {
@@ -783,6 +859,33 @@ document.addEventListener("click", async (e) => {
     window.scrollTo(0, 0);
     if (S.view !== "list") fetchPages(S.view);
   }
+  else if (t.id === "watchCheck") {
+    t.disabled = true;
+    t.textContent = "Checking…";
+    try { applyState(await api("/api/watch/check", { method: "POST" })); } catch (err) { toast(err.message, null, null, true); }
+  }
+  else if (t.id === "watchRepoEdit") {
+    S.watchRepoEditing = true;
+    S.watchRepoDraft = undefined;
+    render();
+  }
+  else if (t.id === "watchRepoCancel") {
+    S.watchRepoEditing = false;
+    S.watchRepoDraft = undefined;
+    render();
+  }
+  else if (t.id === "watchRepoSave") {
+    const repo = ($("#watchRepoInput")?.value || "").trim();
+    try {
+      const s = await api("/api/watch", { method: "PUT", body: JSON.stringify({ repo }) });
+      S.watchRepoEditing = false;
+      S.watchRepoDraft = undefined;
+      applyState(s);
+      toast(repo ? "Repository folder saved. Checking it shortly." : "The server will look for the repository among your VS Code projects.");
+    } catch (err) {
+      toast(err.message, null, null, true);
+    }
+  }
   else if (t.id === "editSite") {
     S.siteEditing = true;
     render();
@@ -987,6 +1090,11 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (t.id === "watchToggle" || t.id === "watchInterval") {
+    const body = t.id === "watchToggle" ? { enabled: t.checked } : { intervalSec: Number(t.value) };
+    try { applyState(await api("/api/watch", { method: "PUT", body: JSON.stringify(body) })); } catch (err) { toast(err.message, null, null, true); }
+    return;
+  }
   if (t.dataset.toggle) {
     const gid = t.dataset.toggle;
     const active = t.checked;

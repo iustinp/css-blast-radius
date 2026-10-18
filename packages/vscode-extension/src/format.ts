@@ -1,6 +1,6 @@
 // How numbers read (§7.1 / §8). Pure functions: no vscode import, unit-tested.
 
-import type { ChangeAnswer, Count, DiffBaseKind, FileAnswer, Freshness, RuleCount } from "./protocol";
+import type { ChangeAnswer, Count, DiffBaseKind, FileAnswer, Freshness, RuleCount, WatchStatus } from "./protocol";
 
 const plural = (n: number, word = "page") => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
 
@@ -297,4 +297,51 @@ export function noChangesText(diffBase: string | undefined, branch: Branch | und
     default:
       return branch && !branch.mainShown ? "Your branch has no CSS changes." : "No CSS changes compared with the live site.";
   }
+}
+
+/**
+ * The All tab's line about the scan it compares with: which commit of the
+ * site's branch it matches, and what the server is catching up on.
+ */
+export function scanLine(w: WatchStatus | undefined): { text: string; tip: string; busy: boolean } | undefined {
+  if (!w?.enabled) return undefined;
+  const c = w.code;
+  const ct = w.content;
+  const parts: string[] = [];
+  const tips: string[] = [];
+  const branch = c.branch ?? "the site's branch";
+  const sha = c.mainCommit?.slice(0, 7);
+  const behind = c.behind ? `${c.approx ? "about " : ""}${plural(c.behind, "commit")} behind ${branch}` : "";
+  switch (c.state) {
+    case "up-to-date":
+      parts.push(sha ? `Scan matches ${branch} (${sha})` : "Scan matches the site's code");
+      break;
+    case "updating":
+      parts.push(behind ? `Scan is ${behind}` : `${branch} changed`);
+      if (c.pages) parts.push(`updating ${plural(c.pages)}`);
+      break;
+    case "waiting":
+      parts.push(`${branch} changed, waiting for the site to serve it`);
+      break;
+    case "no-repo":
+      parts.push("Can't follow the site's code: repository not found");
+      break;
+    case "error":
+      parts.push("Couldn't check the site's code");
+      break;
+  }
+  if (c.message) tips.push(c.message);
+  if (ct.state === "updating") parts.push(`updating ${plural(ct.pages ?? 0)} edited on the site`);
+  else if (ct.state === "error") parts.push("couldn't check page edits");
+  if (ct.message && ct.state !== "up-to-date") tips.push(ct.message);
+  if (c.state === "up-to-date" && (ct.state === "up-to-date" || ct.state === "unavailable" || ct.state === "off")) parts.push("up to date");
+  if (!parts.length) return undefined;
+  const text = parts.join(" · ");
+  tips.push(
+    "The All tab compares your CSS with the pages as last scanned. "
+    + `The server checks the site every ${w.intervalSec % 60 === 0 ? plural(w.intervalSec / 60, "minute").replace(/^1 minute$/, "minute") : plural(w.intervalSec, "second")} `
+    + "and rescans only the pages a merge or a page edit reaches. Settings are on the setup page.",
+  );
+  const busy = c.state === "updating" || c.state === "waiting" || ct.state === "updating";
+  return { text: text[0].toUpperCase() + text.slice(1), tip: tips.join("\n\n"), busy };
 }

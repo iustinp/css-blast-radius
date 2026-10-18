@@ -40,7 +40,7 @@ export interface BranchPoint {
 }
 
 /** git's id for a file's content. */
-function blobId(content: Buffer): string {
+export function blobId(content: Buffer): string {
   return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 

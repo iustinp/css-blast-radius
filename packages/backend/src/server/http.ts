@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { CaptureResult } from "../capture/capture.js";
@@ -21,8 +21,9 @@ import { EDITS, need, SERIAL, SESSION_NOTIFICATIONS, sessionMethod } from "../rp
 import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type GroupInfo, type InitializeResult } from "../rpc/protocol.js";
 import { Groups, type Group } from "./groups.js";
 import { friendlyError, Jobs } from "./jobs.js";
-import { buildConfig, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, type SiteSettings } from "./settings.js";
+import { buildConfig, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, watchSettings, type SiteSettings } from "./settings.js";
 import { readSitemap } from "./sitemap.js";
+import { Watcher } from "./watch.js";
 
 export const DEFAULT_PORT = 4317;
 
@@ -33,6 +34,8 @@ export interface ServeOptions {
   l1Workers?: number;
   /** How long a project's session lives after its last editor disconnects. */
   idleMs?: number;
+  /** Check the site for changes on a timer (default true; false: only when asked). */
+  watch?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -82,6 +85,7 @@ export class App {
   readonly store: Store;
   readonly pool: L1Pool;
   readonly jobs: Jobs;
+  readonly watcher: Watcher;
   readonly shared: SharedResources;
   readonly projects = new Map<string, Project>();
   url = "";
@@ -126,6 +130,22 @@ export class App {
       changed: () => this.changed(),
       log: this.log,
     });
+    this.watcher = new Watcher({
+      store: this.store,
+      pool: this.pool,
+      jobs: this.jobs,
+      index: () => this.index(),
+      settings: () => this.settings,
+      config: () => this.cfg,
+      projectRoots: () => [...this.projects.values()].reverse().map((p) => p.root),
+      activeUrls: () => this.groups.activeUrls(),
+      changed: (status) => {
+        for (const peer of this.peers) peer.notify("scan/watch", status);
+        this.changed();
+      },
+      log: this.log,
+    });
+    if (opts.watch !== false) this.watcher.start();
     const purge = setInterval(() => {
       if (this.groups.purge()) this.changed();
     }, 30_000);
@@ -289,6 +309,7 @@ export class App {
       },
       job: this.jobs.state(),
       lastResult: this.jobs.lastResult,
+      watch: this.watcher.status,
       stylesheets,
       projects: [...this.projects.values()].map((p) => ({ id: p.id, root: p.root, name: p.name, groups: p.linked })),
     };
@@ -451,7 +472,9 @@ export class App {
               sessionStarted: started,
               serverUrl: this.url,
               groups: this.groupInfos(),
+              watch: this.watcher.status,
             };
+            this.watcher.projectsChanged();
             return r;
           }
           case "server/health":
@@ -544,11 +567,37 @@ export class App {
         return this.state();
       case "PUT /site": {
         const next = validateSettings(body);
+        if (this.settings.watch) next.watch = this.settings.watch;
         const moved = siteKey(next) !== siteKey(this.settings);
+        const otherSite = next.siteUrl !== this.settings.siteUrl || next.siteFolder !== this.settings.siteFolder;
         this.reconfigure(next);
+        this.watcher.reset(otherSite);
         this.changed();
         return { state: this.state(), needsRescan: moved && this.groups.all().length > 0 && !!this.store.currentRevision() };
       }
+      case "PUT /watch": {
+        const w = watchSettings(this.settings);
+        if (body?.enabled !== undefined) w.enabled = body.enabled === true;
+        if (body?.intervalSec !== undefined) {
+          const n = Number(body.intervalSec);
+          if (!Number.isFinite(n)) throw new UserError("The check interval must be a number of seconds.");
+          w.intervalSec = n;
+        }
+        if (body?.repo !== undefined) {
+          const repo = String(body.repo ?? "").trim();
+          if (repo && (!isAbsolute(repo) || !existsSync(repo) || !statSync(repo).isDirectory())) throw new UserError(`Enter the repository folder's full path (${repo} isn't a folder).`);
+          if (repo) w.repo = resolve(repo);
+          else delete w.repo;
+        }
+        this.settings = { ...this.settings, watch: watchSettings({ ...this.settings, watch: w }) };
+        saveSettings(this.opts.dataDir, this.settings);
+        this.watcher.reset(false);
+        this.changed();
+        return this.state();
+      }
+      case "POST /watch/check":
+        await this.watcher.check();
+        return this.state();
       case "POST /sitemap/preview": {
         const res = await readSitemap(String(body?.url ?? ""), this.settings, body?.filter ? String(body.filter) : undefined);
         return { total: res.total, urls: res.urls, otherSite: res.otherSite };
@@ -794,6 +843,7 @@ export class App {
   }
 
   async close(): Promise<void> {
+    this.watcher.stop();
     for (const t of this.timers) clearInterval(t);
     clearTimeout(this.stateTimer);
     for (const res of this.sse) res.end();

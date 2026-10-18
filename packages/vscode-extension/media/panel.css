@@ -34,7 +34,10 @@ header {
 #summary { font-size: 13px; }
 .muted { color: var(--vscode-descriptionForeground); }
 .warning { color: var(--vscode-editorWarning-foreground); }
-#meta, #branch, #warning { font-size: 12px; margin-top: 5px; }
+#meta, #branch, #warning, #scanLine { font-size: 12px; margin-top: 5px; }
+#scanLine[hidden] { display: none; }
+#scanLine.busy::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--vscode-progressBar-background, #0e70c0); animation: scanPulse 1.2s ease-in-out infinite; }
+@keyframes scanPulse { 50% { opacity: 0.25; } }
 #chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 16px 10px; max-height: 34%; overflow: auto; }
 .file-chips { width: 100%; display: flex; flex-wrap: wrap; gap: 4px; }
 .file-name { width: 100%; font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 5px; }
