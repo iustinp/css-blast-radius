@@ -1,6 +1,7 @@
 // Diff bases (§7.2): what "my edits" are compared against.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -34,6 +35,13 @@ export interface BranchPoint {
   behind: number;
   /** Checked-out branch; null when detached. */
   branch: string | null;
+  /** The checked-out commit. */
+  head: string;
+}
+
+/** git's id for a file's content. */
+function blobId(content: Buffer): string {
+  return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 
 export class Git {
@@ -41,6 +49,8 @@ export class Git {
    * `top` is the repository root as the workspace spells it; git reports the
    * real path (macOS: /tmp → /private/tmp), so both are kept for mapping.
    */
+  private versions?: { head: string; load: Promise<Set<string>> };
+
   private constructor(
     readonly top: string,
     private readonly realTop: string,
@@ -105,13 +115,35 @@ export class Git {
   async branchPoint(): Promise<BranchPoint | undefined> {
     const mainRef = await this.mainRef();
     if (!mainRef) return undefined;
-    const [mergeBase, behind, head] = await Promise.all([
+    const [mergeBase, behind, name, head] = await Promise.all([
       this.git(["merge-base", "HEAD", mainRef]),
       this.git(["rev-list", "--count", `HEAD..${mainRef}`]),
       this.git(["rev-parse", "--abbrev-ref", "HEAD"]),
+      this.git(["rev-parse", "HEAD"]),
     ]);
-    if (!mergeBase) return undefined;
-    return { mainRef, mergeBase, behind: Number(behind) || 0, branch: head && head !== "HEAD" ? head : null };
+    if (!mergeBase || !head) return undefined;
+    return { mainRef, mergeBase, behind: Number(behind) || 0, branch: name && name !== "HEAD" ? name : null, head };
+  }
+
+  /** Whether `content` was ever committed as `file` in `head`'s history (merges included). */
+  async committed(head: string, file: string, content: Buffer): Promise<boolean> {
+    const r = this.rel(file);
+    if (!r) return false;
+    if (this.versions?.head !== head) this.versions = { head, load: this.cssVersions(head) };
+    return (await this.versions.load).has(`${r}\0${blobId(content)}`);
+  }
+
+  /** Every version of every CSS file in `head`'s history, as `path\0blob id`. */
+  private async cssVersions(head: string): Promise<Set<string>> {
+    const out = await this.git(["log", "--raw", "--no-abbrev", "--no-renames", "--root", "-m", "-z", "--format=", head, "--", "*.css"]);
+    const seen = new Set<string>();
+    const parts = (out ?? "").split("\0");
+    for (let i = 0; i < parts.length - 1; i++) {
+      const meta = parts[i].trim();
+      if (!meta.startsWith(":")) continue;
+      seen.add(`${parts[++i]}\0${meta.split(" ")[3]}`);
+    }
+    return seen;
   }
 
   /**

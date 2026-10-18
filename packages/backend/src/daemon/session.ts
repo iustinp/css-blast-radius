@@ -501,12 +501,22 @@ export class Session extends EventEmitter {
   private async productionBase(path: string, point: () => Promise<BranchPoint | undefined>): Promise<BaseText | undefined> {
     const hash = this.sheetHashes(path)[0];
     if (!hash) return undefined;
-    const live = this.store.getBlob(hash).toString("utf8");
+    const blob = this.store.getBlob(hash);
+    const live = blob.toString("utf8");
     // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
     const bp = await point();
-    const text = bp && !this.mainChanges ? await this.git!.show(path, bp.mergeBase) : undefined;
-    if (text !== undefined) return { text, kind: "production", live };
-    return { text: live, kind: "production" };
+    if (!bp || this.mainChanges || (await this.scanBehind(bp, path, blob))) return { text: live, kind: "production" };
+    const text = await this.git!.show(path, bp.mergeBase);
+    return text !== undefined ? { text, kind: "production", live } : { text: live, kind: "production" };
+  }
+
+  /**
+   * The scan's copy of the file is in the branch's history (the scan is older
+   * than where the branch left the deployed branch): everything committed
+   * since then counts, as on the deployed branch itself.
+   */
+  private scanBehind(bp: BranchPoint, path: string, scanned: Buffer): Promise<boolean> {
+    return this.git!.committed(bp.head, path, scanned);
   }
 
   /** Where the checked-out branch left the deployed branch (production base only). */
@@ -619,14 +629,17 @@ export class Session extends EventEmitter {
   private async changedVsLive(point: BranchPoint | undefined, all?: string[]): Promise<string[]> {
     if (!this.index) return [];
     const bp = this.mainChanges ? undefined : point;
-    // On a branch: the files it changed, unless the site already has that exact content.
-    const files = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : all ?? await this.listCss();
+    // On a branch: the files it changed, plus those the scan is older than; unless the site has that exact content.
+    const ours = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : [];
+    const files = new Set([...ours, ...(all ?? await this.listCss())].map((f) => resolve(f)));
+    const branchChanged = new Set(ours.map((f) => resolve(f)));
     const changed: string[] = [];
     for (const f of files) {
       const hashes = this.sheetHashes(f);
       if (!hashes.length) continue;
       const t = readText(f);
-      if (t === undefined ? bp !== undefined : !hashes.includes(sha256(t))) changed.push(f);
+      if (t === undefined ? !branchChanged.has(f) : hashes.includes(sha256(t))) continue;
+      if (!bp || branchChanged.has(f) || (await this.scanBehind(bp, f, this.store.getBlob(hashes[0])))) changed.push(f);
     }
     return changed;
   }

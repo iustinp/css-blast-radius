@@ -78,7 +78,18 @@ describe("Git branch point", () => {
 
   it("finds where the branch left origin/main and how far behind it is", async () => {
     const g = (await Git.find(dir))!;
-    expect(await g.branchPoint()).toEqual({ mainRef: "origin/main", mergeBase: forkSha, behind: 1, branch: "feature" });
+    expect(await g.branchPoint()).toEqual({ mainRef: "origin/main", mergeBase: forkSha, behind: 1, branch: "feature", head: git(dir, "rev-parse HEAD") });
+  });
+
+  it("knows which versions of a file the branch's history has", async () => {
+    const g = (await Git.find(dir))!;
+    const head = git(dir, "rev-parse HEAD");
+    const b = path.join(dir, "css", "b.css");
+    expect(await g.committed(head, b, Buffer.from(".b { color: red; }\n"))).toBe(true);
+    // Only main has it.
+    expect(await g.committed(head, b, Buffer.from(".b { color: blue; }\n"))).toBe(false);
+    expect(await g.committed(head, path.join(dir, "css", "a.css"), Buffer.from(".a { color: orange; }\n"))).toBe(true);
+    expect(await g.committed(head, path.join(dir, "css", "new.css"), Buffer.from(".n { color: red; }\n"))).toBe(false);
   });
 
   it("prefers the remote's default branch when it is known", async () => {
@@ -244,5 +255,25 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     expect(live.files.map((f) => [f.open, f.edits.map((e) => e.selector)])).toEqual([[false, [".btn"]]]);
     await session.setDiffBase("production");
     expect((await session.liveEdits()).files.map((f) => f.edits.length)).toEqual([1]);
+  });
+
+  it("on main itself, or a branch started after the scan, commits made since the scan count", async () => {
+    git(ws, "checkout -q main");
+    const scanned = fs.readFileSync(cssPath, "utf8");
+    fs.writeFileSync(cssPath, scanned.replace("font-weight: 300;", "font-weight: 500;"));
+    commitAll(ws, "D on main, after the scan");
+    git(ws, "update-ref refs/remotes/origin/main HEAD");
+    let total = await session.setDiffBase("production");
+    expect(total.branch).toMatchObject({ name: "main", behind: 0 });
+    expect(total.files.map((f) => f.changes)).toEqual([1]);
+    expect((await session.liveEdits()).files[0].edits.map((e) => e.selector)).toEqual([".card .title"]);
+
+    git(ws, "checkout -q -b later");
+    fs.writeFileSync(cssPath, fs.readFileSync(cssPath, "utf8").replace("#hero {", "#hero {\n  outline: 1px solid blue;"));
+    total = await session.setDiffBase("production");
+    expect(total.branch).toMatchObject({ name: "later", behind: 0 });
+    const res = await session.open(cssPath, fs.readFileSync(cssPath, "utf8"), 7);
+    expect(res.answer.changes.map((c) => c.selector).sort()).toEqual(["#hero", ".card .title"]);
+    await session.close(cssPath);
   });
 });
