@@ -32,6 +32,20 @@ export interface MeasureRequest extends Partial<SheetEdit> {
   maxElements?: number;
   /** Bulk work (impact assessment): waits behind interactive renders. */
   background?: boolean;
+  /**
+   * The edited rules' selectors and the properties each edit sets: matching
+   * elements whose own values for those properties change are changed by the
+   * edit itself, not just pushed around by it (the outlines).
+   */
+  targets?: RenderTarget[];
+}
+
+export interface RenderTarget {
+  /** A selector querySelectorAll accepts (pseudo-elements removed). */
+  selector: string;
+  /** The rule styles this pseudo-element of the matched elements. */
+  pseudo?: "before" | "after" | "marker";
+  props: string[];
 }
 
 export interface ElementDiff {
@@ -70,6 +84,13 @@ export interface PageDiff {
   /** Page width in CSS px and screenshot pixels per CSS px (with screenshots). */
   pageWidth?: number;
   scale?: number;
+  /**
+   * Content in both versions (with screenshots), to line the two up: 8 numbers
+   * per item, its box before then after (x, y, width, height in page CSS px).
+   * Text runs and images come first (`anchorLeaves` of them), then elements.
+   */
+  anchors?: number[];
+  anchorLeaves?: number;
   timingMs: number;
 }
 
@@ -275,7 +296,13 @@ export class Renderer {
         out.scale = this.profile(req.variant.profile).deviceScaleFactor ?? 1;
       }
 
-      diffSnapshots(before, after, props, req.maxElements ?? 200, out);
+      const targets = req.targets?.length ? await matchTargets(page, cdp, req.targets, props).catch(() => undefined) : undefined;
+      diffSnapshots(before, after, props, req.maxElements ?? 200, out, targets);
+      if (out.screenshots) {
+        const { anchors, leaves } = anchorsOf(before, after);
+        out.anchors = anchors;
+        out.anchorLeaves = leaves;
+      }
       return done(out.changedElements + out.movedElements > 0 ? "changed" : "unchanged");
     } catch (err: any) {
       return done("inconclusive", String(err?.message ?? err).split("\n")[0]);
@@ -361,11 +388,96 @@ function nodePath(nodes: Snapshot["nodes"], idx: number): string {
   return parts.join(" > ") || nodes.name[idx].toLowerCase();
 }
 
+/** At most this many selector queries per page. */
+const MAX_TARGET_QUERIES = 200;
+
+/**
+ * The elements (and pseudo-elements) the edited rules apply to, by snapshot
+ * node key, with the compared longhands their edits set.
+ */
+async function matchTargets(page: Page, cdp: CDPSession, targets: RenderTarget[], compared: string[]): Promise<Map<string, Set<string>>> {
+  const groups = new Map<string, { pseudo: string; props: string[]; selectors: string[] }>();
+  for (const t of targets) {
+    const props = [...new Set(t.props)].sort();
+    const k = `${t.pseudo ?? ""}|${props.join(",")}`;
+    let g = groups.get(k);
+    if (!g) groups.set(k, (g = { pseudo: t.pseudo ? `::${t.pseudo}` : "", props, selectors: [] }));
+    if (!g.selectors.includes(t.selector)) g.selectors.push(t.selector);
+  }
+  const list = [...groups.values()];
+  const expanded = (await page.evaluate(`(${JSON.stringify(list.map((g) => g.props))}).map(${EXPAND_SCRIPT})`)) as string[][];
+  const inCompared = new Set(compared);
+
+  const backend = new Map<number, number>();
+  const { root } = (await cdp.send("DOM.getDocument", { depth: -1 })) as any;
+  const walk = (n: any) => {
+    backend.set(n.nodeId, n.backendNodeId);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+
+  const out = new Map<string, Set<string>>();
+  let queries = 0;
+  const query = async (selector: string): Promise<number[]> => {
+    if (queries++ >= MAX_TARGET_QUERIES) return [];
+    try {
+      return ((await cdp.send("DOM.querySelectorAll", { nodeId: root.nodeId, selector })) as any).nodeIds;
+    } catch {
+      return [];
+    }
+  };
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i];
+    const own = expanded[i].filter((p) => inCompared.has(p));
+    if (!own.length) continue;
+    let ids = await query(g.selectors.join(", "));
+    // One selector the browser rejects fails the whole list: query them one by one.
+    if (!ids.length && g.selectors.length > 1) for (const sel of g.selectors) ids = ids.concat(await query(sel));
+    for (const id of ids) {
+      const b = backend.get(id);
+      if (b === undefined) continue;
+      const key = String(b) + g.pseudo;
+      let set = out.get(key);
+      if (!set) out.set(key, (set = new Set()));
+      for (const p of own) set.add(p);
+    }
+  }
+  return out;
+}
+
+const MAX_ANCHORS = 6000;
+const LEAF_ELEMENTS = /^(img|svg|video|canvas|iframe|input|button|select|textarea|picture|object|embed)$/i;
+
+/** Before/after box pairs of what is on the page in both versions (see PageDiff.anchors). */
+function anchorsOf(a: Snapshot, b: Snapshot): { anchors: number[]; leaves: number } {
+  const leaves: Array<[number[], number[]]> = [];
+  const others: Array<[number[], number[], number]> = [];
+  for (const [key, ba] of a.boxes) {
+    const bb = b.boxes.get(key);
+    if (!bb || ba[2] <= 0 || ba[3] <= 0 || bb[2] <= 0 || bb[3] <= 0) continue;
+    const i = a.index.get(key)!;
+    const type = a.nodes.type[i];
+    const name = a.nodes.name[i];
+    if (type === 3 || (type === 1 && LEAF_ELEMENTS.test(name))) leaves.push([ba, bb]);
+    else if (type === 1 && !/^(html|body)$/i.test(name)) others.push([ba, bb, ba[2] * ba[3]]);
+  }
+  // Too many: keep every text run and image we can, then the smallest elements.
+  const keepLeaves = leaves.slice(0, MAX_ANCHORS);
+  const keepOthers = others.length > MAX_ANCHORS - keepLeaves.length ? others.sort((x, y) => x[2] - y[2]).slice(0, MAX_ANCHORS - keepLeaves.length) : others;
+  const anchors: number[] = [];
+  for (const [ba, bb] of [...keepLeaves, ...keepOthers]) for (const v of [...ba.slice(0, 4), ...bb.slice(0, 4)]) anchors.push(Math.round(v));
+  return { anchors, leaves: keepLeaves.length };
+}
+
 const TOLERANCE = 0.5;
 const MAX_ZONES = 100;
 const MAX_ZONE_PROPS = 12;
+const ROOT = /^(html|body)$/i;
+/** Computed values that are layout results: they change when anything nearby grows or shrinks. */
+const DERIVED = /^(width|height|inline-size|block-size|(margin|padding|inset)(-.+)?|top|right|bottom|left|transform|transform-origin|perspective-origin|grid-template-(rows|columns))$/;
+const SIZE = /^(width|height|inline-size|block-size)$/;
 
-function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff): void {
+function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff, targets?: Map<string, Set<string>>): void {
   const snap = (id: string) => (a.index.has(id) ? a : b);
   const at = (id: string) => snap(id).index.get(id) ?? -1;
   const parentOf = (id: string): string | undefined => {
@@ -400,9 +512,25 @@ function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, o
   out.changedElements = changed.length;
   out.movedElements = moved.length;
 
-  // Zones: the outermost elements whose own styles changed; layout shifts follow from them.
+  // Zones: the outermost elements the edits change themselves. A parent that
+  // only got taller (or a page-wide box whose used size or margins moved)
+  // follows from them; a rule's own elements, a new look (color, font,
+  // display...), or anything appearing or disappearing is a change of its own.
+  const isRoot = (id: string) => ROOT.test(snap(id).nodes.name[at(id)]);
+  const grew = new Set<string>();
+  for (const [id] of changed) for (let p = parentOf(id); p !== undefined && !grew.has(p); p = parentOf(p)) grew.add(p);
+  const isCause = ([id, e]: [string, ElementDiff]) => {
+    if (e.kind !== "changed") return !isRoot(id);
+    const own = targets?.get(id);
+    if (own && e.props.some((p) => own.has(p.prop))) return true;
+    if (e.props.some((p) => !DERIVED.test(p.prop))) return true;
+    if (isRoot(id)) return false;
+    return !(grew.has(id) && e.props.every((p) => SIZE.test(p.prop)));
+  };
+  const causes = changed.filter(isCause);
   // Only when nothing changed directly (a property we didn't compare) do moved boxes stand in.
-  const source = changed.length ? changed : moved.filter(([id]) => !/^(body|html)$/i.test(snap(id).nodes.name[at(id)]));
+  const shifted = moved.filter(([id]) => !isRoot(id));
+  const source = causes.length ? causes : shifted.length ? shifted : changed;
   const inSource = new Map(source);
   const outerOf = (id: string): string | undefined => {
     let found: string | undefined;

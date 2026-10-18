@@ -362,6 +362,13 @@ export interface PageDiffView {
   after: string;
   /** Outermost changed elements, top to bottom (page coordinates, CSS px). */
   zones: Array<{ before: Box | null; after: Box | null; label: string; props: Array<{ prop: string; before: string; after: string }> }>;
+  /**
+   * Content found in both versions, to keep them lined up when flipping: 8
+   * numbers per item, its box before then after (x, y, width, height, CSS px).
+   * The first `anchorLeaves` are text runs and images, the rest elements.
+   */
+  anchors?: number[];
+  anchorLeaves?: number;
   changedElements: number;
   movedElements: number;
   timingMs: number;

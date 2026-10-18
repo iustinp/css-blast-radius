@@ -215,6 +215,31 @@
     100% { box-shadow: 0 0 0 0 #f9731600; }
   }
   .dstage.no-ol .ol { display: none !important; }
+  .dstage { cursor: crosshair; }
+
+  /* The spot kept lined up when flipping */
+  .pin {
+    position: absolute;
+    z-index: 5;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px #fff, 0 2px 8px #0009;
+    pointer-events: none;
+  }
+  .pin::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 4px;
+    height: 4px;
+    margin: -2px 0 0 -2px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
 
   /* Floating outline tooltip */
   .tip {
@@ -361,7 +386,7 @@
     <button data-v="before" tabindex="-1">Before</button>
     <button data-v="after" class="on" tabindex="-1">After</button>
   </span>
-  <span class="kbd" title="Press Space to flip between before and after">Space</span>
+  <span class="kbd" title="Press Space to flip between before and after. The spot in the middle of the view, or the one you click, stays in place.">Space</span>
   <button class="dbtn" data-jump="-1" tabindex="-1" title="Previous change (Shift+N)">↑</button>
   <span class="dpos" id="dPos"></span>
   <button class="dbtn" data-jump="1" tabindex="-1" title="Next change (N)">↓</button>
@@ -415,7 +440,11 @@ const D = {
   outlines: true,
   data: null,
   zi: -1,
-  stageH: 0
+  stageH: 0,
+  /** The clicked spot kept lined up when flipping, in the shown version's page px. */
+  pin: null,
+  /** The last flip, to flip straight back to the same place if nothing moved since. */
+  memo: null
 };
 
 let inFlight = null;
@@ -503,6 +532,8 @@ function showError(msg) {
 function applyDiffData(data, keepScroll, prevScroll) {
   D.data = data;
   device = data.device || device;
+  D.memo = null;
+  if (!keepScroll) D.pin = null;
 
   // Restore DOM structure if replaced by loading/error
   if (!$("#dstage")) {
@@ -610,6 +641,7 @@ function applyDiffData(data, keepScroll, prevScroll) {
 
   applyView(false);
   updatePos();
+  drawPin();
 
   if (keepScroll) {
     $("#dscroll").scrollTop = prevScroll;
@@ -644,16 +676,105 @@ function applyView(pop = true) {
 
   const badge = $("#vbadge");
   badge.className = "vbadge" + (D.v === "before" ? " b" : "");
-  badge.innerHTML = `${D.v === "before" ? "BEFORE" : "AFTER"}<span>Space to flip</span>`;
+  badge.innerHTML = `${D.v === "before" ? "BEFORE" : "AFTER"}<span>Space to flip · ${D.pin ? "Esc to remove the pin" : "click a spot to keep it in place"}</span>`;
   if (pop) {
     void badge.offsetWidth;
     badge.classList.add("pop");
   }
 }
 
-function flip() {
-  D.v = D.v === "after" ? "before" : "after";
+/**
+ * Shows the other version with the same content where it was: the pinned
+ * spot if it's in view, else the middle of the view.
+ */
+function flip(to) {
+  const from = D.v;
+  const next = to || (from === "after" ? "before" : "after");
+  if (next === from) return;
+  const sc = $("#dscroll"), stage = $("#dstage");
+  const top = sc.scrollTop, left = sc.scrollLeft;
+  let goTop = top, goLeft = left, pin = D.pin;
+  const m = D.memo;
+  if (m && m.v === next && m.atTop === top && m.atLeft === left && m.pinAt === pin) {
+    // Flipping back without scrolling: exactly where it was, no drift.
+    goTop = m.top;
+    goLeft = m.left;
+    pin = m.pin;
+  } else if (stage && D.data) {
+    const ox = stage.offsetLeft, oy = stage.offsetTop;
+    const width = D.data.width || stage.clientWidth;
+    const inView = pin && pin.y + oy >= top && pin.y + oy <= top + sc.clientHeight && pin.x + ox >= left && pin.x + ox <= left + sc.clientWidth;
+    const p = inView ? pin : { x: Math.min(width, Math.max(0, left + sc.clientWidth / 2 - ox)), y: top + sc.clientHeight / 2 - oy };
+    const q = mapPoint(p.x, p.y, from);
+    goTop = top + q.y - p.y;
+    goLeft = left + q.x - p.x;
+    if (pin) pin = inView ? q : mapPoint(pin.x, pin.y, from);
+  }
+  const prevPin = D.pin;
+  D.v = next;
+  D.pin = pin;
   applyView(true);
+  drawPin();
+  sc.scrollTo({ top: goTop, left: goLeft, behavior: "instant" });
+  D.memo = { v: from, top, left, pin: prevPin, atTop: sc.scrollTop, atLeft: sc.scrollLeft, pinAt: pin };
+}
+
+/**
+ * Where a point of one version is in the other: at the same place within the
+ * text or image under it; else moved as the nearest text or image moved; else
+ * at the same place within the smallest element around it.
+ */
+const NEAR = 150;
+function mapPoint(x, y, from) {
+  const A = (D.data && D.data.anchors) || [];
+  const n = Math.floor(A.length / 8);
+  if (!n) return { x, y };
+  const leaves = Math.min(D.data.anchorLeaves || 0, n);
+  const f = from === "before" ? 0 : 4, t = 4 - f;
+  const nearest = (lo, hi, max) => {
+    let best = -1, bestD = Infinity, bestArea = Infinity;
+    for (let k = lo; k < hi; k++) {
+      const i = k * 8;
+      const bx = A[i + f], by = A[i + f + 1], bw = A[i + f + 2], bh = A[i + f + 3];
+      const d = Math.hypot(Math.max(bx - x, 0, x - bx - bw), Math.max(by - y, 0, y - by - bh));
+      if (d > max) continue;
+      const area = bw * bh;
+      if (d < bestD || (d === bestD && area < bestArea)) { best = i; bestD = d; bestArea = area; }
+    }
+    return best < 0 ? null : { i: best, inside: bestD === 0 };
+  };
+  const via = ({ i, inside }) => {
+    const fx = A[i + f], fy = A[i + f + 1], fw = A[i + f + 2], fh = A[i + f + 3];
+    const tx = A[i + t], ty = A[i + t + 1], tw = A[i + t + 2], th = A[i + t + 3];
+    if (inside) return { x: tx + (x - fx) * (tw / fw), y: ty + (y - fy) * (th / fh) };
+    return { x: x + tx - fx, y: y + ty - fy };
+  };
+  const hit = nearest(0, leaves, NEAR) || nearest(leaves, n, 0) || nearest(0, n, Infinity);
+  return hit ? via(hit) : { x, y };
+}
+
+function drawPin() {
+  const stage = $("#dstage");
+  let el = $("#dPin");
+  if (!D.pin || !stage) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dPin";
+    el.className = "pin";
+  }
+  if (el.parentNode !== stage) stage.appendChild(el);
+  el.style.left = D.pin.x + "px";
+  el.style.top = D.pin.y + "px";
+}
+
+function setPin(pin) {
+  D.pin = pin;
+  D.memo = null;
+  drawPin();
+  applyView(false);
 }
 
 // ---------------------------------------------------------------- scrollbar marks
@@ -764,8 +885,7 @@ document.addEventListener("click", (e) => {
   if (!t) return;
 
   if (t.dataset.v) {
-    D.v = t.dataset.v;
-    applyView(true);
+    flip(t.dataset.v);
   } else if (t.dataset.jump) {
     jump(+t.dataset.jump);
   } else if (t.dataset.zi && t.closest(".marks")) {
@@ -782,6 +902,16 @@ document.addEventListener("click", (e) => {
 
   // Prevent buttons from stealing keyboard Space
   if (t.matches("button")) t.blur();
+});
+
+// Click a spot on the page to keep it in place when flipping; click it again to remove.
+$("#dscroll").addEventListener("click", (e) => {
+  const stage = $("#dstage");
+  if (!stage || !stage.contains(e.target) || !D.data || window.getSelection().toString()) return;
+  const r = stage.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (D.pin && Math.hypot(D.pin.x - x, D.pin.y - y) < 12) setPin(null);
+  else setPin({ x, y });
 });
 
 $("#dOutl").addEventListener("change", (e) => {
@@ -811,6 +941,9 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     D.outlines = !D.outlines;
     applyView(false);
+  } else if (e.key === "Escape" && D.pin) {
+    e.preventDefault();
+    setPin(null);
   }
 });
 

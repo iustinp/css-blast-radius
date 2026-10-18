@@ -18,7 +18,7 @@ import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0
 import { SiteIndex } from "../index/siteIndex.js";
 import { Store, type PageRow, type VariantInfo } from "../index/store.js";
 import { L1Pool } from "../l1/pool.js";
-import { DEFAULT_PROPS, Renderer, type PageDiff, type SheetEdit } from "../l2/render.js";
+import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type SheetEdit } from "../l2/render.js";
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
@@ -1345,6 +1345,7 @@ export class Session extends EventEmitter {
       editedText: texts.editedText,
       props,
       screenshots,
+      targets: targetsFor(changes),
     });
     if (texts.conflict) diff.warnings.unshift(conflictWarning(this.relPath(snap.r.answer.file), this.branch));
     if (diff.status === "unchanged" && unresolved.length) {
@@ -1424,7 +1425,16 @@ export class Session extends EventEmitter {
       return finish();
     }
     const { props, unresolved } = this.propsFor(changes, models, page);
-    const diff = await this.getRenderer().measure({ page, variant, mode: p.live ? "live" : "shell", edits, props, screenshots: true, maxElements: 500 });
+    const diff = await this.getRenderer().measure({
+      page,
+      variant,
+      mode: p.live ? "live" : "shell",
+      edits,
+      props,
+      screenshots: true,
+      maxElements: 500,
+      targets: targetsFor(changes),
+    });
     view.status = diff.status;
     view.reason = diff.reason;
     view.warnings = [...warnings, ...diff.warnings];
@@ -1442,6 +1452,10 @@ export class Session extends EventEmitter {
     }
     const box = (b: number[] | null) => (b ? ([b[0], b[1], b[2], b[3]] as [number, number, number, number]) : null);
     view.zones = diff.zones.map((z) => ({ before: box(z.before), after: box(z.after), label: z.label, props: z.props }));
+    if (diff.anchors?.length) {
+      view.anchors = diff.anchors;
+      view.anchorLeaves = diff.anchorLeaves ?? 0;
+    }
     return finish();
   }
 
@@ -1642,6 +1656,31 @@ export class Session extends EventEmitter {
     await this.pool.close();
     this.store.close();
   }
+}
+
+const MAX_TARGETS = 400;
+const PSEUDO_TARGET = /(?:::(before|after|marker)|:(before|after))\s*$/i;
+
+/** The edited rules' selectors with the properties each edit sets (the diff's outlines). */
+function targetsFor(changes: CssChange[]): RenderTarget[] {
+  const out = new Map<string, RenderTarget>();
+  for (const c of changes) {
+    const rule = c.after ?? c.before;
+    if (!rule) continue;
+    const set = c.kind === "declarations" ? (c.changedProps ?? []) : rule.decls.map((d) => d.prop);
+    const props = [...new Set(set.filter((p) => !p.startsWith("--")))].sort();
+    if (!props.length) continue;
+    for (const r of [c.after, c.before]) {
+      for (const cs of r?.complex ?? []) {
+        if (cs.invalid || cs.unanalyzable || out.size >= MAX_TARGETS) continue;
+        const m = PSEUDO_TARGET.exec(cs.text);
+        const t: RenderTarget = { selector: cs.key, props };
+        if (m) t.pseudo = (m[1] ?? m[2]).toLowerCase() as RenderTarget["pseudo"];
+        out.set(`${t.pseudo ?? ""}|${t.selector}|${props.join(",")}`, t);
+      }
+    }
+  }
+  return [...out.values()];
 }
 
 function inconclusiveImpact(reason: string): PageImpact {

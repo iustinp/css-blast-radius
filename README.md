@@ -106,8 +106,9 @@ In the **All** tab, in a git repository, only **your branch's changes** count: i
 - **See an edit's whole rule.** Hover the small green ↗ button at the end of an edit chip (or tab to it) to see its rule as it is in the file: the declarations that make up the edit in green (with the old value next to a changed one), the rest in gray, removed ones struck through in red. You can select text in it, or press **Copy**.
 - **Jump to the rule.** Click that green ↗ button (or **Go to rule** in the card): it opens the file at the changed line, so you can adjust it right away.
 - Click **Assess impact** above the list to check every listed page with your edits applied (a few seconds for a couple dozen pages). The list then puts the pages that look different on top, most changed first, shaded deeper blue; pages with no visual change go to the bottom, unshaded. The next edit clears the ranking.
-- **Click a page** to open the before/after comparison in a VS Code tab. It shows the whole page and outlines what changed:
-  - **Space** flips between before and after;
+- **Click a page** to open the before/after comparison in a VS Code tab. It shows the whole page and outlines each element your edits change: the elements your edited rules style, and anything that appears, disappears or looks different. Parents that only grow or shrink around them aren't outlined, so an edit to a few list items outlines those items, not the whole page. An edit to `body` or `html` still outlines the whole page.
+  - **Space** flips between before and after. It keeps the same content where it was on screen, even far down a page where your edits pushed things up or down. It lines up the text or image in the middle of the view;
+  - **Click a spot** to pin it: flipping then keeps that spot in place instead. Click the pin again, or press **Esc**, to remove it;
   - **N** jumps to the next change;
   - **Check on the live page** loads the real page instead of the stored copy;
   - **Open in browser** opens the same view outside VS Code.

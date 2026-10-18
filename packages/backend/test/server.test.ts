@@ -266,6 +266,8 @@ describe("local server", () => {
     expect(d.json.width).toBeGreaterThan(0);
     expect(d.json.zones.length).toBeGreaterThan(0);
     expect(d.json.zones[0].props).toContainEqual({ prop: "color", before: expect.any(String), after: expect.any(String) });
+    expect(d.json.anchors.length % 8).toBe(0);
+    expect(d.json.anchorLeaves).toBeGreaterThan(0);
     const gone = await api("GET", `/api/diff?s=nope&url=/index.html`);
     expect(gone.status).toBe(404);
     const fresh = await api("GET", `/api/diff?s=${sessionId}&url=/never.html`);

@@ -146,6 +146,57 @@ describe.skipIf(skipBrowser)("L2 renderer on fixture site (§6.6, §16)", () => 
     expect(result.zones.map((z) => z.label)).toEqual([expect.stringContaining("button.btn")]);
   }, 60_000);
 
+  it("outlines the edited element, not the parents that only grew", async () => {
+    const pageIndex = idx.pages[idx.byUrl.get("/about.html")!];
+    const base = baseCssText + "\n.card .title { display: block; }\n";
+    const edited = baseCssText + "\n.card .title { display: block; margin: 40px; }\n";
+
+    const result = await renderer.measure({
+      page: pageIndex,
+      variant: idx.variants[0],
+      mode: "shell",
+      sheetKeys: ["/css/main.css"],
+      baseText: base,
+      editedText: edited,
+      // Several picked edits compare sizes too: the card, body and html grow.
+      props: ["margin", "width", "height"],
+      screenshots: true,
+    });
+
+    expect(result.status).toBe("changed");
+    expect(result.elements.map((e) => e.path)).toEqual(expect.arrayContaining(["body > div.card"]));
+    expect(result.zones.map((z) => z.label)).toEqual(["body > div.card > span.title"]);
+
+    // Alignment points: the title's text sits 40px lower and further right after the edit.
+    const a = result.anchors!;
+    expect(a.length % 8).toBe(0);
+    expect(result.anchorLeaves).toBeGreaterThan(0);
+    const shifted = [];
+    for (let i = 0; i < result.anchorLeaves! * 8; i += 8) if (a[i + 5] - a[i + 1] === 40 && a[i + 4] - a[i] === 40) shifted.push(i);
+    expect(shifted.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("outlines an edited element whose size changed, not what it holds", async () => {
+    const pageIndex = idx.pages[idx.byUrl.get("/about.html")!];
+    const base = baseCssText + "\n.card { width: 300px; }\n.card .title { display: block; }\n";
+    const edited = baseCssText + "\n.card { width: 200px; }\n.card .title { display: block; }\n";
+    const req = {
+      page: pageIndex,
+      variant: idx.variants[0],
+      mode: "shell" as const,
+      sheetKeys: ["/css/main.css"],
+      baseText: base,
+      editedText: edited,
+      props: ["width", "height"],
+    };
+
+    const plain = await renderer.measure(req);
+    expect(plain.zones.map((z) => z.label)).toEqual(["body > div.card > span.title"]);
+
+    const result = await renderer.measure({ ...req, targets: [{ selector: ".card", props: ["width"] }] });
+    expect(result.zones.map((z) => z.label)).toEqual(["body > div.card"]);
+  }, 60_000);
+
   it("reports 'inconclusive' when the page does not load the edited stylesheet", async () => {
     const pageIndex = idx.pages[idx.byUrl.get("/index.html")!];
     const variant = idx.variants[0];
