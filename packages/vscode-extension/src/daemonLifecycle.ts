@@ -43,7 +43,7 @@ export class DaemonLifecycle implements vscode.Disposable {
   /** This window (a reload is a new one): the server starts a new "This session" for it. */
   private readonly windowId = randomUUID();
 
-  constructor(private readonly workspaceRoot: string) {
+  constructor(private readonly workspaceRoot: string, private readonly linkedGroups: () => string[]) {
     this.client.onClose(() => {
       if (this.disposed) return;
       this.setState("DISCONNECTED", "Server disconnected; reconnecting…");
@@ -139,7 +139,7 @@ export class DaemonLifecycle implements vscode.Disposable {
       return new Error("Extension deactivated");
     }
     try {
-      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, client: "vscode", windowId: this.windowId }, 10_000);
+      const init = await this.client.call<InitializeResult>("initialize", { workspaceRoot: this.workspaceRoot, client: "vscode", windowId: this.windowId, groups: this.linkedGroups() }, 10_000);
       if (init.protocolMajor !== PROTOCOL_MAJOR) throw new Error(`Incompatible server (protocol ${init.protocolMajor}, need ${PROTOCOL_MAJOR}).`);
       this.init = init;
       this.retryMs = 500;

@@ -21,7 +21,6 @@ import { EDITS, need, SERIAL, SESSION_NOTIFICATIONS, sessionMethod } from "../rp
 import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type GroupInfo, type InitializeResult } from "../rpc/protocol.js";
 import { Groups, type Group } from "./groups.js";
 import { friendlyError, Jobs } from "./jobs.js";
-import { Links } from "./links.js";
 import { buildConfig, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, watchSettings, type SiteSettings } from "./settings.js";
 import { readSitemap } from "./sitemap.js";
 import { Watcher } from "./watch.js";
@@ -46,7 +45,7 @@ interface Project {
   name: string;
   session: Session;
   peers: Set<RpcPeer>;
-  /** Linked group ids (kept by the server in links.json, not in the project). */
+  /** Linked group ids: each editor keeps its own choice and sends it on initialize. */
   linked: string[];
   serial: Promise<unknown>;
   /** editRevision:selectionRevision last announced to diff viewers. */
@@ -83,7 +82,6 @@ class HttpError extends UserError {}
 export class App {
   settings: SiteSettings;
   readonly groups: Groups;
-  private readonly links: Links;
   readonly store: Store;
   readonly pool: L1Pool;
   readonly jobs: Jobs;
@@ -110,7 +108,6 @@ export class App {
     mkdirSync(opts.dataDir, { recursive: true });
     this.settings = loadSettings(opts.dataDir);
     this.groups = new Groups(opts.dataDir);
-    this.links = new Links(opts.dataDir);
     this.store = new Store(opts.dataDir);
     this.pool = new L1Pool({ blobDir: this.store.blobDir, workers: opts.l1Workers });
     this.cfg = buildConfig(this.settings, opts.dataDir);
@@ -378,7 +375,7 @@ export class App {
       pending = (async () => {
         if (!existsSync(root) || !statSync(root).isDirectory()) throw new RpcError(ERR.invalidParams, `folder not found: ${root}`);
         const session = await Session.create({ workspaceRoot: root, shared: this.shared, diffBase: "production", scope: [] });
-        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: this.links.get(root), serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}`, begun: false, windows: new Set() };
+        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}`, begun: false, windows: new Set() };
         for (const [event, method] of SESSION_NOTIFICATIONS) session.on(event, (x) => p.peers.forEach((c) => c.notify(method, x)));
         session.on("publish", () => this.edited(p));
         session.on("externalChange", () => this.edited(p));
@@ -459,6 +456,7 @@ export class App {
             if (peer.closed) throw new RpcError(ERR.invalidRequest, "connection closed");
             project.peers.add(peer);
             if (windowId && project.unacked === windowId) project.unacked = undefined;
+            if (Array.isArray(p.groups)) project.linked = [...new Set((p.groups as unknown[]).map(String))];
             project.session.setScope(this.scopeFor(project.linked));
             this.changed();
             const r: InitializeResult = {
@@ -493,7 +491,6 @@ export class App {
             const ids = need(p, "groups");
             if (!Array.isArray(ids)) throw new RpcError(ERR.invalidParams, "groups must be a list of group ids");
             pr.linked = [...new Set(ids.map(String))];
-            this.links.set(pr.root, pr.linked);
             const total = pr.session.setScope(this.scopeFor(pr.linked));
             this.changed();
             return total;

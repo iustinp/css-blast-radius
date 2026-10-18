@@ -336,13 +336,14 @@ async function run() {
       assert.equal(data.result.total, 0);
       assert.equal(data.result.count.exact, 0);
     });
-    await check("link picker: the server keeps the link, nothing is written into the project", async () => {
+    await check("link picker: kept in VS Code's storage for this folder and sent to the server, nothing in the project", async () => {
       pickedIds = [homeId];
       await vscode.commands.executeCommand("cssBlastRadius.linkGroups");
+      assert.deepEqual(state.get("linkedGroups"), [homeId]);
       await waitFor(async () => (await json("/api/state")).projects.find((p) => p.root === workspace)?.groups.includes(homeId), "server group link");
       assert(!fs.existsSync(path.join(workspace, ".vscode")), "a .vscode folder was created in the project");
       await vscode.commands.executeCommand("cssBlastRadius.linkGroups");
-      assert.deepEqual(quickPicks.at(-1).filter((x) => x.picked).map((x) => x.id), [homeId], "the picker should show the server's link");
+      assert.deepEqual(quickPicks.at(-1).filter((x) => x.picked).map((x) => x.id), [homeId], "the picker should show the saved link");
       assert(!statusItem.text.includes("Link page groups"), statusItem.text);
     });
     await check("typing: .btn decoration and status count update before save", async () => {

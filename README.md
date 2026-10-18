@@ -88,7 +88,7 @@ The setup page and the panel's **All** tab show where the scan stands: `Scan mat
 2. Open your project.
 3. Click **Link page groups** in the status bar (or run **CSS Blast Radius: Link Page Groups**) and pick the groups you work on.
 
-The server remembers the choice for each project folder (in `links.json` in its data folder), so nothing is added to your repo.
+VS Code remembers the choice for this folder on your machine (in its own storage), so nothing is added to your repo, and each teammate picks their own groups.
 
 Your CSS files are matched to the site's stylesheets **by file name**. Hashes, version numbers and `.min` are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`. No git or build setup is needed.
 

@@ -13,7 +13,7 @@ import type { ChangeDescription } from "../css/describe.js";
 export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 7;
+export const PROTOCOL_MINOR = 8;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -118,6 +118,8 @@ export interface InitializeParams {
   /** One per editor window: a new window (or a reload) starts a new "This session". */
   windowId?: string;
   client?: string;
+  /** Group ids the editor linked to this project (kept on the developer's machine, not in the repo). Absent: keep the current link. */
+  groups?: string[];
 }
 
 /** Which pages counts cover: the linked active page groups (server mode). */

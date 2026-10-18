@@ -29,7 +29,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
   }
   const folderUri = folder.uri;
 
-  const life = new DaemonLifecycle(folderUri.fsPath);
+  // Linked groups stay in VS Code's own storage for this folder on this machine: not in the repo, not on the server.
+  const linkedGroups = () => ctx.workspaceState.get<string[]>("linkedGroups") ?? [];
+  const life = new DaemonLifecycle(folderUri.fsPath, linkedGroups);
   const client = life.client;
   const state = new ImpactState();
   const log = (m: string) => life.output.appendLine(m);
@@ -100,8 +102,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }
   }
 
-  /** Links the project to these groups (the server keeps the choice, outside the project). */
+  /** Links the project to these groups: saved on this machine, sent to the server now and on every connect. */
   async function setGroups(groups: string[]): Promise<void> {
+    await ctx.workspaceState.update("linkedGroups", groups);
     if (!client.connected) return;
     try {
       state.acceptSession(await client.call<SessionTotal>("session/setGroups", { groups }));
@@ -257,7 +260,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       if (!requireConnected()) return;
       try {
         const groups = await client.call<GroupInfo[]>("groups/list");
-        const linked = new Set((state.status?.scope?.groups ?? []).map((g) => g.id));
+        const linked = new Set(linkedGroups());
         const setup = { label: "$(link-external) Open setup page", description: "Add or manage groups", id: "" };
         const picks = await vscode.window.showQuickPick(
           [...groups.map((g) => ({

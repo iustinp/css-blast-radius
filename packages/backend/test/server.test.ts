@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { startServer, type RunningServer } from "../src/server/http.js";
 import { normalizeSheetName } from "../src/daemon/sheetMatch.js";
 import { wildcard } from "../src/server/sitemap.js";
-import { Links } from "../src/server/links.js";
 import { pagePath, validateSettings } from "../src/server/settings.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -104,20 +103,6 @@ describe("helpers", () => {
     expect(pagePath("https://www.example.com/a/b?x=1#top", s)).toBe("/a/b?x=1");
     expect(pagePath("blog/a.html", s)).toBe("/blog/a.html");
     expect(pagePath("mailto:a@b.c", s)).toBeUndefined();
-  });
-
-  it("keeps each project's linked groups across restarts", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cbr-links-"));
-    try {
-      new Links(dir).set("/work/site/", ["a", "b", "a"]);
-      const again = new Links(dir);
-      expect(again.get("/work/site")).toEqual(["a", "b"]);
-      expect(again.get("/work/other")).toEqual([]);
-      again.set("/work/site", []);
-      expect(new Links(dir).get("/work/site")).toEqual([]);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it("validates site settings in plain language", () => {
@@ -250,8 +235,7 @@ describe("local server", () => {
     expect(total.total.exact).toBe(2); // .btn is on the home and about pages
     total = await rpc.call("session/setGroups", { groups: [homeId] });
     expect(total.total.exact).toBe(2);
-    // Kept by the server, not in the project.
-    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "links.json"), "utf8")).projects).toEqual({ [proj]: [homeId] });
+    // Nothing is written into the project.
     expect(fs.existsSync(path.join(proj, ".vscode"))).toBe(false);
 
     await api("PATCH", `/api/groups/${homeId}`, { active: false });
@@ -356,10 +340,10 @@ describe("local server", () => {
     const session = (c: RpcClient) => c.call("analysis/queryImpacts", { scope: "session" });
 
     const a = await RpcClient.connect(port);
-    const first = await a.call("initialize", { workspaceRoot: proj2, windowId: "a" });
+    // The editor sends the groups it keeps for this folder.
+    const first = await a.call("initialize", { workspaceRoot: proj2, windowId: "a", groups: [allId, allId] });
     expect(first.sessionStarted).toBe(true);
-    expect(first.status.scope.linked).toBe(false);
-    await a.call("session/setGroups", { groups: [allId] });
+    expect(first.status.scope).toMatchObject({ linked: true, groups: [{ id: allId }] });
     expect(first.status.git).toBe(false);
     await a.call("session/setDiffBase", { base: "session" });
     const edited = original.replace("color: blue;", "color: red;");
@@ -381,6 +365,7 @@ describe("local server", () => {
 
     // A new window once the others closed (or a reload): the CSS as it is now is the start.
     const c = await RpcClient.connect(port);
+    // Sending no groups keeps the current link.
     const third = await c.call("initialize", { workspaceRoot: proj2, windowId: "c" });
     expect(third.sessionStarted).toBe(true);
     expect(third.status.scope).toMatchObject({ linked: true, groups: [{ id: allId }] });

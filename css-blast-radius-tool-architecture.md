@@ -739,10 +739,11 @@ carried forward) unless the site or devices changed, or the user asks for
 scan publishes a new index revision (§9.3), and every project session
 switches to it without interrupting counts.
 
-**Linked groups.** The server keeps the group IDs each project works on in
-`<dataDir>/links.json`, keyed by the project folder, so nothing is written
-into the user's repo. The extension asks on first open and changes them with
-`session/setGroups`; every window of the project picks up the change. Counts cover only pages of
+**Linked groups.** Each developer's editor keeps the group IDs the project
+works on in its own per-folder storage (VS Code `workspaceState`), so nothing
+is written into the repo and a shared or hosted server never has to tell
+developers apart by path. The extension sends them with `initialize` on every
+connect and changes them with `session/setGroups`. It asks on first open. Counts cover only pages of
 linked, active groups (§7.2). Pausing, renaming or deleting a group reaches
 every connected editor at once (`groups/changed`).
 
