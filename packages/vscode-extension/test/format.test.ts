@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { branchNote, configuredBase, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
+import { badgeText, branchNote, configuredBase, editLabel, editsText, losesPages, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, shortReason, span, tokenText } from "../src/format";
 import type { ChangeAnswer, Count } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
@@ -123,5 +123,29 @@ describe("CSS changed outside the editor", () => {
     expect(externalChangeText(1, c(40), c(12))).toBe("CSS changed outside the editor (1 file): now 40 pages affected (was 12 pages).");
     expect(externalChangeText(2, c(0, 5), c(0))).toBe("CSS changed outside the editor (2 files): now up to 5 pages affected (was 0 pages).");
     expect(externalChangeText(1, c(3))).toBe("CSS changed outside the editor (1 file): 3 pages affected.");
+  });
+});
+
+describe("live-site helpers", () => {
+  it("names an edit by its selector, definition or kind", () => {
+    expect(editLabel(change({ selector: ".btn" }))).toBe(".btn");
+    expect(editLabel(change({ kind: "definition", definition: { kind: "keyframes", name: "spin", change: "changed" } }))).toBe("@keyframes spin");
+    expect(editLabel(change({ kind: "declarations" }))).not.toBe("");
+  });
+
+  it("warns only when a removed rule or changed selector loses enough pages", () => {
+    expect(losesPages(change({ kind: "removed", pages: c(12) }), 10)).toBe(true);
+    expect(losesPages(change({ kind: "removed", pages: c(12), lost: c(3) }), 10)).toBe(false);
+    expect(losesPages(change({ kind: "selector", pages: c(50), lost: c(10) }), 10)).toBe(true);
+    expect(losesPages(change({ kind: "selector", pages: c(50) }), 10)).toBe(false);
+    expect(losesPages(change({ kind: "declarations", pages: c(500), lost: c(500) }), 10)).toBe(false);
+  });
+
+  it("counts edits and fits a two-character badge", () => {
+    expect(editsText(1)).toBe("1 edit");
+    expect(editsText(1200)).toBe("1,200 edits");
+    expect(badgeText(7)).toBe("7");
+    expect(badgeText(99)).toBe("99");
+    expect(badgeText(100)).toBe("+");
   });
 });

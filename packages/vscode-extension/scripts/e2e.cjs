@@ -106,10 +106,28 @@ class Diagnostic {
 }
 const statusItem = { text: "", show() {}, dispose() {} };
 const noop = { dispose() {} };
-const uri = (p) => ({ fsPath: p, scheme: "file", toString: () => `file://${p}` });
+const uri = (p) => ({ fsPath: p, path: p, scheme: "file", toString: () => `file://${p}` });
+const decorationName = (o) => o.after ? (o.after.color.id === "editorWarning.foreground" ? "attention" : "normal")
+  : o.isWholeLine ? (o.overviewRulerColor.id.includes("Warning") ? "liveWarnLine" : "liveLine")
+  : String(o.gutterIconPath.fsPath).includes("warning") ? "liveWarnMark" : "liveMark";
 const vscode = {
   EventEmitter, Position, Range, MarkdownString, ThemeColor, ThemeIcon: ThemeColor, Diagnostic,
   CodeLens: class { constructor(range, command) { Object.assign(this, { range, command }); } },
+  TreeItem: class { constructor(label, collapsibleState) { Object.assign(this, typeof label === "string" ? { label } : { resourceUri: label }, { collapsibleState }); } },
+  TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
+  FileDecoration: class { constructor(badge, tooltip, color) { Object.assign(this, { badge, tooltip, color }); } },
+  OverviewRulerLane: { Center: 2 },
+  scm: {
+    createSourceControl: (id, label, rootUri) => {
+      const sc = {
+        id, label, rootUri, inputBox: {}, groups: [], disposed: false,
+        createResourceGroup(groupId, groupLabel) { const g = { id: groupId, label: groupLabel, resourceStates: [], dispose() {} }; sc.groups.push(g); return g; },
+        dispose() { sc.disposed = true; },
+      };
+      vscode.sourceControl = sc;
+      return sc;
+    },
+  },
   Hover: class { constructor(contents) { this.contents = contents; } },
   DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2 },
   DecorationRangeBehavior: { ClosedClosed: 1 },
@@ -120,6 +138,7 @@ const vscode = {
   Uri: {
     file: uri,
     parse: (url) => ({ toString: () => url }),
+    from: ({ scheme, path: p }) => ({ scheme, path: p, fsPath: p, toString: () => `${scheme}://${p}` }),
     joinPath: (base, ...parts) => uri(path.join(base.fsPath, ...parts)),
   },
   env: { openExternal: async () => true, clipboard: { writeText: async (text) => { clipboard.push(text); } } },
@@ -141,6 +160,8 @@ const vscode = {
       },
     }),
     asRelativePath: (p) => path.relative(workspace, typeof p === "string" ? p : p.fsPath),
+    registerTextDocumentContentProvider: (scheme, provider) => { vscode.contentProvider = provider; return noop; },
+    fs: { readFile: async (u) => fs.readFileSync(u.fsPath) },
     openTextDocument: async (u) => {
       assert.equal(u.fsPath, file, "opened another file");
       return doc;
@@ -160,7 +181,9 @@ const vscode = {
       append() {}, appendLine: (line) => { outputs.push(line); if (process.env.E2E_VERBOSE) console.log("  [extension]", line); },
       show() {}, dispose() {},
     }),
-    createTextEditorDecorationType: (options) => ({ name: options.after.color.id === "editorWarning.foreground" ? "attention" : "normal", dispose() {} }),
+    createTextEditorDecorationType: (options) => ({ name: decorationName(options), dispose() {} }),
+    registerFileDecorationProvider: (provider) => { vscode.fileDecorations = provider; return noop; },
+    createTreeView: (id, options) => { vscode.treeView = { id, provider: options.treeDataProvider, dispose() {} }; return vscode.treeView; },
     createStatusBarItem: () => statusItem,
     showInformationMessage: async (message) => { notices.push(message); return undefined; },
     showWarningMessage: async (message) => { notices.push(message); return undefined; },
@@ -353,6 +376,22 @@ async function run() {
       assert.match(hover.contents.value, /2 pages/);
       assert.match(hover.contents.value, /command:cssBlastRadius\.showPages\?/);
       assert.match(hover.contents.value, /command:cssBlastRadius\.showAllPages\?/);
+    });
+    await check("live site: the typed line is highlighted, badged, listed and has a live copy", async () => {
+      const at = doc.find("outline").line;
+      await waitFor(() => editor.decorations.liveLine?.some((d) => d.range.start.line === at && d.range.end.line === at), "live line highlight");
+      assert.deepEqual(editor.decorations.liveMark.map((d) => d.range.start.line), [at]);
+      assert.equal(vscode.fileDecorations.provideFileDecoration(uri(file))?.badge, "1");
+      const tree = vscode.treeView.provider;
+      const files = tree.getChildren();
+      assert.deepEqual(files.map((n) => n.file.file), [file]);
+      const item = tree.getTreeItem(tree.getChildren(files[0])[0]);
+      assert.equal(item.label, ".btn");
+      assert.match(item.description, /2 pages · line \d+/);
+      assert.deepEqual(vscode.sourceControl.groups[0].resourceStates.map((r) => r.resourceUri.fsPath), [file]);
+      const liveCopy = vscode.sourceControl.quickDiffProvider.provideOriginalResource(uri(file));
+      assert.equal(liveCopy.scheme, "cbr-live");
+      assert.equal(await vscode.contentProvider.provideTextDocumentContent(liveCopy), original);
     });
     await check("panel: on-demand page list includes both pages and file chips", async () => {
       await vscode.commands.executeCommand("cssBlastRadius.showAllPages");

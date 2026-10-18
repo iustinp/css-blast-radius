@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseStylesheet } from "../src/css/model.js";
 import { diffModels } from "../src/css/diff.js";
-import { describeChange } from "../src/css/describe.js";
+import { changeLines, commonLines, describeChange } from "../src/css/describe.js";
 
 const one = (before: string, after: string) => {
   const changes = diffModels(parseStylesheet(before), parseStylesheet(after), after.split("\n").length);
@@ -61,5 +61,26 @@ describe("edit card (analysis/getChange)", () => {
     const d = one("@keyframes spin { to { rotate: 1turn; } }", "@keyframes spin { to { rotate: 2turn; } }");
     expect(d.rule).toBeUndefined();
     expect(d.summary).toBe("@keyframes spin changed");
+  });
+});
+
+describe("editor line highlights (analysis/liveEdits)", () => {
+  const changes = (before: string, after: string) => diffModels(parseStylesheet(before), parseStylesheet(after), after.split("\n").length);
+
+  it("marks the changed declarations' lines, merging neighbours, or the whole rule for a new one", () => {
+    const [d] = changes(".a {\n  color: red;\n  margin: 0;\n  padding: 1px;\n}", ".a {\n  color: blue;\n  margin: 1px;\n  padding: 1px;\n  gap: 0;\n}");
+    expect(changeLines(d)).toEqual([[2, 3], [5, 5]]);
+    const [added] = changes(".a { color: red; }", ".a { color: red; }\n.b {\n  color: red;\n}");
+    expect(changeLines(added)).toEqual([[2, 4]]);
+  });
+
+  it("on a branch, marks only lines the branch changed that the live site also lacks", () => {
+    const start = ".btn {\n  color: red;\n  padding: 4px;\n}";
+    const live = parseStylesheet(".btn {\n  color: blue;\n  padding: 4px;\n}").rules[0];
+    const [mine] = changes(start, ".btn {\n  color: red;\n  padding: 8px;\n}");
+    expect(commonLines(mine, { ...mine, before: live })).toEqual([[3, 3]]);
+    // Nothing in common (the live site's rule can't tell): the branch's own lines.
+    const same = parseStylesheet(".btn {\n  color: red;\n  padding: 8px;\n}").rules[0];
+    expect(commonLines(mine, { ...mine, before: same })).toEqual([[3, 3]]);
   });
 });

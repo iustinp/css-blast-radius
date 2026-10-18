@@ -114,14 +114,26 @@ In the **All** tab, in a git repository, only **your branch's changes** count: i
   - **Open in browser** opens the same view outside VS Code.
 - If CSS files change outside the editor (a pull, a branch switch, another tool) and that moves the total, a notice says how: `now 40 pages affected (was 12 pages)`. Undoing back to the saved text isn't such a change.
 
+### 5. See which CSS isn't on the live site yet
+
+Whatever tab the panel shows, VS Code always marks the CSS that differs from the scanned live site, wherever it came from (your typing, another tool, a pull):
+
+- **Files**: the Explorer and the editor tabs show a badge with the number of such edits, and the folders above them are tinted.
+- **Lines**: those edits' lines get a light blue background, a dot in the gutter and a mark in the scroll bar; orange when the edit takes a rule away from at least `warnLostPages` pages. Hover a line for **Compare with the live site**.
+- **Change bars**: the gutter shows bars against the live site's version, like git's; click one to see what the live site has. This adds a **Live site** entry to the Source Control view, listing the files. Where git's bars cover the same lines only one kind shows: right-click the gutter to choose which.
+- **CSS Not on the Live Site**, a list in the Explorer: each file, then each edit with its page count. Click an edit to jump to it, or use the compare button next to a file.
+
+Lines and files the live site already has aren't marked, even if your branch changed them. Turn any of these off with `cssBlastRadius.liveSite.lineHighlights`, `fileBadges` or `changeBars`.
+
 Other commands:
 - **Show All Affected Pages**
 - **Rescan Linked Groups**
 - **Show Which Changes** (the same as the panel's tabs: All, Uncommitted, This session, Unsaved)
 - **Open Setup Page**
 - **Reconnect to Server**
+- **Compare with Live Site** (also in a CSS file's right-click menu)
 
-Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `groups`, `diffBase`, `cursorCount`, `warnLostPages`, `codeLens` (off), and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
+Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `groups`, `diffBase`, `cursorCount`, `warnLostPages`, `codeLens` (off), `liveSite.lineHighlights`, `liveSite.fileBadges`, `liveSite.changeBars`, and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
 
 ## Packages
 

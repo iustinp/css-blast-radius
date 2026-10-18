@@ -167,6 +167,26 @@ export interface SessionTotal {
   branch?: { name: string | null; mainRef: string; behind: number; mainShown?: boolean };
 }
 
+/** An edit the live site doesn't have yet, with the lines of the current text it consists of. */
+export interface LiveEdit extends ChangeAnswer {
+  /** 1-based, inclusive. */
+  ranges: Array<[number, number]>;
+}
+
+/** analysis/liveEdits (protocol 1.5): every CSS file that differs from the live site, whatever the tab. */
+export interface LiveEditsResult {
+  editRevision: number;
+  indexRevision: number | null;
+  files: Array<{ file: string; open: boolean; pages: Count; edits: LiveEdit[] }>;
+  branch?: SessionTotal["branch"];
+}
+
+/** analysis/liveOriginal: the file without the edits the live site doesn't have (null: not scanned). */
+export interface LiveOriginal {
+  path: string;
+  text: string | null;
+}
+
 export interface DocResult {
   answer: FileAnswer;
   session: SessionTotal;

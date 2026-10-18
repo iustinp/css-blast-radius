@@ -17,6 +17,8 @@ import {
   formatAge,
   ghostText,
   isZero,
+  KIND_LABEL,
+  losesPages,
   reasonText,
   span,
 } from "./format";
@@ -33,20 +35,6 @@ function countLine(c: Count): string {
   if (c.unknown) parts.push(`${c.unknown.toLocaleString("en-US")} unknown`);
   return parts.join(" · ") + (c.complete ? "" : " _(resolving…)_");
 }
-
-const KIND_LABEL: Record<string, string> = {
-  declarations: "Declarations changed",
-  selector: "Selector changed",
-  condition: "Condition changed",
-  added: "Rule added",
-  removed: "Rule removed",
-  moved: "Rule moved",
-  definition: "Definition changed",
-  "layer-order": "Layer order changed",
-  import: "@import changed",
-  namespace: "@namespace changed",
-  unrecognized: "At-rule changed",
-};
 
 export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvider, vscode.HoverProvider {
   private readonly normal = vscode.window.createTextEditorDecorationType({
@@ -156,8 +144,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   }
 
   private isAttention(ch: ChangeAnswer): boolean {
-    const lost = ch.kind === "removed" ? ch.lost ?? ch.pages : ch.kind === "selector" ? ch.lost : undefined;
-    return !!lost && lost.exact >= this.lostThreshold();
+    return losesPages(ch, this.lostThreshold());
   }
 
   // ------------------------------------------------------------- Problems

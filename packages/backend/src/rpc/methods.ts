@@ -51,6 +51,10 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
       return run(() => session.getPages(p ?? {}));
     case "analysis/getChange":
       return run(() => session.changeDetail(need(p, "path"), need(p, "changeId")));
+    case "analysis/liveEdits":
+      return run(() => session.liveEdits());
+    case "analysis/liveOriginal":
+      return run(() => session.liveOriginal(need(p, "path")));
     case "analysis/getDrilldown":
       return run(() => {
         need(p, "path");

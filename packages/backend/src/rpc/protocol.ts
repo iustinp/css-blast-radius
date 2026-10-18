@@ -3,7 +3,7 @@
 // per-workspace daemon socket). Every answer carries indexRevision and
 // editRevision (§6.8).
 
-import type { Count, FileAnswer, RuleCount } from "../engine/contract.js";
+import type { ChangeAnswer, Count, FileAnswer, RuleCount } from "../engine/contract.js";
 import type { PageDiff } from "../l2/render.js";
 import type { DiffBaseKind } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
@@ -13,7 +13,7 @@ import type { ChangeDescription } from "../css/describe.js";
 export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 4;
+export const PROTOCOL_MINOR = 5;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -207,6 +207,33 @@ export interface ChangeDetail extends ChangeDescription {
   path: string;
   id: string;
   kind: ChangeKind;
+}
+
+/** An edit the live site doesn't have yet, with the lines of the current text it consists of. */
+export interface LiveEdit extends ChangeAnswer {
+  /** 1-based, inclusive. */
+  ranges: Array<[number, number]>;
+}
+
+/**
+ * analysis/liveEdits: every CSS file that differs from the live site (as the
+ * All tab counts it), whatever tab the panel shows. Files without a captured
+ * stylesheet are left out.
+ */
+export interface LiveEditsResult {
+  editRevision: number;
+  indexRevision: number | null;
+  files: Array<{ file: string; open: boolean; pages: Count; edits: LiveEdit[] }>;
+  branch?: SessionTotal["branch"];
+}
+
+/**
+ * analysis/liveOriginal: the file without the edits the live site doesn't
+ * have yet, for the editor's change bars (null: no captured stylesheet).
+ */
+export interface LiveOriginal {
+  path: string;
+  text: string | null;
 }
 
 export interface GetPagesParams {

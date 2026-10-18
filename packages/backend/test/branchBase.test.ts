@@ -184,4 +184,43 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     expect(view.zones.length).toBeGreaterThan(0);
     expect(view.zones.every((z) => z.label.includes("button.btn"))).toBe(true);
   }, 60_000);
+
+  it("lists the edits the live site doesn't have, with their lines, whatever the tab", async () => {
+    const text = fs.readFileSync(cssPath, "utf8");
+    const lineOf = (t: string, s: string) => t.split("\n").findIndex((l) => l.includes(s)) + 1;
+    await session.setDiffBase("HEAD");
+    expect(session.sessionTotal().files).toEqual([]);
+
+    let live = await session.liveEdits();
+    expect(live.branch?.name).toBe("feature");
+    expect(live.files.map((f) => f.file)).toEqual([path.resolve(cssPath)]);
+    expect(live.files[0].edits.map((e) => [e.selector, e.ranges])).toEqual([[".btn", [[lineOf(text, "border: 3px solid red"), lineOf(text, "border: 3px solid red")]]]]);
+    expect(live.files[0].pages.exact).toBe(2);
+
+    // The change bars' original: the live site's CSS, with the already-live #hero change kept.
+    expect((await session.liveOriginal(cssPath)).text).toBe(text.replace("\n  border: 3px solid red;", ""));
+    expect((await session.liveOriginal(path.join(ws, "css", "nope.css"))).text).toBeNull();
+
+    // Unsaved typing counts too; the tab's own list is untouched.
+    const typed = text.replace("#hero {", "#hero {\n  outline: 1px solid blue;");
+    await session.open(cssPath, typed, 3);
+    live = await session.liveEdits();
+    expect(live.files[0].edits.map((e) => e.selector).sort()).toEqual(["#hero", ".btn"]);
+    const hero = live.files[0].edits.find((e) => e.selector === "#hero")!;
+    expect(hero.ranges).toEqual([[lineOf(typed, "outline: 1px"), lineOf(typed, "outline: 1px")]]);
+    expect(session.sessionTotal().files.map((f) => f.changes)).toEqual([1]);
+
+    // Main changed .card .title's font-weight since the branch began: only the line typed here is marked, not the older weight.
+    const title = typed.replace("font-weight: bold;", "font-weight: bold;\n  letter-spacing: 1px;");
+    await session.open(cssPath, title, 4);
+    live = await session.liveEdits();
+    expect(live.files[0].edits.find((e) => e.selector === ".card .title")!.ranges).toEqual([[lineOf(title, "letter-spacing"), lineOf(title, "letter-spacing")]]);
+
+    // Closed: the file on disk.
+    await session.close(cssPath);
+    live = await session.liveEdits();
+    expect(live.files.map((f) => [f.open, f.edits.map((e) => e.selector)])).toEqual([[false, [".btn"]]]);
+    await session.setDiffBase("production");
+    expect((await session.liveEdits()).files.map((f) => f.edits.length)).toEqual([1]);
+  });
 });

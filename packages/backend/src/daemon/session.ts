@@ -11,7 +11,7 @@ import fg from "fast-glob";
 import { loadConfig, type CbrConfig } from "../config.js";
 import { browserModel, parseStylesheet, type StyleRule, type StylesheetModel } from "../css/model.js";
 import { appliedFilter, changeIds, diffModels, type CssChange } from "../css/diff.js";
-import { describeChange } from "../css/describe.js";
+import { changeLines, commonLines, describeChange } from "../css/describe.js";
 import { partialText } from "../css/partial.js";
 import { REASON, Sets, type Count, type FileAnswer } from "../engine/contract.js";
 import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0.js";
@@ -38,6 +38,8 @@ import {
   type EditSelection,
   type GetPagesParams,
   type IndexStatus,
+  type LiveEditsResult,
+  type LiveOriginal,
   type OpenLiveParams,
   type PageDiffParams,
   type PageDiffView,
@@ -112,11 +114,15 @@ interface FileState {
   baseModel?: StylesheetModel;
   /** Branch on the live-site base: drops changes the site already has. */
   applied?: (changes: CssChange[], cur: StylesheetModel) => CssChange[];
+  /** Branch on the live-site base: the live site's rules by key (the editor's highlights). */
+  liveRules?: Map<string, StyleRule>;
   /** Bumped whenever the text or the base changes. */
   version: number;
   /** editRevision of the last text/base change. */
   editRevision: number;
   result?: FileResult;
+  /** Live-site copies of an open file: the version of the tab's state they mirror. */
+  mirrors?: number;
 }
 
 /** The selected edits as the visual diff applies them. */
@@ -157,6 +163,18 @@ const LIMITATIONS = [
   "Shadow DOM and iframe content are not captured.",
   "Pages added to the site since the last capture are not counted.",
 ];
+
+/** Rules by key, leaving out keys used more than once (which of them an edit matches is unclear). */
+function rulesByKey(m: StylesheetModel): Map<string, StyleRule> {
+  const out = new Map<string, StyleRule>();
+  const twice = new Set<string>();
+  for (const r of m.rules) {
+    if (out.has(r.key)) twice.add(r.key);
+    else out.set(r.key, r);
+  }
+  for (const k of twice) out.delete(k);
+  return out;
+}
 
 const MAX_SNAPSHOT_FILES = 3000;
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
@@ -213,6 +231,13 @@ export class Session extends EventEmitter {
   private scopeGen = 0;
   /** CSS files found in the workspace by the last scan. */
   private cssFiles: string[] = [];
+  /** The editor's live-site highlights, whatever the tab: each file compared with the live site, as the All tab does. */
+  private readonly live = new Map<string, FileState>();
+  private liveBranchLoad?: Promise<BranchPoint | undefined>;
+  /** Closed files that differ from the live site (cached until CSS, git or the scan change). */
+  private liveClosed?: Promise<string[]>;
+  /** Bumped by every resetLive: work begun before it isn't cached. */
+  private liveGen = 0;
 
   private constructor(readonly opts: SessionOptions) {
     super();
@@ -251,6 +276,7 @@ export class Session extends EventEmitter {
     const idx = this.opts.shared?.index ? this.opts.shared.index() : SiteIndex.load(this.store);
     this.index = idx;
     this.matcher = new SheetMatcher(this.cfg, idx);
+    this.resetLive(true);
     if (!idx) {
       this.engine = undefined;
       this.l1 = undefined;
@@ -306,6 +332,7 @@ export class Session extends EventEmitter {
   reconfigure(cfg: CbrConfig): void {
     Object.assign(this.cfg, { ...cfg, workspaceRoot: this.cfg.workspaceRoot });
     this.matcher = new SheetMatcher(this.cfg, this.index);
+    this.resetLive(true);
     for (const f of this.files.values()) this.touch(f);
     this.publishOpenDocs();
   }
@@ -391,6 +418,8 @@ export class Session extends EventEmitter {
     if (!f?.doc) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
     f.doc.save(text);
     if (this.diffBase === "saved") f.base = undefined;
+    // The watcher skips open files: what's on disk changed.
+    this.resetLive(false);
     this.touch(f);
     await this.ensureBase(f);
     return this.docResult(f);
@@ -398,6 +427,7 @@ export class Session extends EventEmitter {
 
   async close(path: string): Promise<SessionTotal> {
     const f = this.files.get(resolve(path));
+    this.resetLive(false);
     if (f) {
       f.doc = undefined;
       this.files.delete(f.path);
@@ -413,6 +443,7 @@ export class Session extends EventEmitter {
     this.diffBase = kind;
     if (mainChanges !== undefined) this.mainChanges = mainChanges;
     this.branchLoad = undefined;
+    this.resetLive(true);
     return this.rebase();
   }
 
@@ -450,7 +481,9 @@ export class Session extends EventEmitter {
     if (f.base) return;
     f.base = await this.loadBase(f.path);
     f.baseModel = browserModel(f.base.text ?? "");
-    f.applied = f.base.live !== undefined ? appliedFilter(browserModel(f.base.live)) : undefined;
+    const live = f.base.live !== undefined ? browserModel(f.base.live) : undefined;
+    f.applied = live && appliedFilter(live);
+    f.liveRules = live && rulesByKey(live);
     f.version++;
   }
 
@@ -471,19 +504,24 @@ export class Session extends EventEmitter {
         return { text: this.sessionStart.get(path), kind: "session", note };
       }
       case "production": {
-        const hash = this.sheetHashes(path)[0];
-        if (hash) {
-          const live = this.store.getBlob(hash).toString("utf8");
-          // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
-          const bp = await this.branchPoint();
-          const text = bp && !this.mainChanges ? await this.git!.show(path, bp.mergeBase) : undefined;
-          if (text !== undefined) return { text, kind: "production", live };
-          return { text: live, kind: "production" };
-        }
+        const base = await this.productionBase(path, () => this.branchPoint());
+        if (base) return base;
         if (this.git) return { text: await this.git.show(path), kind: "HEAD", note: "no captured stylesheet for this file" };
         return { text: readText(path), kind: "saved", note: "no captured stylesheet for this file" };
       }
     }
+  }
+
+  /** The live-site base of a captured file (undefined: no captured stylesheet). */
+  private async productionBase(path: string, point: () => Promise<BranchPoint | undefined>): Promise<BaseText | undefined> {
+    const hash = this.sheetHashes(path)[0];
+    if (!hash) return undefined;
+    const live = this.store.getBlob(hash).toString("utf8");
+    // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
+    const bp = await point();
+    const text = bp && !this.mainChanges ? await this.git!.show(path, bp.mergeBase) : undefined;
+    if (text !== undefined) return { text, kind: "production", live };
+    return { text: live, kind: "production" };
   }
 
   /** Where the checked-out branch left the deployed branch (production base only). */
@@ -570,16 +608,7 @@ export class Session extends EventEmitter {
       case "production": {
         if (!this.index) break;
         const all = await this.listCss();
-        const point = await this.branchPoint();
-        const bp = this.mainChanges ? undefined : point;
-        // On a branch: the files it changed, unless the site already has that exact content.
-        const files = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : all;
-        for (const f of files) {
-          const hashes = this.sheetHashes(f);
-          if (!hashes.length) continue;
-          const t = readText(f);
-          if (t === undefined ? bp !== undefined : !hashes.includes(sha256(t))) changed.push(f);
-        }
+        changed = await this.changedVsLive(await this.branchPoint(), all);
         break;
       }
     }
@@ -599,6 +628,134 @@ export class Session extends EventEmitter {
       }
       await this.ensureBase(f);
     }
+  }
+
+  /** Closed files (on disk) that differ from the live site. */
+  private async changedVsLive(point: BranchPoint | undefined, all?: string[]): Promise<string[]> {
+    if (!this.index) return [];
+    const bp = this.mainChanges ? undefined : point;
+    // On a branch: the files it changed, unless the site already has that exact content.
+    const files = bp ? await this.git!.changedSince(bp.mergeBase, this.cssDirs()) : all ?? await this.listCss();
+    const changed: string[] = [];
+    for (const f of files) {
+      const hashes = this.sheetHashes(f);
+      if (!hashes.length) continue;
+      const t = readText(f);
+      if (t === undefined ? bp !== undefined : !hashes.includes(sha256(t))) changed.push(f);
+    }
+    return changed;
+  }
+
+  // ------------------------------------------------- live-site highlights
+
+  /** `bases`: the live text, branch point or matching may have changed too. */
+  private resetLive(bases: boolean): void {
+    this.liveGen++;
+    this.liveClosed = undefined;
+    if (!bases) return;
+    this.live.clear();
+    this.liveBranchLoad = undefined;
+  }
+
+  private liveBranchPoint(): Promise<BranchPoint | undefined> {
+    if (this.diffBase === "production") return this.branchPoint();
+    if (!this.git) return Promise.resolve(undefined);
+    return (this.liveBranchLoad ??= this.git.branchPoint());
+  }
+
+  /** A file compared with the live site: the tab's own state on the All tab, else a copy beside it (undefined: not captured). */
+  private async liveState(path: string): Promise<FileState | undefined> {
+    const p = resolve(path);
+    const tab = this.files.get(p);
+    if (this.diffBase === "production" && tab) return tab.base?.kind === "production" ? tab : undefined;
+    let lf = this.live.get(p);
+    if (!lf) {
+      const gen = this.liveGen;
+      const base = await this.productionBase(p, () => this.liveBranchPoint());
+      if (!base) return undefined;
+      lf = gen === this.liveGen ? this.live.get(p) : undefined;
+      if (!lf) {
+        lf = { path: p, version: 0, editRevision: this.editRevision, base, baseModel: browserModel(base.text ?? "") };
+        if (base.live !== undefined) {
+          const live = browserModel(base.live);
+          lf.applied = appliedFilter(live);
+          lf.liveRules = rulesByKey(live);
+        }
+        if (gen === this.liveGen) this.live.set(p, lf);
+      }
+    }
+    const doc = tab?.doc;
+    const disk = doc ? undefined : readText(p);
+    if (lf.doc !== doc || lf.diskText !== disk || (doc && lf.mirrors !== tab!.version)) {
+      lf.doc = doc;
+      lf.diskText = disk;
+      lf.mirrors = tab?.version;
+      lf.version++;
+      lf.editRevision = tab?.editRevision ?? this.editRevision;
+    }
+    return lf;
+  }
+
+  /** Every CSS file that differs from the live site, with each edit's lines (the editor's highlights). */
+  async liveEdits(): Promise<LiveEditsResult> {
+    const files: LiveEditsResult["files"] = [];
+    const gen = this.liveGen;
+    const bp = await this.liveBranchPoint();
+    if (this.index) {
+      const paths = new Set<string>();
+      if (this.diffBase === "production") for (const p of this.files.keys()) paths.add(p);
+      else {
+        for (const f of this.files.values()) if (f.doc) paths.add(f.path);
+        let closed = gen === this.liveGen ? this.liveClosed : undefined;
+        if (!closed) {
+          const load: Promise<string[]> = this.changedVsLive(bp).catch((err) => {
+            if (this.liveClosed === load) this.liveClosed = undefined;
+            throw err;
+          });
+          if (gen === this.liveGen) this.liveClosed = load;
+          closed = load;
+        }
+        for (const p of await closed) paths.add(resolve(p));
+      }
+      for (const p of this.live.keys()) if (!paths.has(p)) this.live.delete(p);
+      for (const p of paths) {
+        const f = await this.liveState(p);
+        if (!f) continue;
+        const r = this.resultFor(f);
+        if (!r.changes.length) continue;
+        // On a branch the base is where it started: of the lines the edit changed, those the live site's own rule lacks.
+        const ranges = (c: CssChange) => {
+          const was = c.kind === "declarations" && c.after ? f.liveRules?.get(c.after.key) : undefined;
+          return was ? commonLines(c, { ...c, before: was }) : changeLines(c);
+        };
+        const edits = r.changes.map((c, i) => ({ ...r.answer.changes[i], ranges: ranges(c) }));
+        files.push({ file: f.path, open: !!f.doc, pages: r.answer.total, edits });
+      }
+    }
+    files.sort((a, b) => a.file.localeCompare(b.file));
+    return {
+      editRevision: this.editRevision,
+      indexRevision: this.index?.revision.id ?? null,
+      files,
+      branch: bp && { name: bp.branch, mainRef: bp.mainRef, behind: bp.behind, mainShown: this.mainChanges },
+    };
+  }
+
+  /**
+   * The file without the edits the live site doesn't have yet (the editor's
+   * change bars). On a branch, changes the site already has stay in, so
+   * only what liveEdits lists shows as changed.
+   */
+  async liveOriginal(path: string): Promise<LiveOriginal> {
+    const p = resolve(path);
+    const f = this.index ? await this.liveState(p) : undefined;
+    const base = f?.base;
+    if (!f || !base) return { path: p, text: null };
+    if (!f.applied) return { path: p, text: base.text ?? "" };
+    const r = this.resultFor(f);
+    const shown = new Set(r.changes);
+    const part = partialText(base.text ?? "", r.cur.text, r.allChanges, (i) => !shown.has(r.allChanges[i]), f.baseModel ?? parseStylesheet(""), r.cur.model);
+    return { path: p, text: part.fallback ? base.live ?? base.text ?? "" : part.text };
   }
 
   // ------------------------------------------------------------- analysis
@@ -1611,6 +1768,7 @@ export class Session extends EventEmitter {
     clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(async () => {
       try {
+        this.resetLive(this.gitMoved);
         if (this.gitMoved) {
           this.gitMoved = false;
           const old = this.branch?.mergeBase;

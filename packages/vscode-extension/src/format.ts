@@ -54,6 +54,39 @@ export function formatChange(ch: ChangeAnswer): string {
   return formatCount(ch.pages, ch.reasons);
 }
 
+export const KIND_LABEL: Record<string, string> = {
+  declarations: "Declarations changed",
+  selector: "Selector changed",
+  condition: "Condition changed",
+  added: "Rule added",
+  removed: "Rule removed",
+  moved: "Rule moved",
+  definition: "Definition changed",
+  "layer-order": "Layer order changed",
+  import: "@import changed",
+  namespace: "@namespace changed",
+  unrecognized: "At-rule changed",
+};
+
+/** What an edit is called in lists: its selector, else the definition or kind. */
+export function editLabel(ch: ChangeAnswer): string {
+  if (ch.selector) return ch.selector;
+  if (ch.definition) return `@${ch.definition.kind} ${ch.definition.name}`;
+  return KIND_LABEL[ch.kind] ?? ch.kind;
+}
+
+/** A removed rule or a changed selector that stops reaching at least `threshold` pages. */
+export function losesPages(ch: ChangeAnswer, threshold: number): boolean {
+  const lost = ch.kind === "removed" ? ch.lost ?? ch.pages : ch.kind === "selector" ? ch.lost : undefined;
+  return !!lost && lost.exact >= threshold;
+}
+
+/** `3 edits`, `1 edit`. */
+export const editsText = (n: number) => `${n.toLocaleString("en-US")} edit${n === 1 ? "" : "s"}`;
+
+/** A file badge holds 2 characters. */
+export const badgeText = (n: number) => (n > 99 ? "+" : String(n));
+
 /**
  * The page lists one edit splits into. Only a changed selector has more than one:
  * the pages that gain the rule (only the new selector matches) and those that lose it

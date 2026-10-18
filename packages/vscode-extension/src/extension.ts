@@ -8,6 +8,7 @@ import { DocumentSync, isCssDocument } from "./documentSync";
 import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
 import { ExternalNoticeBatch } from "./externalNotice";
+import { LiveEdits } from "./liveEdits";
 import { changeAtCursor, configuredBase, editSides, effectiveBase, externalChangeText, TABS } from "./format";
 import { PagesPanel } from "./panel";
 import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal } from "./protocol";
@@ -56,7 +57,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   const sync = new DocumentSync(client, state, log, (file, session, before) => externalChange([file], session, before));
   const surfaces = new EditorSurfaces(client, life, state, sync);
-  ctx.subscriptions.push(life, state, sync, surfaces, { dispose: () => { clearTimeout(noticeTimer); notices.clear(); } });
+  const live = new LiveEdits(client, life, state, folderUri, ctx.extensionUri, log);
+  ctx.subscriptions.push(life, state, sync, surfaces, live, { dispose: () => { clearTimeout(noticeTimer); notices.clear(); } });
 
   async function refreshScope(): Promise<void> {
     try {

@@ -64,6 +64,12 @@
         "command": "cssBlastRadius.showOutput",
         "title": "Show Output",
         "category": "CSS Blast Radius"
+      },
+      {
+        "command": "cssBlastRadius.compareWithLiveSite",
+        "title": "Compare with Live Site",
+        "category": "CSS Blast Radius",
+        "icon": "$(diff)"
       }
     ],
     "menus": {
@@ -73,8 +79,92 @@
           "when": "cssBlastRadius.diffActive",
           "group": "navigation@90"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "cssBlastRadius.compareWithLiveSite",
+          "when": "view == cssBlastRadius.liveEdits && viewItem == cssBlastRadius.liveFile",
+          "group": "inline"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "cssBlastRadius.compareWithLiveSite",
+          "when": "resourceScheme == file && resourceExtname == .css",
+          "group": "3_compare"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "cssBlastRadius.compareWithLiveSite",
+          "when": "resourceScheme == file && resourceExtname == .css",
+          "group": "3_compare"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "cssBlastRadius.compareWithLiveSite",
+          "when": "resourceScheme == file && resourceExtname == .css"
+        }
       ]
     },
+    "views": {
+      "explorer": [
+        {
+          "id": "cssBlastRadius.liveEdits",
+          "name": "CSS Not on the Live Site",
+          "contextualTitle": "CSS Blast Radius"
+        }
+      ]
+    },
+    "colors": [
+      {
+        "id": "cssBlastRadius.liveEditBackground",
+        "description": "Background of lines with CSS edits the live site doesn't have yet.",
+        "defaults": {
+          "dark": "#3794ff1f",
+          "light": "#0066b814"
+        }
+      },
+      {
+        "id": "cssBlastRadius.liveEditRuler",
+        "description": "Scroll bar marks and list dots for CSS edits the live site doesn't have yet.",
+        "defaults": {
+          "dark": "#3794ffcc",
+          "light": "#0066b8cc",
+          "highContrast": "#3794ff",
+          "highContrastLight": "#0066b8"
+        }
+      },
+      {
+        "id": "cssBlastRadius.liveEditWarningBackground",
+        "description": "Background of lines with not-yet-live CSS edits that take a rule away from pages (a removed rule or a changed selector).",
+        "defaults": {
+          "dark": "#cca7001f",
+          "light": "#bf880014"
+        }
+      },
+      {
+        "id": "cssBlastRadius.liveEditWarningRuler",
+        "description": "Scroll bar marks and list dots for not-yet-live CSS edits that take a rule away from pages.",
+        "defaults": {
+          "dark": "#cca700cc",
+          "light": "#bf8800cc",
+          "highContrast": "#cca700",
+          "highContrastLight": "#bf8800"
+        }
+      },
+      {
+        "id": "cssBlastRadius.liveEditForeground",
+        "description": "Explorer and tab names of CSS files with edits the live site doesn't have yet.",
+        "defaults": {
+          "dark": "#75beff",
+          "light": "#0066b8",
+          "highContrast": "#75beff",
+          "highContrastLight": "#0066b8"
+        }
+      }
+    ],
     "keybindings": [
       {
         "command": "cssBlastRadius.showPages",
@@ -144,6 +234,21 @@
           "type": "boolean",
           "default": false,
           "description": "Show page counts above CSS rules. Off by default because counts appear next to the cursor."
+        },
+        "cssBlastRadius.liveSite.lineHighlights": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight the lines of CSS edits the live site doesn't have yet, wherever they were made (this editor, other tools, a pull): blue, or orange when pages lose a rule. Always compared with the live site, whichever Blast Radius tab is selected."
+        },
+        "cssBlastRadius.liveSite.fileBadges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mark CSS files with edits the live site doesn't have yet in the Explorer and on editor tabs, with the number of edits."
+        },
+        "cssBlastRadius.liveSite.changeBars": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show edits the live site doesn't have yet as change bars in the editor gutter; click one to see the live site's version. Adds a “Live site” entry to Source Control. Where git's bars cover the same lines only one shows: right-click the gutter to choose which."
         },
         "cssBlastRadius.nodePath": {
           "type": "string",

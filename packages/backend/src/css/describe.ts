@@ -152,3 +152,43 @@ export function describeChange(c: CssChange): ChangeDescription {
   const summary = c.def ? `@${c.def.kind} ${c.def.name} ${c.def.change}` : c.detail ?? `${c.kind} changed`;
   return { line: c.line, summary };
 }
+
+/**
+ * The lines of the current text (1-based, inclusive ranges) an edit consists
+ * of, for editor highlights: the changed declarations; the whole rule when the
+ * rule itself changed; one line where a removed rule or a declaration was.
+ */
+export function changeLines(c: CssChange): Array<[number, number]> {
+  return toRanges(lineSet(c));
+}
+
+/**
+ * The lines both comparisons mark: what an edit changed since `c`'s base and
+ * still differs from `other`'s (the live site's rule). Falls back to `c`'s
+ * lines when they share none.
+ */
+export function commonLines(c: CssChange, other: CssChange): Array<[number, number]> {
+  const mine = lineSet(c);
+  const theirs = new Set(lineSet(other));
+  const both = mine.filter((l) => theirs.has(l));
+  return toRanges(both.length ? both : mine);
+}
+
+function lineSet(c: CssChange): number[] {
+  const d = describeChange(c);
+  const rule = d.rule;
+  if (!rule || rule.removed) return [d.line];
+  if (c.kind !== "declarations") return Array.from({ length: Math.max(rule.line, rule.endLine) - rule.line + 1 }, (_, i) => rule.line + i);
+  const lines = [...new Set(rule.decls.flatMap((x) => (x.state === "changed" && x.line !== undefined ? [x.line] : [])))].sort((a, b) => a - b);
+  return lines.length ? lines : [rule.line];
+}
+
+function toRanges(lines: number[]): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const l of lines) {
+    const last = out[out.length - 1];
+    if (last && l === last[1] + 1) last[1] = l;
+    else out.push([l, l]);
+  }
+  return out;
+}
