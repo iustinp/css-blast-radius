@@ -1,4 +1,4 @@
-// Diff bases (§7.2): what "my edits" are compared against.
+// Tabs (§7.2): which of my edits count. Every tab compares with the scanned (live) site.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -9,14 +9,18 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-export type DiffBaseKind = "HEAD" | "saved" | "session" | "production";
-export const DIFF_BASES: DiffBaseKind[] = ["HEAD", "saved", "session", "production"];
+/** all: every edit (the editor's text); uncommitted: saved files; committed: HEAD. */
+export type Tab = "all" | "uncommitted" | "committed";
+export const TABS: Tab[] = ["all", "uncommitted", "committed"];
+
+/** What a file is compared with: the site's captured copy, else (not captured) HEAD or the file on disk. */
+export type BaseKind = "production" | "HEAD" | "saved";
 
 export interface BaseText {
   /** undefined: the file doesn't exist in the base (everything is added). */
   text: string | undefined;
-  /** Base actually used, when the requested one isn't available for this file. */
-  kind: DiffBaseKind;
+  /** The site's copy, or what stands in for it when the file wasn't captured. */
+  kind: BaseKind;
   note?: string;
   /**
    * Production base on a branch: the site's captured copy, while `text` is
@@ -165,9 +169,13 @@ export class Git {
     }
   }
 
+  private specs(dirs: string[]): string[] {
+    return dirs.map((d) => this.rel(d)).filter((d): d is string => d !== undefined).map((d) => d || ".");
+  }
+
   /** CSS files under `dirs` whose working-tree content differs from `rev` (including untracked). */
   async changedSince(rev: string, dirs: string[]): Promise<string[]> {
-    const specs = dirs.map((d) => this.rel(d)).filter((d): d is string => d !== undefined).map((d) => d || ".");
+    const specs = this.specs(dirs);
     if (specs.length === 0) return [];
     const [diff, untracked] = await Promise.all([
       this.git(["diff", "--name-only", "-z", "--no-renames", rev, "--", ...specs]),
@@ -179,28 +187,28 @@ export class Git {
     return [...out];
   }
 
-  /** CSS files under `dirs` that differ from HEAD (modified, added, deleted, untracked). */
-  async changedCss(dirs: string[]): Promise<string[]> {
-    const specs = dirs.map((d) => this.rel(d)).filter((d): d is string => d !== undefined);
+  /** CSS files under `dirs` that differ between two commits (deleted ones included). */
+  async changedBetween(from: string, to: string, dirs: string[]): Promise<string[]> {
+    const specs = this.specs(dirs);
     if (specs.length === 0) return [];
-    try {
-      const { stdout } = await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...specs.map((d) => d || ".")], {
-        cwd: this.top,
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      const out: string[] = [];
-      const parts = stdout.split("\0");
-      for (let i = 0; i < parts.length; i++) {
-        const e = parts[i];
-        if (e.length < 4) continue;
-        const status = e.slice(0, 2);
-        out.push(resolve(this.top, e.slice(3)));
-        if (status[0] === "R" || status[0] === "C") i++; // the next entry is the original path
-      }
-      return out.filter((f) => f.endsWith(".css"));
-    } catch {
-      return [];
+    const diff = await this.git(["diff", "--name-only", "-z", "--no-renames", from, to, "--", ...specs]);
+    return [...new Set((diff ?? "").split("\0").filter((r) => r.endsWith(".css")).map((r) => resolve(this.top, r)))];
+  }
+
+  /** CSS files under `dirs` in HEAD, with their blob ids. */
+  async headCss(dirs: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const specs = this.specs(dirs);
+    if (specs.length === 0) return out;
+    const ls = await this.git(["ls-tree", "-r", "-z", "--full-name", "HEAD", "--", ...specs]);
+    for (const e of (ls ?? "").split("\0")) {
+      const tab = e.indexOf("\t");
+      if (tab < 0) continue;
+      const [, type, id] = e.slice(0, tab).split(" ");
+      const r = e.slice(tab + 1);
+      if (type === "blob" && r.endsWith(".css")) out.set(resolve(this.top, r), id);
     }
+    return out;
   }
 }
 

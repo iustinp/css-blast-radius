@@ -10,4 +10,4 @@ export { Capturer, type CaptureResult, type CaptureProgress } from "./capture/ca
 export { Renderer, type PageDiff, type MeasureRequest } from "./l2/render.js";
 export { parseStylesheet, type StylesheetModel } from "./css/model.js";
 export { diffModels, type CssChange } from "./css/diff.js";
-export { DIFF_BASES, type DiffBaseKind } from "./daemon/diffBase.js";
+export { TABS, type Tab, type BaseKind } from "./daemon/diffBase.js";

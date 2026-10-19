@@ -58,7 +58,7 @@ process.env.TMPDIR = scratch;
 let server = "";
 let homeId = "";
 let backend;
-const settings = { server, autoStartServer: false, diffBase: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
+const settings = { server, autoStartServer: false, defaultTab: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
 const events = {};
 const commands = new Map();
 const panels = [];
@@ -484,20 +484,22 @@ async function run() {
       });
       await waitFor(() => statusItem.text.includes("2 pages"), "count after group resumes");
     });
-    await check("tabs: the panel switches between All, This session and Unsaved; no Uncommitted without git", async () => {
+    await check("tabs: All counts unsaved typing, Uncommitted doesn't; no Committed without git", async () => {
       const p = pagesPanel();
       const tabs = await waitFor(() => lastOf(p, "tabs"), "tab row");
-      assert.deepEqual(tabs.tabs.map((t) => t.name), ["All", "This session", "Unsaved"]);
-      assert.equal(tabs.base, "session", "Uncommitted (the default) falls back to This session without git");
-      for (const base of ["saved", "production", "session"]) {
+      assert.deepEqual(tabs.tabs.map((t) => t.name), ["All", "Uncommitted"]);
+      assert.equal(tabs.tab, "all", "All is the default");
+      // Committed falls back to Uncommitted without git; the unsaved typing isn't counted there.
+      for (const [asked, tab, total] of [["committed", "uncommitted", 0], ["all", "all", 2]]) {
         const mark = p.posted.length;
-        p.webview.receive({ type: "tab", base });
-        await waitFor(() => lastOf(p, "tabs", mark)?.base === base, `${base} tab`);
-        const list = await waitFor(() => {
+        p.webview.receive({ type: "tab", tab: asked });
+        await waitFor(() => lastOf(p, "tabs", mark)?.tab === tab, `${tab} tab`);
+        await waitFor(() => {
           const m = lastOf(p, "pages", mark);
-          return m && lastOf(p, "tabs", mark).base === base && m.result.total === 2 && m;
-        }, `${base} tab's page list`);
-        assert(list.baseLabel, "list says what it's compared with");
+          return m && lastOf(p, "tabs", mark).tab === tab && m.result.total === total && m.chips.length === total / 2 && m;
+        }, `${tab} tab's page list`);
+        await waitFor(() => statusItem.text.includes(`${total} pages`), `${tab} tab's count`);
+        if (tab === "uncommitted") assert(!decoration().some((text) => text.includes("pages")), "the editor shows counts of the saved file");
         assert.equal(lastOf(p, "tabs", mark).main, undefined, "no main branch without git");
       }
     });

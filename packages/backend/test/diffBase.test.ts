@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Git, readText } from "../src/daemon/diffBase.js";
+import { Git, blobId, readText } from "../src/daemon/diffBase.js";
 
 const hasGit = (() => {
   try {
@@ -118,33 +118,26 @@ describe.skipIf(!hasGit)("Git diff base in temp repository (§7.2)", () => {
     expect(content).toBe(".gone { display: none; }\n");
   });
 
-  it("detects modified, added, untracked, deleted, and renamed files via changedCss()", async () => {
-    // 1. Modify base.css
-    fs.writeFileSync(path.join(realDir, "src", "css", "base.css"), "body { margin: 10px; }\n");
+  it("lists HEAD's CSS with blob ids, and the CSS changed between two commits", async () => {
+    const css = (f: string) => path.resolve(realDir, "src", "css", f);
+    const dirs = [path.join(realDir, "src", "css")];
+    const first = execSync("git rev-parse HEAD", { cwd: realDir, encoding: "utf8" }).trim();
 
-    // 2. Add untracked new.css
-    const untracked = path.join(realDir, "src", "css", "untracked.css");
-    fs.writeFileSync(untracked, ".new { color: green; }\n");
-
-    // 3. Rename torename.css -> renamed.css
-    execSync("git mv src/css/torename.css src/css/renamed.css", { cwd: realDir, stdio: "ignore" });
-
-    // 4. Non-CSS file changed (README.md)
+    // Working-tree edits (and non-CSS files) don't count: HEAD only.
+    fs.writeFileSync(css("base.css"), "body { margin: 10px; }\n");
     fs.writeFileSync(path.join(realDir, "README.md"), "# Changed\n");
+    let head = await git.headCss(dirs);
+    expect([...head.keys()].sort()).toEqual(["base.css", "theme.css", "todelete.css", "torename.css"].map(css));
+    expect(head.get(css("base.css"))).toBe(blobId(Buffer.from("body { margin: 0; }\n")));
 
-    const changed = await git.changedCss([path.join(realDir, "src", "css")]);
-    const normalized = changed.map((p) => path.resolve(realDir, p)).sort();
-
-    const expected = [
-      path.resolve(realDir, "src", "css", "base.css"),
-      path.resolve(realDir, "src", "css", "renamed.css"),
-      path.resolve(realDir, "src", "css", "todelete.css"),
-      path.resolve(realDir, "src", "css", "untracked.css"),
-    ].sort();
-
-    expect(normalized).toEqual(expected);
-    // Non-CSS files like README.md must NOT be included
-    expect(changed.some((f) => f.endsWith(".md"))).toBe(false);
+    // Committed: base.css modified, todelete.css deleted (earlier), torename.css renamed.
+    execSync("git mv src/css/torename.css src/css/renamed.css", { cwd: realDir, stdio: "ignore" });
+    execSync('git add -A && git commit -q -m "second"', { cwd: realDir, stdio: "ignore" });
+    head = await git.headCss(dirs);
+    expect([...head.keys()].sort()).toEqual(["base.css", "renamed.css", "theme.css"].map(css));
+    expect(head.get(css("base.css"))).toBe(blobId(Buffer.from("body { margin: 10px; }\n")));
+    expect((await git.changedBetween(first, "HEAD", dirs)).sort()).toEqual(["base.css", "renamed.css", "todelete.css", "torename.css"].map(css));
+    expect(await git.changedBetween("HEAD", "HEAD", dirs)).toEqual([]);
   });
 
   it("readText utility reads existing file or returns undefined", () => {

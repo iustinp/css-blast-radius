@@ -127,16 +127,18 @@ const pub = note("analysis/publishImpact", (p) => p.session.files.some((f: any) 
 fs.writeFileSync(util, utilOrig + "\n.text-center { text-align: center; letter-spacing: 1px; }\n");
 const pubR = await pub.catch((e) => e);
 check("closed-file watcher", !(pubR instanceof Error), pubR instanceof Error ? pubR.message : `session ${cnt(pubR.session.total)} files=${pubR.session.files.map((f: any) => path.basename(f.file)).join(",")}`);
-// Committing moves HEAD: the closed file is no longer an edit.
-const pub2 = note("analysis/publishImpact", (p) => !p.session.files.some((f: any) => f.file === util), 8000);
+// The Committed tab doesn't count the uncommitted edit; committing it moves HEAD and it counts.
+const ct = await rpc("session/setTab", { tab: "committed" });
+check("committed tab", ct.result?.tab === "committed" && !ct.result.files.some((f: any) => f.file === util), `${cnt(ct.result?.total)} ${ct.ms} ms`);
+const pub2 = note("analysis/publishImpact", (p) => p.session.files.some((f: any) => f.file === util), 8000);
 const { execFileSync } = await import("node:child_process");
 execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "tmp"], { cwd: ws });
 const pub2R = await pub2.catch((e) => e);
 check("git commit watched", !(pub2R instanceof Error), pub2R instanceof Error ? pub2R.message : `files=${pub2R.session.files.map((f: any) => path.basename(f.file)).join(",")}`);
 execFileSync("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: ws });
 
-const sb = await rpc("session/setDiffBase", { base: "saved" });
-check("diff base saved", sb.result?.diffBase === "saved", `${cnt(sb.result?.total)} ${sb.ms} ms`);
+const sb = await rpc("session/setTab", { tab: "all" });
+check("all tab", sb.result?.tab === "all", `${cnt(sb.result?.total)} ${sb.ms} ms`);
 
 const live = await rpc("analysis/openLive", { path: file, url });
 check("openLive (L3)", !!live.result?.render, `${live.result?.render?.status} ${live.ms} ms ${live.error?.message ?? ""}`);

@@ -276,28 +276,48 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
     expect(possiblePages.pages).toHaveLength(0);
   });
 
-  // i. diff bases: setDiffBase("saved") vs "HEAD" vs "session"
-  it("i. diff bases: setDiffBase('saved') vs 'HEAD' vs 'session' on closed modified file", async () => {
-    // Close main.css so it becomes a closed file
+  // i. tabs: which edits count; every tab compares with the scanned site
+  it("i. tabs: All counts typing, Uncommitted saved files, Committed HEAD; all vs the scanned site", async () => {
     await session.close(mainCssPath);
+    const saved = originalCssText + "\n.tab-saved { color: orange; }\n";
+    const typed = saved + "\n.tab-typed { color: red; }\n";
+    fs.writeFileSync(mainCssPath, saved);
+    const selectors = () => session.fileAnswer(mainCssPath).changes.map((c) => c.selector).sort();
+    try {
+      let total = await session.setTab("all");
+      expect(total.tab).toBe("all");
+      const res = await session.open(mainCssPath, typed, ++docVersion);
+      expect(res.answer.diffBase).toBe("production");
+      expect(res.answer.matchesEditor).toBeUndefined();
+      expect(selectors()).toEqual([".tab-saved", ".tab-typed"]);
 
-    // Modify main.css on disk directly
-    const modifiedDiskText = originalCssText + "\n.closed-disk-edit { color: orange; }\n";
-    fs.writeFileSync(mainCssPath, modifiedDiskText);
+      total = await session.setTab("uncommitted");
+      expect(total.tab).toBe("uncommitted");
+      expect(selectors()).toEqual([".tab-saved"]);
+      expect(session.fileAnswer(mainCssPath).matchesEditor).toBe(false);
+      expect(session.status().tab).toBe("uncommitted");
 
-    // In HEAD diff base, disk modification shows as a changed file
-    const headTotal = await session.setDiffBase("HEAD");
-    const headFile = headTotal.files.find((f) => path.resolve(f.file) === path.resolve(mainCssPath));
-    expect(headFile).toBeDefined();
-    expect(headFile!.changes).toBeGreaterThan(0);
+      total = await session.setTab("committed");
+      expect(selectors()).toEqual([]);
+      expect(total.files).toEqual([]);
+      const view = await session.pageDiff({ url: session.index!.pages[0].url });
+      expect(view.reason).toMatch(/no committed CSS changes/);
 
-    // In saved diff base, closed file compares against itself on disk, so 0 changes
-    const savedTotal = await session.setDiffBase("saved");
-    const savedFile = savedTotal.files.find((f) => path.resolve(f.file) === path.resolve(mainCssPath));
-    expect(savedFile).toBeUndefined();
+      execSync("git add . && git commit -q -m tab-saved", { cwd: ws, stdio: "ignore" });
+      await session.setTab("committed");
+      expect(selectors()).toEqual([".tab-saved"]);
+      expect(session.fileAnswer(mainCssPath).diffBase).toBe("production");
 
-    // Restore disk file and test session diff base
-    fs.writeFileSync(mainCssPath, originalCssText);
-    await session.setDiffBase("session");
+      // Closed: Committed reads HEAD, the others the file on disk.
+      await session.close(mainCssPath);
+      fs.writeFileSync(mainCssPath, typed);
+      total = await session.setTab("committed");
+      expect(total.files.map((f) => [path.resolve(f.file), f.changes, f.open])).toEqual([[path.resolve(mainCssPath), 1, false]]);
+      total = await session.setTab("uncommitted");
+      expect(total.files.map((f) => f.changes)).toEqual([2]);
+    } finally {
+      fs.writeFileSync(mainCssPath, originalCssText);
+      await session.setTab("all");
+    }
   });
 });

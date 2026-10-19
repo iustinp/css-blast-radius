@@ -5,10 +5,10 @@ import type { Session } from "../daemon/session.js";
 import { ERR, RpcError } from "./protocol.js";
 
 /** Methods that change document/session state run strictly in arrival order. */
-export const SERIAL = new Set(["document/open", "document/change", "document/save", "document/close", "session/setDiffBase", "session/setGroups"]);
+export const SERIAL = new Set(["document/open", "document/change", "document/save", "document/close", "session/setTab", "session/setGroups"]);
 
 /** Document methods: the edits changed (the diff viewer refreshes). */
-export const EDITS = new Set(["document/open", "document/change", "document/save", "document/close", "session/setDiffBase"]);
+export const EDITS = new Set(["document/open", "document/change", "document/save", "document/close", "session/setTab"]);
 
 export function need(p: any, k: string): any {
   if (p?.[k] === undefined) throw new RpcError(ERR.invalidParams, `missing parameter: ${k}`);
@@ -23,15 +23,15 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
     case "index/getStatus":
       return run(() => session.status());
     case "document/open":
-      return run(() => session.open(need(p, "path"), need(p, "text"), p.version ?? 0, p.atStart === true));
+      return run(() => session.open(need(p, "path"), need(p, "text"), p.version ?? 0));
     case "document/change":
       return run(() => session.change(need(p, "path"), need(p, "version"), need(p, "changes")));
     case "document/save":
       return run(() => session.save(need(p, "path"), p.text));
     case "document/close":
       return run(() => session.close(need(p, "path")));
-    case "session/setDiffBase":
-      return run(() => session.setDiffBase(need(p, "base"), typeof p.mainChanges === "boolean" ? p.mainChanges : undefined));
+    case "session/setTab":
+      return run(() => session.setTab(need(p, "tab"), typeof p.mainChanges === "boolean" ? p.mainChanges : undefined));
     case "session/setSelection":
       return run(() => session.setSelection(p?.selection));
     case "analysis/queryImpacts":

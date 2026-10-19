@@ -9,9 +9,9 @@ import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
 import { ExternalNoticeBatch } from "./externalNotice";
 import { LiveEdits } from "./liveEdits";
-import { changeAtCursor, configuredBase, editSides, effectiveBase, externalChangeText, TABS } from "./format";
+import { changeAtCursor, configuredTab, editSides, effectiveTab, externalChangeText, TABS } from "./format";
 import { PagesPanel } from "./panel";
-import type { CaptureProgressParams, Count, DiffBaseKind, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal, WatchStatus } from "./protocol";
+import type { CaptureProgressParams, Count, FileAnswer, GroupInfo, IndexStatus, PagesTarget, RefinedParams, SessionTotal, Tab, WatchStatus } from "./protocol";
 import { ImpactState } from "./state";
 import { serverOrigin } from "./urls";
 
@@ -80,21 +80,20 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }));
   }
 
-  // The panel's tab: what this window compares your CSS with. It starts at the setting's tab and
-  // stays across reconnects; the server applies one per project (windows on one project share it).
-  const settingBase = () => configuredBase(vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get("diffBase"));
-  let tab: { base: DiffBaseKind; mainChanges: boolean } = { base: settingBase(), mainChanges: false };
+  // The panel's tab: which of your changes count. It starts at the setting's tab and stays
+  // across reconnects; the server applies one per project (windows on one project share it).
+  const settingTab = () => configuredTab(vscode.workspace.getConfiguration("cssBlastRadius", folderUri).get("defaultTab"));
+  let tab: { tab: Tab; mainChanges: boolean } = { tab: settingTab(), mainChanges: false };
 
   async function applyTab(refresh = true, git = state.status?.git): Promise<void> {
     if (!client.connected) return;
-    const base = effectiveBase(tab.base, git);
-    state.acceptSession(await client.call<SessionTotal>("session/setDiffBase", { base, mainChanges: tab.mainChanges }, 120_000));
+    state.acceptSession(await client.call<SessionTotal>("session/setTab", { tab: effectiveTab(tab.tab, git), mainChanges: tab.mainChanges }, 120_000));
     await refreshScope();
     if (refresh) await refreshAnswers();
   }
 
-  async function switchTab(next: { base: DiffBaseKind; mainChanges?: boolean }): Promise<void> {
-    tab = { base: next.base, mainChanges: next.mainChanges ?? tab.mainChanges };
+  async function switchTab(next: { tab: Tab; mainChanges?: boolean }): Promise<void> {
+    tab = { tab: next.tab, mainChanges: next.mainChanges ?? tab.mainChanges };
     try {
       await applyTab();
     } catch (err: any) {
@@ -194,8 +193,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     } catch (err: any) {
       log(`Comparison base: ${err?.message ?? err}`);
     }
-    // A new "This session": what the editor holds now, saved or not, is where it starts.
-    await sync.openAll(init.sessionStarted === true);
+    await sync.openAll();
     try {
       state.acceptSession(await client.call<SessionTotal>("analysis/queryImpacts", { scope: "session" }));
     } catch (err: any) {
@@ -238,7 +236,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     const a = state.answers.get(file);
     const r = state.rules.get(file);
     const rules = a && r?.editRevision === a.editRevision && r.indexRevision === a.indexRevision ? r.rules : [];
-    const ch = a && changeAtCursor(a.changes, rules, ed.selection.active.line + 1);
+    // The tab counted another version of the file: its lines aren't the editor's.
+    const ch = a && a.matchesEditor !== false && changeAtCursor(a.changes, rules, ed.selection.active.line + 1);
     if (!ch) return { title: "All edits" };
     const sides = editSides(ch);
     return { path: file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined, title: ch.selector || `Edit on line ${ch.line}` };
@@ -308,23 +307,23 @@ export function activate(ctx: vscode.ExtensionContext): void {
         }),
       );
     }),
-    vscode.commands.registerCommand("cssBlastRadius.setDiffBase", async (arg?: { base?: DiffBaseKind; mainChanges?: boolean }) => {
+    vscode.commands.registerCommand("cssBlastRadius.setTab", async (arg?: { tab?: Tab; mainChanges?: boolean }) => {
       if (!requireConnected()) return;
-      if (arg?.base && TABS.some((t) => t.base === arg.base)) return switchTab({ base: arg.base, mainChanges: arg.mainChanges });
+      if (arg?.tab && TABS.some((t) => t.tab === arg.tab)) return switchTab({ tab: arg.tab, mainChanges: arg.mainChanges });
       const git = state.status?.git;
       const pick = await vscode.window.showQuickPick(
-        TABS.filter((t) => effectiveBase(t.base, git) === t.base).map((t) => ({
-          label: t.name, detail: t.tip, description: t.base === effectiveBase(tab.base, git) ? "current" : undefined, base: t.base,
+        TABS.filter((t) => effectiveTab(t.tab, git) === t.tab).map((t) => ({
+          label: t.name, detail: t.tip, description: t.tab === effectiveTab(tab.tab, git) ? "current" : undefined, tab: t.tab,
         })),
-        { title: "Which changes should CSS Blast Radius show?" },
+        { title: "Which of your changes should CSS Blast Radius count?" },
       );
-      if (pick) await switchTab({ base: pick.base });
+      if (pick) await switchTab({ tab: pick.tab });
     }),
     vscode.commands.registerCommand("cssBlastRadius.reconnectServer", () => life.reconnect()),
     vscode.commands.registerCommand("cssBlastRadius.showOutput", () => life.output.show()),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("cssBlastRadius.codeLens")) state.invalidateRules(undefined);
-      if (e.affectsConfiguration("cssBlastRadius.diffBase")) void switchTab({ base: settingBase() });
+      if (e.affectsConfiguration("cssBlastRadius.defaultTab")) void switchTab({ tab: settingTab() });
       if (["server", "autoStartServer", "serverPath", "daemonPath", "nodePath"].some((k) => e.affectsConfiguration(`cssBlastRadius.${k}`))) {
         void life.reconnect();
       }

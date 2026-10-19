@@ -45,8 +45,8 @@
         "category": "CSS Blast Radius"
       },
       {
-        "command": "cssBlastRadius.setDiffBase",
-        "title": "Show Which Changes (All, Uncommitted, This Session, Unsaved)",
+        "command": "cssBlastRadius.setTab",
+        "title": "Show Which Changes (All, Uncommitted, Committed)",
         "category": "CSS Blast Radius"
       },
       {
@@ -191,24 +191,20 @@
           "default": "",
           "description": "Path to the server CLI (packages/backend/dist/cli.js). Empty: the backend this extension was built from; the old daemonPath setting is a fallback."
         },
-        "cssBlastRadius.diffBase": {
+        "cssBlastRadius.defaultTab": {
           "type": "string",
           "enum": [
-            "",
-            "HEAD",
-            "saved",
-            "session",
-            "production"
+            "all",
+            "uncommitted",
+            "committed"
           ],
           "enumDescriptions": [
-            "Uncommitted (the default)",
-            "Uncommitted: changes since your last commit, saved or not",
-            "Unsaved: typing you haven't saved yet",
-            "This session: changes since the window opened",
-            "All: every CSS change the live site doesn't have yet"
+            "All: every CSS change the live site doesn't have yet, saved or not",
+            "Uncommitted: your commits and saved changes; unsaved typing doesn't count",
+            "Committed: only what you've committed (Uncommitted outside a git repository)"
           ],
-          "default": "HEAD",
-          "description": "The Blast Radius tab selected when a window opens: which of your CSS changes are counted. Switch tabs in the Blast Radius panel or with Show Which Changes."
+          "default": "all",
+          "description": "The Blast Radius tab selected when a window opens: which of your CSS changes are counted, each compared with the live site. Switch tabs in the Blast Radius panel or with Show Which Changes."
         },
         "cssBlastRadius.cursorCount": {
           "type": "boolean",

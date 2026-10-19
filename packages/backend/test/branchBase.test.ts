@@ -167,7 +167,7 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     fs.writeFileSync(cssPath, heroGreen(original.replace("padding: 8px 16px;", "padding: 8px 16px;\n  border: 3px solid red;")));
     commitAll(ws, "C on feature");
 
-    session = await Session.create({ workspaceRoot: ws, dataDir, watch: false, l1Workers: 0, diffBase: "production" });
+    session = await Session.create({ workspaceRoot: ws, dataDir, watch: false, l1Workers: 0 });
   }, 120_000);
 
   afterAll(async () => {
@@ -188,13 +188,61 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
   });
 
   it("can also count main's newer changes (a plain comparison with the site), and stop again", async () => {
-    let total = await session.setDiffBase("production", true);
+    let total = await session.setTab("all", true);
     expect(total.branch).toEqual({ name: "feature", mainRef: "origin/main", behind: 1, mainShown: true });
     const res = await session.open(cssPath, fs.readFileSync(cssPath, "utf8"), 2);
     expect(res.answer.changes.map((c) => c.selector).sort()).toEqual([".btn", ".card .title"]);
-    total = await session.setDiffBase("production", false);
+    total = await session.setTab("all", false);
     expect(total.branch?.mainShown).toBe(false);
     expect(total.files[0].changes).toBe(1);
+  });
+
+  it("Committed counts the branch's commits; Uncommitted adds saved edits, not unsaved typing", async () => {
+    const committed = fs.readFileSync(cssPath, "utf8");
+    const saved = `/* saved */\n${committed.replace("#hero {", "#hero {\n  outline: 1px solid blue;")}`;
+    const typed = saved.replace(".btn.btn-primary {", ".btn.btn-primary {\n  margin: 2px;");
+    const selectors = () => session.fileAnswer(cssPath).changes.map((c) => c.selector).sort();
+    await session.close(cssPath);
+    fs.writeFileSync(cssPath, saved);
+    try {
+      let total = await session.setTab("committed");
+      expect(total.tab).toBe("committed");
+      expect(total.branch).toMatchObject({ name: "feature", behind: 1 });
+      expect(total.files.map((f) => [f.open, f.changes])).toEqual([[false, 1]]);
+      // Closed, its HEAD lines aren't the file's on disk (a comment added above): jumping opens the file on disk.
+      const lineOf = (t: string) => t.split("\n").findIndex((l) => l.includes("border: 3px solid red")) + 1;
+      expect(lineOf(saved)).toBe(lineOf(committed) + 1);
+      expect(session.changeDetail(cssPath, session.fileAnswer(cssPath).changes[0].id).line).toBe(lineOf(saved));
+      const res = await session.open(cssPath, typed, 10);
+      expect(res.answer.changes.map((c) => c.selector)).toEqual([".btn"]);
+      expect(res.answer.matchesEditor).toBe(false);
+
+      await session.setTab("uncommitted");
+      expect(selectors()).toEqual(["#hero", ".btn"]);
+      // The saved version's #hero is a line higher than the editor's (typing above it): jumping lands in the editor's.
+      const hero = session.fileAnswer(cssPath).changes.find((c) => c.selector === "#hero")!;
+      const heroLine = typed.split("\n").findIndex((l) => l.startsWith("#hero {")) + 1;
+      expect(session.changeDetail(cssPath, hero.id).rule).toMatchObject({ line: heroLine });
+      expect(session.changeDetail(cssPath, hero.id).line).toBe(heroLine + 1);
+      await session.setTab("all");
+      expect(selectors()).toEqual(["#hero", ".btn", ".btn.btn-primary"]);
+
+      await session.setTab("uncommitted");
+      const after = await session.save(cssPath, typed);
+      expect(after.answer.changes.map((c) => c.selector).sort()).toEqual(["#hero", ".btn", ".btn.btn-primary"]);
+      expect(after.answer.matchesEditor).toBeUndefined();
+
+      git(ws, "checkout -q -b feature-tabs");
+      fs.writeFileSync(cssPath, typed);
+      commitAll(ws, "D on feature-tabs");
+      await session.setTab("committed");
+      expect(selectors()).toEqual(["#hero", ".btn", ".btn.btn-primary"]);
+    } finally {
+      git(ws, "checkout -q -f feature");
+      git(ws, "branch -q -D feature-tabs 2>/dev/null || true");
+      await session.open(cssPath, committed, 11);
+      await session.setTab("all");
+    }
   });
 
   it("shows the edit on the live page with main's newer CSS kept", async () => {
@@ -209,8 +257,8 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
   it("lists the edits the live site doesn't have, with their lines, whatever the tab", async () => {
     const text = fs.readFileSync(cssPath, "utf8");
     const lineOf = (t: string, s: string) => t.split("\n").findIndex((l) => l.includes(s)) + 1;
-    await session.setDiffBase("HEAD");
-    expect(session.sessionTotal().files).toEqual([]);
+    await session.setTab("uncommitted");
+    expect(session.sessionTotal().files.map((f) => f.changes)).toEqual([1]);
 
     let live = await session.liveEdits();
     expect(live.branch?.name).toBe("feature");
@@ -224,7 +272,7 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
 
     // Unsaved typing counts too; the tab's own list is untouched.
     const typed = text.replace("#hero {", "#hero {\n  outline: 1px solid blue;");
-    await session.open(cssPath, typed, 3);
+    expect((await session.open(cssPath, typed, 3)).answer.matchesEditor).toBe(false);
     live = await session.liveEdits();
     expect(live.files[0].edits.map((e) => e.selector).sort()).toEqual(["#hero", ".btn"]);
     const hero = live.files[0].edits.find((e) => e.selector === "#hero")!;
@@ -238,7 +286,7 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     expect(live.files[0].edits.find((e) => e.selector === ".card .title")!.ranges).toEqual([[lineOf(title, "letter-spacing"), lineOf(title, "letter-spacing")]]);
 
     // Typing main's own value too (already live) plus a new one: the All tab, its card and the highlight show only the new one.
-    await session.setDiffBase("production");
+    await session.setTab("all");
     const both = typed.replace("font-weight: bold;", "font-weight: 300;\n  letter-spacing: 1px;");
     const res = await session.open(cssPath, both, 5);
     const ch = res.answer.changes.find((c) => c.selector === ".card .title")!;
@@ -246,14 +294,14 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     expect(session.changeDetail(cssPath, ch.id).rule!.decls.map((d) => `${d.state} ${d.text}`)).toEqual(["same font-weight: 300", "changed letter-spacing: 1px"]);
     live = await session.liveEdits();
     expect(live.files[0].edits.find((e) => e.selector === ".card .title")!.ranges).toEqual([[lineOf(both, "letter-spacing"), lineOf(both, "letter-spacing")]]);
-    await session.setDiffBase("HEAD");
+    await session.setTab("uncommitted");
     await session.open(cssPath, typed, 6);
 
     // Closed: the file on disk.
     await session.close(cssPath);
     live = await session.liveEdits();
     expect(live.files.map((f) => [f.open, f.edits.map((e) => e.selector)])).toEqual([[false, [".btn"]]]);
-    await session.setDiffBase("production");
+    await session.setTab("all");
     expect((await session.liveEdits()).files.map((f) => f.edits.length)).toEqual([1]);
   });
 
@@ -263,14 +311,14 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: live-site base on a bran
     fs.writeFileSync(cssPath, scanned.replace("font-weight: 300;", "font-weight: 500;"));
     commitAll(ws, "D on main, after the scan");
     git(ws, "update-ref refs/remotes/origin/main HEAD");
-    let total = await session.setDiffBase("production");
+    let total = await session.setTab("all");
     expect(total.branch).toMatchObject({ name: "main", behind: 0 });
     expect(total.files.map((f) => f.changes)).toEqual([1]);
     expect((await session.liveEdits()).files[0].edits.map((e) => e.selector)).toEqual([".card .title"]);
 
     git(ws, "checkout -q -b later");
     fs.writeFileSync(cssPath, fs.readFileSync(cssPath, "utf8").replace("#hero {", "#hero {\n  outline: 1px solid blue;"));
-    total = await session.setDiffBase("production");
+    total = await session.setTab("all");
     expect(total.branch).toMatchObject({ name: "later", behind: 0 });
     const res = await session.open(cssPath, fs.readFileSync(cssPath, "utf8"), 7);
     expect(res.answer.changes.map((c) => c.selector).sort()).toEqual(["#hero", ".card .title"]);

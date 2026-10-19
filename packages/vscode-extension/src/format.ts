@@ -1,6 +1,6 @@
 // How numbers read (§7.1 / §8). Pure functions: no vscode import, unit-tested.
 
-import type { ChangeAnswer, Count, DiffBaseKind, FileAnswer, Freshness, RuleCount, WatchStatus } from "./protocol";
+import type { ChangeAnswer, Count, FileAnswer, Freshness, RuleCount, Tab, WatchStatus } from "./protocol";
 
 const plural = (n: number, word = "page") => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
 
@@ -259,48 +259,39 @@ export function branchNote(branch: Branch | undefined): string | undefined {
     : `${head}; only your branch's changes are counted.`;
 }
 
-export const DIFF_BASE_LABEL: Record<string, string> = {
-  HEAD: "the last commit",
-  saved: "the last save",
-  session: "when this window opened",
+/** What a file's edits are compared with (FileAnswer.diffBase). */
+export const BASE_LABEL: Record<string, string> = {
   production: "the live site",
+  HEAD: "the last commit (the live site has no copy of this file)",
+  saved: "the file on disk (the live site has no copy of this file)",
 };
 
-/** The panel's tabs, broadest first: each compares your CSS with a different starting point. */
-export const TABS: Array<{ base: DiffBaseKind; name: string; tip: string }> = [
-  { base: "production", name: "All", tip: "Every CSS change the live site doesn't have yet: committed, uncommitted, unsaved or made by other tools." },
-  { base: "HEAD", name: "Uncommitted", tip: "Changes since your last commit, saved or not." },
-  { base: "session", name: "This session", tip: "Changes since this window opened (a reload starts over)." },
-  { base: "saved", name: "Unsaved", tip: "Typing you haven't saved yet." },
+/** The panel's tabs, broadest first: each compares with the live site, counting fewer of your changes. */
+export const TABS: Array<{ tab: Tab; name: string; tip: string }> = [
+  { tab: "all", name: "All", tip: "Every CSS change the live site doesn't have yet: committed, saved, unsaved or made by other tools." },
+  { tab: "uncommitted", name: "Uncommitted", tip: "Your commits and saved changes, as if they were on the live site; typing you haven't saved yet doesn't count." },
+  { tab: "committed", name: "Committed", tip: "Only what you've committed, as if it were on the live site." },
 ];
 
-export const tabName = (base: string | undefined) => TABS.find((t) => t.base === base)?.name ?? "All";
+export const tabName = (tab: string | undefined) => TABS.find((t) => t.tab === tab)?.name ?? "All";
 
-/** Without git there's no last commit: "Uncommitted" falls back to "This session". */
-export function effectiveBase(base: DiffBaseKind, git: boolean | undefined): DiffBaseKind {
-  return base === "HEAD" && git === false ? "session" : base;
+/** Without git there are no commits: "Committed" falls back to "Uncommitted". */
+export function effectiveTab(tab: Tab, git: boolean | undefined): Tab {
+  return tab === "committed" && git === false ? "uncommitted" : tab;
 }
 
-/** The setting's tab (empty: the default, Uncommitted). */
-export function configuredBase(value: unknown): DiffBaseKind {
-  return TABS.some((t) => t.base === value) ? (value as DiffBaseKind) : "HEAD";
+/** The setting's tab (empty: the default, All). */
+export function configuredTab(value: unknown): Tab {
+  return TABS.some((t) => t.tab === value) ? (value as Tab) : "all";
 }
 
-export function noChangesText(diffBase: string | undefined, branch: Branch | undefined): string {
-  switch (diffBase) {
-    case "HEAD":
-      return "No uncommitted CSS changes.";
-    case "session":
-      return "No CSS changes since this window opened.";
-    case "saved":
-      return "No unsaved CSS changes.";
-    default:
-      return branch && !branch.mainShown ? "Your branch has no CSS changes." : "No CSS changes compared with the live site.";
-  }
+export function noChangesText(tab: string | undefined, branch: Branch | undefined): string {
+  const what = tab === "committed" ? "committed CSS changes" : tab === "uncommitted" ? "saved CSS changes" : "CSS changes";
+  return branch && !branch.mainShown ? `Your branch has no ${what}.` : `No ${what} compared with the live site.`;
 }
 
 /**
- * The All tab's line about the scan it compares with: which commit of the
+ * The tabs' line about the scan they compare with: which commit of the
  * site's branch it matches, and what the server is catching up on.
  */
 export function scanLine(w: WatchStatus | undefined): { text: string; tip: string; busy: boolean } | undefined {

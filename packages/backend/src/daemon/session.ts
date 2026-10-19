@@ -22,7 +22,7 @@ import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type SheetEd
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
-import { DIFF_BASES, Git, readText, type BaseText, type BranchPoint, type DiffBaseKind } from "./diffBase.js";
+import { Git, TABS, blobId, readText, type BaseText, type BranchPoint, type Tab } from "./diffBase.js";
 import { SheetMatcher } from "./sheetMatch.js";
 import {
   ERR,
@@ -81,7 +81,8 @@ export interface SessionOptions {
   l1Workers?: number;
   /** Watch the workspace for CSS/markup changes (default true). */
   watch?: boolean;
-  diffBase?: DiffBaseKind;
+  /** Which edits count (default all); every tab compares with the scanned site. */
+  tab?: Tab;
   /** Server mode: config, store, L1 pool and renderer owned by the server. */
   shared?: SharedResources;
   /** Server mode: the linked page groups (undefined: every captured page counts). */
@@ -110,6 +111,15 @@ interface FileState {
   doc?: Doc;
   /** Closed files: the text on disk (undefined: deleted). */
   diskText?: string;
+  /** Open files: the text on disk, the Uncommitted tab's version (undefined: not on disk). */
+  savedText?: string;
+  /**
+   * Committed tab: the file in HEAD (text undefined: the branch's commits deleted it;
+   * `asBase`: not in HEAD and never committed, so the base, whatever it is now).
+   */
+  head?: { text: string | undefined; asBase?: boolean };
+  /** A live-site copy for the editor's highlights: counts every edit, whatever the tab. */
+  live?: boolean;
   base?: BaseText;
   baseModel?: StylesheetModel;
   /** Branch on the live-site base: drops changes the site already has, and the parts of changes it has. */
@@ -162,15 +172,6 @@ const LIMITATIONS = [
   "Pages added to the site since the last capture are not counted.",
 ];
 
-const MAX_SNAPSHOT_FILES = 3000;
-const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
-
-/** The diff viewer's empty page, per comparison (the live site's depends on the branch). */
-const NO_CHANGES: Partial<Record<DiffBaseKind, string>> = {
-  HEAD: "You have no uncommitted CSS changes right now.",
-  session: "You have no CSS changes since your editor window opened.",
-  saved: "You have no unsaved CSS changes right now.",
-};
 
 export class Session extends EventEmitter {
   readonly cfg: CbrConfig;
@@ -187,7 +188,7 @@ export class Session extends EventEmitter {
   private gitMoved = false;
   /** Live-site base: also count the deployed branch's newer changes (a plain comparison with the site). */
   private mainChanges = false;
-  diffBase: DiffBaseKind;
+  tab: Tab;
   editRevision = 0;
   private readonly files = new Map<string, FileState>();
   private readonly rulesPending = new Set<string>();
@@ -196,8 +197,6 @@ export class Session extends EventEmitter {
   private l1Tried = new Map<string, PageSet>();
   private l1Running?: Promise<void>;
   private l1Error?: string;
-  private readonly sessionStart = new Map<string, string>();
-  private sessionSnapshotComplete = false;
   private markupChanged = false;
   private watcher?: FSWatcher;
   private refreshTimer?: NodeJS.Timeout;
@@ -219,11 +218,14 @@ export class Session extends EventEmitter {
   private cssFiles: string[] = [];
   /** The editor's live-site highlights, whatever the tab: each file compared with the live site, as the All tab does. */
   private readonly live = new Map<string, FileState>();
-  private liveBranchLoad?: Promise<BranchPoint | undefined>;
   /** Closed files that differ from the live site (cached until CSS, git or the scan change). */
   private liveClosed?: Promise<string[]>;
   /** Bumped by every resetLive: work begun before it isn't cached. */
   private liveGen = 0;
+  /** Committed tab: files the branch's commits deleted. */
+  private headDeleted = new Set<string>();
+  /** git blob ids of captured stylesheets, by content hash. */
+  private readonly scanBlobIds = new Map<string, string>();
 
   private constructor(readonly opts: SessionOptions) {
     super();
@@ -236,7 +238,7 @@ export class Session extends EventEmitter {
       this.store = new Store(this.cfg.dataDir);
       this.pool = new L1Pool({ blobDir: this.store.blobDir, workers: opts.l1Workers });
     }
-    this.diffBase = opts.diffBase ?? "HEAD";
+    this.tab = opts.tab ?? "all";
     this.scopeGroups = opts.scope;
     this.matcher = new SheetMatcher(this.cfg, undefined);
   }
@@ -249,9 +251,8 @@ export class Session extends EventEmitter {
 
   private async attach(): Promise<void> {
     this.git = await Git.find(this.cfg.workspaceRoot);
-    if (!this.git && this.diffBase === "HEAD") this.messages.push("Not a git repository: HEAD diff base falls back to the last save.");
+    this.tab = this.usable(this.tab);
     this.loadIndex();
-    await this.snapshotSession();
     await this.refreshClosed();
     if (this.opts.watch !== false) this.startWatching();
   }
@@ -274,8 +275,8 @@ export class Session extends EventEmitter {
     this.l1Queue = new Map();
     this.l1Tried = new Map();
     this.l1gen++;
-    // Production bases come from the capture: they change with the revision.
-    if (this.diffBase === "production") for (const f of this.files.values()) f.base = undefined;
+    // Bases come from the capture: they change with the revision.
+    for (const f of this.files.values()) f.base = undefined;
     this.pool.warm(idx).catch((err) => this.degrade(`L1 workers: ${err?.message ?? err}`));
   }
 
@@ -353,7 +354,7 @@ export class Session extends EventEmitter {
       failedPages: idx?.failed.count() ?? 0,
       variants: idx?.variants.map((v) => v.name) ?? [],
       markupChanged: this.markupChanged,
-      diffBase: this.diffBase,
+      tab: this.tab,
       git: !!this.git,
       capture: this.captureState ? { ...this.captureState } : undefined,
       scope: this.scopeStatus(),
@@ -376,15 +377,12 @@ export class Session extends EventEmitter {
     f.editRevision = ++this.editRevision;
   }
 
-  async open(path: string, text: string, version: number, atStart = false): Promise<DocResult> {
+  async open(path: string, text: string, version: number): Promise<DocResult> {
     const f = this.state(path);
-    f.doc = new Doc(f.path, text, version, readText(f.path));
+    const disk = readText(f.path);
+    f.doc = new Doc(f.path, text, version, disk);
+    f.savedText = disk;
     f.diskText = undefined;
-    if (atStart) {
-      // Restored unsaved edits were made before this session.
-      this.sessionStart.set(f.path, text);
-      if (this.diffBase === "session") f.base = undefined;
-    }
     this.touch(f);
     await this.ensureBase(f);
     return this.docResult(f);
@@ -403,7 +401,7 @@ export class Session extends EventEmitter {
     const f = this.files.get(resolve(path));
     if (!f?.doc) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
     f.doc.save(text);
-    if (this.diffBase === "saved") f.base = undefined;
+    f.savedText = f.doc.text;
     // The watcher skips open files: what's on disk changed.
     this.resetLive(false);
     this.touch(f);
@@ -424,35 +422,40 @@ export class Session extends EventEmitter {
     return this.sessionTotal();
   }
 
-  async setDiffBase(kind: DiffBaseKind, mainChanges?: boolean): Promise<SessionTotal> {
-    if (!DIFF_BASES.includes(kind)) throw new RpcError(ERR.invalidParams, `unknown diff base: ${kind}`);
-    this.diffBase = kind;
+  /** A window attached alone: files earlier windows left open are closed (the editor reopens its own). */
+  async closeAll(): Promise<void> {
+    let closed = false;
+    for (const f of [...this.files.values()]) {
+      if (!f.doc) continue;
+      this.files.delete(f.path);
+      this.rulesPending.delete(f.path);
+      closed = true;
+    }
+    if (!closed) return;
+    this.editRevision++;
+    this.resetLive(false);
+    await this.refreshClosed();
+    this.publishOpenDocs();
+  }
+
+  async setTab(tab: Tab, mainChanges?: boolean): Promise<SessionTotal> {
+    if (!TABS.includes(tab)) throw new RpcError(ERR.invalidParams, `unknown tab: ${tab}`);
+    this.tab = this.usable(tab);
     if (mainChanges !== undefined) this.mainChanges = mainChanges;
     this.branchLoad = undefined;
     this.resetLive(true);
     return this.rebase();
   }
 
-  /**
-   * "This session" starts over for a new editor window: the CSS on disk now
-   * (and the window's files as they reopen) is its start. No window is
-   * attached, so files the last one left open are closed.
-   */
-  async restartSession(): Promise<SessionTotal> {
-    for (const f of [...this.files.values()]) {
-      if (!f.doc) continue;
-      this.files.delete(f.path);
-      this.rulesPending.delete(f.path);
-    }
-    this.editRevision++;
-    this.sessionStart.clear();
-    await this.snapshotSession();
-    return this.rebase();
+  /** Committed needs git: without it, saved files are the closest. */
+  private usable(tab: Tab): Tab {
+    return tab === "committed" && !this.git ? "uncommitted" : tab;
   }
 
   private async rebase(): Promise<SessionTotal> {
     for (const f of this.files.values()) {
       f.base = undefined;
+      f.head = undefined;
       this.touch(f);
     }
     await this.refreshClosed();
@@ -461,50 +464,44 @@ export class Session extends EventEmitter {
     return this.sessionTotal();
   }
 
-  // ------------------------------------------------------------ diff base
+  // ----------------------------------------------------------------- base
 
-  private async ensureBase(f: FileState): Promise<void> {
-    if (f.base) return;
-    f.base = await this.loadBase(f.path);
-    f.baseModel = browserModel(f.base.text ?? "");
-    const live = f.base.live !== undefined ? browserModel(f.base.live) : undefined;
-    f.applied = live && appliedFilter(live);
-    f.version++;
+  private needsBase(f: FileState): boolean {
+    return !f.base || (this.tab === "committed" && !f.head);
   }
 
-  private async loadBase(path: string): Promise<BaseText> {
-    switch (this.diffBase) {
-      case "HEAD":
-        if (!this.git) return { text: readText(path), kind: "saved", note: "not a git repository" };
-        return { text: await this.git.show(path), kind: "HEAD" };
-      case "saved":
-        return { text: readText(path), kind: "saved" };
-      case "session": {
-        let note: string | undefined;
-        if (!this.sessionStart.has(path) && !this.sessionSnapshotComplete) {
-          const t = readText(path);
-          if (t !== undefined) this.sessionStart.set(path, t);
-          note = "not in the session snapshot (too much CSS): compared with the file as first opened";
-        }
-        return { text: this.sessionStart.get(path), kind: "session", note };
-      }
-      case "production": {
-        const base = await this.productionBase(path, () => this.branchPoint());
-        if (base) return base;
-        if (this.git) return { text: await this.git.show(path), kind: "HEAD", note: "no captured stylesheet for this file" };
-        return { text: readText(path), kind: "saved", note: "no captured stylesheet for this file" };
-      }
+  private async ensureBase(f: FileState): Promise<void> {
+    if (!f.base) {
+      f.base = await this.loadBase(f.path);
+      f.baseModel = browserModel(f.base.text ?? "");
+      const live = f.base.live !== undefined ? browserModel(f.base.live) : undefined;
+      f.applied = live && appliedFilter(live);
+      f.version++;
+    }
+    if (this.tab === "committed" && !f.head) {
+      const text = await this.git?.show(f.path);
+      // Not in HEAD and not deleted by a commit: new and uncommitted, so nothing is committed yet.
+      f.head = text !== undefined || this.headDeleted.has(f.path) ? { text } : { text: undefined, asBase: true };
+      f.version++;
     }
   }
 
+  /** The site's copy of the file; not captured: HEAD (or the file on disk without git). */
+  private async loadBase(path: string): Promise<BaseText> {
+    const base = await this.productionBase(path);
+    if (base) return base;
+    if (this.git) return { text: await this.git.show(path), kind: "HEAD", note: "no captured stylesheet for this file" };
+    return { text: readText(path), kind: "saved", note: "no captured stylesheet for this file" };
+  }
+
   /** The live-site base of a captured file (undefined: no captured stylesheet). */
-  private async productionBase(path: string, point: () => Promise<BranchPoint | undefined>): Promise<BaseText | undefined> {
+  private async productionBase(path: string): Promise<BaseText | undefined> {
     const hash = this.sheetHashes(path)[0];
     if (!hash) return undefined;
     const blob = this.store.getBlob(hash);
     const live = blob.toString("utf8");
     // On a branch, diff against where it left the deployed branch: newer commits there aren't "my edits".
-    const bp = await point();
+    const bp = await this.branchPoint();
     if (!bp || this.mainChanges || (await this.scanBehind(bp, path, blob))) return { text: live, kind: "production" };
     const text = await this.git!.show(path, bp.mergeBase);
     return text !== undefined ? { text, kind: "production", live } : { text: live, kind: "production" };
@@ -519,9 +516,9 @@ export class Session extends EventEmitter {
     return this.git!.committed(bp.head, path, scanned);
   }
 
-  /** Where the checked-out branch left the deployed branch (production base only). */
+  /** Where the checked-out branch left the deployed branch. */
   private branchPoint(): Promise<BranchPoint | undefined> {
-    if (this.diffBase !== "production" || !this.git) return Promise.resolve((this.branch = undefined));
+    if (!this.git) return Promise.resolve((this.branch = undefined));
     return (this.branchLoad ??= this.git.branchPoint().then((bp) => (this.branch = bp)));
   }
 
@@ -566,46 +563,13 @@ export class Session extends EventEmitter {
     return out;
   }
 
-  private async snapshotSession(): Promise<void> {
-    const files = await this.listCss();
-    let bytes = 0;
-    let complete = files.length <= MAX_SNAPSHOT_FILES;
-    for (const f of files.slice(0, MAX_SNAPSHOT_FILES)) {
-      const t = readText(f);
-      if (t === undefined) continue;
-      // Over the cap: skip this file (it's read when first opened, with a note) but keep the smaller ones.
-      if (bytes + t.length > MAX_SNAPSHOT_BYTES) {
-        complete = false;
-        continue;
-      }
-      bytes += t.length;
-      this.sessionStart.set(f, t);
-    }
-    this.sessionSnapshotComplete = complete;
-  }
-
-  /** Closed files that differ from the diff base also count as "my edits". */
+  /** Closed files whose tab version differs from the live site also count as "my edits". */
   private async refreshClosed(): Promise<void> {
+    const all = await this.listCss();
     let changed: string[] = [];
-    switch (this.diffBase) {
-      case "HEAD":
-        changed = this.git ? await this.git.changedCss(this.cssDirs()) : [];
-        break;
-      case "saved":
-        break;
-      case "session": {
-        const now = await this.listCss();
-        const seen = new Set(now);
-        changed = now.filter((f) => this.sessionStart.has(f) ? this.sessionStart.get(f) !== readText(f) : this.sessionSnapshotComplete);
-        for (const f of this.sessionStart.keys()) if (!seen.has(f)) changed.push(f);
-        break;
-      }
-      case "production": {
-        if (!this.index) break;
-        const all = await this.listCss();
-        changed = await this.changedVsLive(await this.branchPoint(), all);
-        break;
-      }
+    if (this.index) {
+      const bp = await this.branchPoint();
+      changed = this.tab === "committed" ? await this.changedInHead(bp) : await this.changedVsLive(bp, all);
     }
     const want = new Set(changed.map((f) => resolve(f)));
     for (const [p, f] of this.files) {
@@ -623,6 +587,7 @@ export class Session extends EventEmitter {
       }
       await this.ensureBase(f);
     }
+    for (const f of this.files.values()) if (f.doc && this.needsBase(f)) await this.ensureBase(f);
   }
 
   /** Closed files (on disk) that differ from the live site. */
@@ -644,6 +609,38 @@ export class Session extends EventEmitter {
     return changed;
   }
 
+  /** Files whose committed version (HEAD) differs from the live site: changedVsLive for commits. */
+  private async changedInHead(point: BranchPoint | undefined): Promise<string[]> {
+    const git = this.git!;
+    const bp = this.mainChanges ? undefined : point;
+    const dirs = this.cssDirs();
+    const [head, ours] = await Promise.all([git.headCss(dirs), bp ? git.changedBetween(bp.mergeBase, "HEAD", dirs) : Promise.resolve([])]);
+    const branchChanged = new Set(ours);
+    const deleted = new Set(ours.filter((f) => !head.has(f)));
+    if ([...deleted].some((f) => !this.headDeleted.has(f)) || [...this.headDeleted].some((f) => !deleted.has(f))) {
+      for (const f of this.files.values()) {
+        f.head = undefined;
+        this.touch(f);
+      }
+    }
+    this.headDeleted = deleted;
+    const changed: string[] = [];
+    for (const f of new Set([...head.keys(), ...ours])) {
+      const hashes = this.sheetHashes(f);
+      if (!hashes.length) continue;
+      const id = head.get(f);
+      if (id === undefined ? !branchChanged.has(f) : hashes.some((h) => this.scanBlobId(h) === id)) continue;
+      if (!bp || branchChanged.has(f) || (await this.scanBehind(bp, f, this.store.getBlob(hashes[0])))) changed.push(f);
+    }
+    return changed;
+  }
+
+  private scanBlobId(hash: string): string {
+    let id = this.scanBlobIds.get(hash);
+    if (!id) this.scanBlobIds.set(hash, (id = blobId(this.store.getBlob(hash))));
+    return id;
+  }
+
   // ------------------------------------------------- live-site highlights
 
   /** `bases`: the live text, branch point or matching may have changed too. */
@@ -652,28 +649,21 @@ export class Session extends EventEmitter {
     this.liveClosed = undefined;
     if (!bases) return;
     this.live.clear();
-    this.liveBranchLoad = undefined;
-  }
-
-  private liveBranchPoint(): Promise<BranchPoint | undefined> {
-    if (this.diffBase === "production") return this.branchPoint();
-    if (!this.git) return Promise.resolve(undefined);
-    return (this.liveBranchLoad ??= this.git.branchPoint());
   }
 
   /** A file compared with the live site: the tab's own state on the All tab, else a copy beside it (undefined: not captured). */
   private async liveState(path: string): Promise<FileState | undefined> {
     const p = resolve(path);
     const tab = this.files.get(p);
-    if (this.diffBase === "production" && tab) return tab.base?.kind === "production" ? tab : undefined;
+    if (this.tab === "all" && tab) return tab.base?.kind === "production" ? tab : undefined;
     let lf = this.live.get(p);
     if (!lf) {
       const gen = this.liveGen;
-      const base = await this.productionBase(p, () => this.liveBranchPoint());
+      const base = await this.productionBase(p);
       if (!base) return undefined;
       lf = gen === this.liveGen ? this.live.get(p) : undefined;
       if (!lf) {
-        lf = { path: p, version: 0, editRevision: this.editRevision, base, baseModel: browserModel(base.text ?? "") };
+        lf = { path: p, version: 0, editRevision: this.editRevision, base, baseModel: browserModel(base.text ?? ""), live: true };
         if (base.live !== undefined) lf.applied = appliedFilter(browserModel(base.live));
         if (gen === this.liveGen) this.live.set(p, lf);
       }
@@ -694,10 +684,10 @@ export class Session extends EventEmitter {
   async liveEdits(): Promise<LiveEditsResult> {
     const files: LiveEditsResult["files"] = [];
     const gen = this.liveGen;
-    const bp = await this.liveBranchPoint();
+    const bp = await this.branchPoint();
     if (this.index) {
       const paths = new Set<string>();
-      if (this.diffBase === "production") for (const p of this.files.keys()) paths.add(p);
+      if (this.tab === "all") for (const p of this.files.keys()) paths.add(p);
       else {
         for (const f of this.files.values()) if (f.doc) paths.add(f.path);
         let closed = gen === this.liveGen ? this.liveClosed : undefined;
@@ -750,16 +740,38 @@ export class Session extends EventEmitter {
   // ------------------------------------------------------------- analysis
 
   private stamp(f: FileState, pendingSensitive: boolean): string {
-    return [f.version, this.index?.revision.id ?? "-", this.diffBase, this.markupChanged ? 1 : 0, this.scopeGen, pendingSensitive ? this.l1gen : 0].join("|");
+    return [f.version, this.index?.revision.id ?? "-", this.tabOf(f), this.markupChanged ? 1 : 0, this.scopeGen, pendingSensitive ? this.l1gen : 0].join("|");
+  }
+
+  private tabOf(f: FileState): Tab {
+    return f.live ? "all" : this.tab;
+  }
+
+  /** The file as the tab counts it: the editor's text, the saved file, or HEAD (undefined: it doesn't exist there). */
+  private tabText(f: FileState): string | undefined {
+    switch (this.tabOf(f)) {
+      case "all":
+        return f.doc ? f.doc.text : f.diskText;
+      case "uncommitted":
+        return f.doc ? f.savedText : f.diskText;
+      case "committed":
+        return f.head && !f.head.asBase ? f.head.text : f.base?.text;
+    }
   }
 
   private current(f: FileState): CurrentModel {
-    if (f.doc) return f.doc.current();
-    const text = f.diskText ?? "";
+    if (f.doc && this.tabOf(f) === "all") return f.doc.current();
+    const text = this.tabText(f) ?? "";
     const m = parseStylesheet(text);
     const notes = m.parseError ? [`parse-error:line ${m.parseError.line ?? "?"}`] : [];
     for (const r of m.rules) if (r.invalid) notes.push(`invalid-on-save:line ${r.line}`);
     return { model: browserModel(text), text, editing: false, notes };
+  }
+
+  /** The file as the editor shows it, whatever the tab: rule counts and lines match the editor. */
+  private editorModel(f: FileState): StylesheetModel {
+    if (f.doc) return f.doc.current().model;
+    return this.tabOf(f) === "all" ? this.current(f).model : browserModel(f.diskText ?? "");
   }
 
   private resultFor(f: FileState, level: 0 | 1 = 0): FileResult {
@@ -779,7 +791,7 @@ export class Session extends EventEmitter {
       indexRevision: this.index?.revision.id ?? null,
       editRevision: f.editRevision,
       file: f.path,
-      diffBase: f.base?.kind ?? this.diffBase,
+      diffBase: f.base?.kind ?? "production",
       editing: cur.editing,
       total: { exact: 0, possible: 0, unknown: 0, complete: false },
       totalReasons: [],
@@ -815,6 +827,8 @@ export class Session extends EventEmitter {
       if (ans.freshness.stale) reasons.add(REASON.stale);
     }
     ans.totalReasons = [...reasons];
+    // Uncommitted/Committed: the counted version isn't what the editor shows, so its lines don't match.
+    if (f.doc && this.tabOf(f) !== "all" && cur.text !== f.doc.text) ans.matchesEditor = false;
     ans.timingMs = Math.round((performance.now() - t0) * 100) / 100;
     const res: FileResult = { stamp: this.stamp(f, (analysis?.pending.size ?? 0) > 0), cur, changes, allChanges, analysis, answer: ans };
     f.result = res;
@@ -846,11 +860,11 @@ export class Session extends EventEmitter {
     if (files.length === 0) reasons.add(REASON.noEffectiveChange);
     if (!this.index) reasons.add(REASON.noIndex);
     const count: Count = this.index ? total.count(pending) : { exact: 0, possible: 0, unknown: 0, complete: false };
-    const bp = this.diffBase === "production" ? this.branch : undefined;
+    const bp = this.branch;
     return {
       editRevision: this.editRevision,
       indexRevision: this.index?.revision.id ?? null,
-      diffBase: this.diffBase,
+      tab: this.tab,
       total: count,
       reasons: [...reasons],
       files,
@@ -869,12 +883,16 @@ export class Session extends EventEmitter {
     const i = r.answer.changes.findIndex((c) => c.id === changeId);
     if (i < 0) throw new RpcError(ERR.superseded, `change ${changeId} no longer exists`, { editRevision: f.editRevision });
     const c = r.changes[i];
-    return { editRevision: f.editRevision, path: f.path, id: changeId, kind: c.kind, ...describeChange(c) };
+    const d: ChangeDetail = { editRevision: f.editRevision, path: f.path, id: changeId, kind: c.kind, ...describeChange(c) };
+    // The tab counted another version (saved, HEAD) than the editor shows, or than a closed file on disk.
+    const shown = f.doc ? f.doc.text : f.diskText;
+    if (shown !== undefined && r.cur.text !== shown && c.after) toEditor(d, c.after, this.editorModel(f));
+    return d;
   }
 
   ruleCounts(path: string): RulesResult {
     const f = this.requireFile(path);
-    const cur = this.current(f);
+    const model = this.editorModel(f);
     const idx = this.index;
     if (!this.engine || !idx) {
       return {
@@ -882,7 +900,7 @@ export class Session extends EventEmitter {
         editRevision: f.editRevision,
         indexRevision: null,
         level: 0,
-        rules: cur.model.rules.map((r) => ({
+        rules: model.rules.map((r) => ({
           line: r.line,
           endLine: r.endLine,
           selector: r.selectorText,
@@ -892,7 +910,7 @@ export class Session extends EventEmitter {
         })),
       };
     }
-    const { rules, pending } = this.engine.ruleCounts(f.path, cur.model);
+    const { rules, pending } = this.engine.ruleCounts(f.path, model);
     const wasPending = this.rulesPending.has(f.path);
     if (pending.size) {
       this.rulesPending.add(f.path);
@@ -908,7 +926,7 @@ export class Session extends EventEmitter {
     const text = readText(resolve(path));
     if (text === undefined) throw new RpcError(ERR.unknownDocument, `unknown document: ${path}`);
     const tmp: FileState = { path: resolve(path), diskText: text, version: 0, editRevision: this.editRevision };
-    tmp.base = { text, kind: this.diffBase };
+    tmp.base = { text, kind: "saved" };
     tmp.baseModel = browserModel(text);
     return tmp;
   }
@@ -1052,7 +1070,7 @@ export class Session extends EventEmitter {
     }
     const f = this.requireFile(p.path);
     if (p.line !== undefined && !p.changeId) {
-      const rp = this.engine!.rulePages(f.path, this.current(f).model, p.line);
+      const rp = this.engine!.rulePages(f.path, this.editorModel(f), p.line);
       if (!rp) throw new RpcError(ERR.superseded, `no rule starts on line ${p.line}`, { editRevision: f.editRevision });
       if (rp.pending.size) this.scheduleL1(rp.pending);
       return { sets: rp.sets, pending: rp.pending.size > 0, editRevision: f.editRevision, f };
@@ -1300,10 +1318,10 @@ export class Session extends EventEmitter {
 
   // ----------------------------------------------------------- drilldown
 
-  private changeRules(r: FileResult, changeId?: string, line?: number): { rules: StyleRule[]; changes: CssChange[] } {
+  private changeRules(r: FileResult, changeId?: string, line?: number, editor?: StylesheetModel): { rules: StyleRule[]; changes: CssChange[] } {
     if (!changeId && line !== undefined) {
-      // A rule, edited or not: its elements; the render shows the whole file's edits.
-      const rule = r.cur.model.rules.find((x) => x.line === line);
+      // A rule, edited or not (its line as the editor shows it): its elements; the render shows the whole file's edits.
+      const rule = (editor ?? r.cur.model).rules.find((x) => x.line === line);
       if (!rule) throw new RpcError(ERR.superseded, `no rule starts on line ${line}`);
       return { rules: [rule], changes: r.changes };
     }
@@ -1424,7 +1442,7 @@ export class Session extends EventEmitter {
     const f = this.requireFile(p.path);
     const snap = this.snapshot(f, p.editRevision);
     const page = this.pageRow(p.url);
-    const { rules, changes } = this.changeRules(snap.r, p.changeId, p.line);
+    const { rules, changes } = this.changeRules(snap.r, p.changeId, p.line, p.line !== undefined && !p.changeId ? this.editorModel(f) : undefined);
     const matches = page.status === "ok" ? await this.matchesOn(page, rules) : [];
     const out: DrilldownResult = {
       editRevision: snap.editRevision,
@@ -1449,7 +1467,7 @@ export class Session extends EventEmitter {
     const f = this.requireFile(p.path);
     const snap = this.snapshot(f, p.editRevision);
     const page = this.pageRow(p.url);
-    const { rules, changes } = this.changeRules(snap.r, p.changeId, p.line);
+    const { rules, changes } = this.changeRules(snap.r, p.changeId, p.line, p.line !== undefined && !p.changeId ? this.editorModel(f) : undefined);
     const matches = page.status === "ok" ? await this.matchesOn(page, rules) : [];
     return {
       editRevision: snap.editRevision,
@@ -1562,7 +1580,7 @@ export class Session extends EventEmitter {
     if (list.length === 0) {
       view.reason = total
         ? "None of your edits are picked. Pick some in the Blast Radius panel in your editor."
-        : NO_CHANGES[this.diffBase] ?? (this.branch && !this.mainChanges ? "Your branch has no CSS changes right now." : "You have no CSS changes compared with the live site right now.");
+        : this.noChangesText();
       return finish();
     }
     if (edits.length === 0) {
@@ -1603,6 +1621,12 @@ export class Session extends EventEmitter {
       view.anchorLeaves = diff.anchorLeaves ?? 0;
     }
     return finish();
+  }
+
+  /** The diff viewer's empty page: per tab, and on a branch only its own changes count. */
+  private noChangesText(): string {
+    const what = this.tab === "committed" ? "committed CSS changes" : this.tab === "uncommitted" ? "saved CSS changes" : "CSS changes";
+    return this.branch && !this.mainChanges ? `Your branch has no ${what} right now.` : `You have no ${what} compared with the live site right now.`;
   }
 
   /**
@@ -1735,11 +1759,10 @@ export class Session extends EventEmitter {
     const onEvent = (path: string) => {
       const p = resolve(path);
       if (gitFiles.includes(p)) {
-        if (this.diffBase === "HEAD") for (const f of this.files.values()) if (f.doc) f.base = undefined;
         this.gitMoved = true;
         this.scheduleRefresh();
       } else if (/\.css$/i.test(p)) {
-        if (this.files.get(p)?.doc) return; // the editor owns open files (§12)
+        // Open files too: the editor owns their text (§12), but Uncommitted counts what's saved.
         this.scheduleRefresh();
       } else if (/\.html?$/i.test(p) && this.index && !this.markupChanged) {
         this.markupChanged = true;
@@ -1757,27 +1780,35 @@ export class Session extends EventEmitter {
     clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(async () => {
       try {
+        // The count before anything below changes it, for the outside-change notice.
+        const before = new Map<string, string | undefined>();
+        for (const [p, f] of this.files) if (!f.doc) before.set(p, f.diskText);
+        const totalBefore = this.sessionTotal().total;
         this.resetLive(this.gitMoved);
         if (this.gitMoved) {
           this.gitMoved = false;
           const old = this.branch?.mergeBase;
           this.branchLoad = undefined;
-          if ((await this.branchPoint())?.mergeBase !== old) {
-            for (const f of this.files.values()) {
-              f.base = undefined;
-              this.touch(f);
-            }
+          const moved = (await this.branchPoint())?.mergeBase !== old;
+          for (const f of this.files.values()) {
+            if (moved) f.base = undefined;
+            // HEAD moved: the Committed tab's versions may have changed.
+            f.head = undefined;
+            this.touch(f);
           }
         }
         for (const f of this.files.values()) {
-          if (f.doc && !f.base) {
+          if (!f.doc) continue;
+          const disk = readText(f.path);
+          if (disk !== f.savedText) {
+            f.savedText = disk;
+            this.touch(f);
+          }
+          if (this.needsBase(f)) {
             this.touch(f);
             await this.ensureBase(f);
           }
         }
-        const before = new Map<string, string | undefined>();
-        for (const [p, f] of this.files) if (!f.doc) before.set(p, f.diskText);
-        const totalBefore = this.sessionTotal().total;
         await this.refreshClosed();
         this.publishOpenDocs();
         // CSS changed on disk outside the editor (pull, branch switch, AI tools, other editors).
@@ -1828,6 +1859,26 @@ function targetsFor(changes: CssChange[]): RenderTarget[] {
     }
   }
   return [...out.values()];
+}
+
+/**
+ * The tab counted another version of an open file (saved, HEAD): its lines
+ * moved to the same rule as the editor shows it (the nearest with that
+ * selector and conditions), so jumping to the edit lands on it.
+ */
+function toEditor(d: ChangeDetail, rule: StyleRule, editor: StylesheetModel): void {
+  let near: StyleRule | undefined;
+  for (const x of editor.rules) {
+    if (x.key !== rule.key) continue;
+    if (!near || Math.abs(x.line - rule.line) < Math.abs(near.line - rule.line)) near = x;
+  }
+  if (!near) return;
+  const delta = near.line - rule.line;
+  d.line += delta;
+  if (!d.rule) return;
+  d.rule.line = near.line;
+  d.rule.endLine = near.endLine;
+  for (const x of d.rule.decls) if (x.line !== undefined) x.line += delta;
 }
 
 function inconclusiveImpact(reason: string): PageImpact {

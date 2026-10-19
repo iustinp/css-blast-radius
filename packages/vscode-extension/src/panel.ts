@@ -5,8 +5,8 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { DIFF_BASE_LABEL, TABS, branchNote, editSides, effectiveBase, formatCount, mainName, scanLine, span } from "./format";
-import { ERR, type AssessProgress, type ChangeDetail, type DiffBaseKind, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName } from "./protocol";
+import { TABS, branchNote, editSides, effectiveTab, formatCount, mainName, scanLine, span } from "./format";
+import { ERR, type AssessProgress, type ChangeDetail, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName, type Tab } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
 import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "./selection";
@@ -21,7 +21,7 @@ type FromWebview =
   | { type: "search"; query: string }
   | { type: "searchMore"; query: string; offset: number }
   | { type: "assess" }
-  | { type: "tab"; base: DiffBaseKind }
+  | { type: "tab"; tab: Tab }
   | { type: "mainChanges"; show: boolean }
   | { type: "rule"; path: string; changeId: string; seq: number }
   | { type: "goto"; path: string; changeId: string }
@@ -210,27 +210,27 @@ export class PagesPanel implements vscode.Disposable {
     }
   }
 
-  private get base(): DiffBaseKind {
-    return this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production";
+  private get tab(): Tab {
+    return this.state.session?.tab ?? this.state.status?.tab ?? "all";
   }
 
-  /** The tab row: the active tab, the tabs this project has, and main's newer commits (All tab). */
+  /** The tab row: the active tab, the tabs this project has, the scan and main's newer commits. */
   private postTabs(): void {
     const git = this.state.status?.git;
     const b = this.state.session?.branch;
     void this.post({
-      type: "tabs", base: this.base,
-      tabs: TABS.filter((t) => effectiveBase(t.base, git) === t.base),
+      type: "tabs", tab: this.tab,
+      tabs: TABS.filter((t) => effectiveTab(t.tab, git) === t.tab),
       main: b && b.behind > 0 && b.mainShown !== undefined ? { name: mainName(b), behind: b.behind, shown: b.mainShown } : undefined,
       scan: scanLine(this.state.watch),
     });
   }
 
   private async load(offset: number, editRevision?: number, refresh = false, union = false): Promise<void> {
-    // Another tab compares with something else: its edits are other edits, so start from all of them.
+    // Another tab counts other edits: start from all of them.
     // (No session yet while reconnecting: the tab isn't known, keep the picks.)
     const s = this.state.session;
-    const tabKey = s && `${s.diffBase}:${s.branch?.mainShown === true}`;
+    const tabKey = s && `${s.tab}:${s.branch?.mainShown === true}`;
     if (tabKey && this.tabKey !== undefined && tabKey !== this.tabKey && offset === 0) {
       this.picked = undefined;
       this.target = { title: "All edits" };
@@ -274,7 +274,6 @@ export class PagesPanel implements vscode.Disposable {
         all: !this.picked, pickedEdits: pickedCount(this.picked, this.files),
         ruleList, sides: !ruleList && one && one.chip.sides.length > 1 ? one.chip.sides : undefined,
         single: !ruleList && one ? one.chip.label : undefined,
-        baseLabel: DIFF_BASE_LABEL[this.state.session?.diffBase ?? this.state.status?.diffBase ?? "production"] ?? "the live site",
         branchNote: branchNote(this.state.session?.branch),
         losses: known.pages,
       });
@@ -482,8 +481,8 @@ export class PagesPanel implements vscode.Disposable {
         return;
       case "tab":
       case "mainChanges":
-        await vscode.commands.executeCommand("cssBlastRadius.setDiffBase",
-          m.type === "tab" ? { base: m.base } : { base: "production", mainChanges: m.show });
+        await vscode.commands.executeCommand("cssBlastRadius.setTab",
+          m.type === "tab" ? { tab: m.tab } : { tab: this.tab, mainChanges: m.show });
         this.postTabs(); // back to the active tab if switching failed
         return;
     }

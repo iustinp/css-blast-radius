@@ -5,7 +5,7 @@
 
 import type { ChangeAnswer, Count, FileAnswer, RuleCount } from "../engine/contract.js";
 import type { PageDiff } from "../l2/render.js";
-import type { DiffBaseKind } from "../daemon/diffBase.js";
+import type { Tab } from "../daemon/diffBase.js";
 import type { TextChange } from "../daemon/documents.js";
 import type { ChangeKind } from "../css/diff.js";
 import type { ChangeDescription } from "../css/describe.js";
@@ -13,7 +13,7 @@ import type { ChangeDescription } from "../css/describe.js";
 export type { ChangeRule, RuleDecl } from "../css/describe.js";
 
 export const PROTOCOL_MAJOR = 1;
-export const PROTOCOL_MINOR = 8;
+export const PROTOCOL_MINOR = 9;
 export const SERVICE_VERSION = "0.3.0";
 export const SCHEMA_VERSION = 2;
 
@@ -64,12 +64,10 @@ export interface InitializeResult {
   schemaVersion: number;
   mode: "local";
   repository: { workspaceRoot: string; siteRoot?: string; baseUrl?: string };
-  capabilities: { levels: number[]; capture: boolean; diffBases: DiffBaseKind[] };
+  capabilities: { levels: number[]; capture: boolean; tabs: Tab[] };
   status: IndexStatus;
   /** Server mode only: the project's session, the server's URL and every page group. */
   sessionId?: string;
-  /** Server mode: "This session" starts now (a new session, or the first window after the last one closed). */
-  sessionStarted?: boolean;
   serverUrl?: string;
   groups?: GroupInfo[];
   /** Server mode: whether the scan follows the site (also sent as scan/watch). */
@@ -115,8 +113,6 @@ export interface GroupInfo {
 
 export interface InitializeParams {
   workspaceRoot: string;
-  /** One per editor window: a new window (or a reload) starts a new "This session". */
-  windowId?: string;
   client?: string;
   /** Group ids the editor linked to this project (kept on the developer's machine, not in the repo). Absent: keep the current link. */
   groups?: string[];
@@ -140,8 +136,8 @@ export interface IndexStatus {
   variants: string[];
   /** Markup in the workspace changed since capture: answers are marked stale. */
   markupChanged: boolean;
-  diffBase: DiffBaseKind;
-  /** The workspace is in a git repository ("Uncommitted" needs one). */
+  tab: Tab;
+  /** The workspace is in a git repository ("Committed" needs one). */
   git: boolean;
   capture?: { running: boolean; done: number; total: number; error?: string };
   /** Server mode: the linked page groups counts are limited to. */
@@ -151,16 +147,16 @@ export interface IndexStatus {
   messages: string[];
 }
 
-/** "Your edits": union over every changed file vs the diff base (§7.2). */
+/** "Your edits": union over every file the tab counts as changed vs the live site (§7.2). */
 export interface SessionTotal {
   editRevision: number;
   indexRevision: number | null;
-  diffBase: DiffBaseKind;
+  tab: Tab;
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
   /**
-   * Live-site base on a git branch: by default only the branch's own changes
+   * On a git branch: by default only the branch's own changes
    * count and the `behind` newer commits of the deployed branch (`mainRef`) are
    * left out; `mainShown`: they count too (a plain comparison with the site).
    */
@@ -176,13 +172,11 @@ export interface OpenParams {
   path: string;
   text: string;
   version: number;
-  /** Open when "This session" started: this text, saved or not, is where the session starts. */
-  atStart?: boolean;
 }
 
-export interface SetDiffBaseParams {
-  base: DiffBaseKind;
-  /** Live-site base on a branch behind the deployed one: also count the deployed branch's newer changes. */
+export interface SetTabParams {
+  tab: Tab;
+  /** On a branch behind the deployed one: also count the deployed branch's newer changes. */
   mainChanges?: boolean;
 }
 export interface ChangeParams {

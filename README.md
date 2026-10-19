@@ -67,12 +67,12 @@ From the same page you can:
 
 #### Keeping the scan up to date
 
-The **All** tab compares your CSS with the pages as last scanned, so the scan should match the live site. While the server runs, **Keep the scan up to date** (on by default, on the setup page) checks the site every minute and rescans only the pages a change reaches, without any CI/CD hook:
+Every tab compares your CSS with the pages as last scanned, so the scan should match the live site. While the server runs, **Keep the scan up to date** (on by default, on the setup page) checks the site every minute and rescans only the pages a change reaches, without any CI/CD hook:
 
 - **Code**: it finds the site's git repository among your VS Code projects (for an Edge Delivery site, the one whose remote is `<owner>/<repo>` from the `ref--repo--owner.aem.page` address; or enter the folder), and asks the remote for the deployed branch's latest commit (the site's branch for Edge Delivery, else the default branch), fetching it when it moved. It compares each file every page loaded with that commit: a changed script or block rescans the pages that loaded it; a changed stylesheet rescans only the pages the blast-radius engine says it reaches, and the other pages just record the new stylesheet. It waits until the site serves the new files (up to 90 s for CDN caches) before acting.
 - **Page edits**: it reads the site's `/query-index.json` and each fragment's date (`/nav.plain.html`, …), and rescans a page edited after its scan, or showing an edited fragment.
 
-The setup page and the panel's **All** tab show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo}`, `POST /api/watch/check`.
+The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo}`, `POST /api/watch/check`.
 
 ### 3. Link your project in VS Code (once per project)
 
@@ -92,18 +92,17 @@ VS Code remembers the choice for this folder on your machine (in its own storage
 
 Your CSS files are matched to the site's stylesheets **by file name**. Hashes, version numbers and `.min` are ignored, so `src/css/main.css` matches `/assets/main.3f9a2c.min.css`. No git or build setup is needed.
 
-Which of your changes count is up to the **tabs** at the top of the Blast Radius panel, broadest first:
+Every tab compares with the live site, as last scanned: the "before" is always the scanned page. The **tabs** at the top of the Blast Radius panel only change which of your changes count, broadest first:
 
-| Tab | Counts | Compared with |
-|---|---|---|
-| **All** | every CSS change the live site doesn't have yet: committed, uncommitted, unsaved, or made by other tools | the live site, as last scanned |
-| **Uncommitted** (the default) | changes since your last commit, saved or not | the last commit |
-| **This session** | changes since this VS Code window opened (a reload starts over; unsaved typing VS Code restores counts as before) | the files when the window opened |
-| **Unsaved** | typing you haven't saved yet | the last save |
+| Tab | Counts |
+|---|---|
+| **All** (the default) | every CSS change the live site doesn't have yet: committed, saved, unsaved, or made by other tools |
+| **Uncommitted** | your commits plus saved changes, as if they were on the live site; unsaved typing doesn't count |
+| **Committed** | only what you've committed, as if it were on the live site |
 
-The tab drives everything: the count at the cursor, the status bar, the page list and the before/after view. A new window opens on the tab set in `cssBlastRadius.diffBase` (Uncommitted unless you change it). Without git there's no Uncommitted tab and windows open on This session.
+The tab drives everything: the count at the cursor, the status bar, the page list and the before/after view. On **Uncommitted** and **Committed**, the count at the cursor and the hover only show while the file in the editor is the version the tab counts (save, or undo your typing). A new window opens on the tab set in `cssBlastRadius.defaultTab` (All unless you change it). Without git there's no Committed tab.
 
-In the **All** tab, in a git repository, only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits, and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again, not even part of a rule: if you added two variables to `:root` and the site already has one of them, only the other counts. When `main` has newer commits you haven't pulled, the panel says so and offers **Show main's N newer commits you haven't pulled**: checked, those count too, as if your branch undid them (a plain comparison of your files with the live site). On `main` itself, or on a branch started after the last scan, every commit made since the scan counts too: the scan is older than where your branch starts, so your files are simply compared with it. Rescan to compare with today's site instead. The before/after view shows the live page, then the live page with your changes merged in.
+In a git repository, only **your branch's changes** count: if `main` has moved on since your branch started, its newer CSS isn't shown as your edits, and changes of yours that already reached the site (say, an earlier squash merge) aren't counted again, not even part of a rule: if you added two variables to `:root` and the site already has one of them, only the other counts. When `main` has newer commits you haven't pulled, the panel says so and offers **Show main's N newer commits you haven't pulled**: checked, those count too, as if your branch undid them (a plain comparison of your files with the live site). On `main` itself, or on a branch started after the last scan, every commit made since the scan counts too: the scan is older than where your branch starts, so your files are simply compared with it. Rescan to compare with today's site instead. The before/after view shows the live page, then the live page with your changes merged in.
 
 ### 4. Edit CSS
 
@@ -137,12 +136,12 @@ Lines and files the live site already has aren't marked, even if your branch cha
 Other commands:
 - **Show All Affected Pages**
 - **Rescan Linked Groups**
-- **Show Which Changes** (the same as the panel's tabs: All, Uncommitted, This session, Unsaved)
+- **Show Which Changes** (the same as the panel's tabs: All, Uncommitted, Committed)
 - **Open Setup Page**
 - **Reconnect to Server**
 - **Compare with Live Site** (also in a CSS file's right-click menu)
 
-Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `diffBase`, `cursorCount`, `warnLostPages`, `codeLens` (off), `liveSite.lineHighlights`, `liveSite.fileBadges`, `liveSite.changeBars`, and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
+Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartServer`, `defaultTab`, `cursorCount`, `warnLostPages`, `codeLens` (off), `liveSite.lineHighlights`, `liveSite.fileBadges`, `liveSite.changeBars`, and `nodePath`. The server needs system Node ≥ 20, because `better-sqlite3` is a native module.
 
 ## Packages
 
@@ -161,7 +160,7 @@ Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartS
 ### Command line without the server
 
 ```bash
-# A 401-page site in a git repo (the diff base is HEAD):
+# A 401-page site in a git repo (compared with the scan; --tab all|uncommitted|committed):
 node fixtures/generate-large-site.mjs /tmp/cbr-ws
 git -C /tmp/cbr-ws init -q && git -C /tmp/cbr-ws add -A && git -C /tmp/cbr-ws commit -qm site
 node packages/backend/dist/cli.js capture --workspace /tmp/cbr-ws --data /tmp/cbr-data
@@ -205,7 +204,6 @@ Known limitations:
 - **Definitions:** uses of a definition (`@keyframes`, `@font-face`, `@property`, …) are counted as exact.
 - **Broken CSS:** a saved file is read the way browsers read it: a statement that doesn't parse, or a rule with an invalid selector, counts as removed (and is flagged in Problems). While typing, the broken part keeps its last valid version, so the rest of the file is still analyzed.
 - **Custom properties at L2:** the render diff compares the properties that consume the variable in the page's stylesheets. If nothing there consumes it (inline styles, scripts), it compares a default property set and reports `inconclusive` rather than `unchanged`.
-- **`session` diff base:** when the site has too much CSS to snapshot at session start, files left out are compared with their content when first opened, and the answer says so.
 - **Server and editor:**
   - No blob garbage collection.
   - Multi-root workspaces use the first folder.

@@ -7,7 +7,7 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { Session, type SessionOptions } from "../daemon/session.js";
-import { DIFF_BASES } from "../daemon/diffBase.js";
+import { TABS } from "../daemon/diffBase.js";
 import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type InitializeResult } from "./protocol.js";
 import { serveRpc, type RpcPeer } from "./connection.js";
 import { SERIAL, SESSION_NOTIFICATIONS, sessionMethod } from "./methods.js";
@@ -63,7 +63,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
           schemaVersion: SCHEMA_VERSION,
           mode: "local",
           repository: { workspaceRoot: session.cfg.workspaceRoot, siteRoot: session.cfg.siteRoot, baseUrl: session.cfg.baseUrl },
-          capabilities: { levels: [0, 1, 2, 3], capture: true, diffBases: DIFF_BASES },
+          capabilities: { levels: [0, 1, 2, 3], capture: true, tabs: TABS },
           status: session.status(),
         };
         return r;

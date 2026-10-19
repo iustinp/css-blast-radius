@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeText, branchNote, configuredBase, editLabel, editsText, losesPages, editSides, effectiveBase, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, scanLine, shortReason, span, tokenText } from "../src/format";
+import { badgeText, branchNote, configuredTab, editLabel, editsText, losesPages, editSides, effectiveTab, externalChangeText, noChangesText, tabName, formatAge, formatChange, formatCount, freshnessText, isZero, reasonText, scanLine, shortReason, span, tokenText } from "../src/format";
 import type { ChangeAnswer, Count, WatchStatus } from "../src/protocol";
 
 const c = (exact: number, possible = 0, unknown = 0, complete = true): Count => ({ exact, possible, unknown, complete });
@@ -95,25 +95,27 @@ describe("branchNote", () => {
 });
 
 describe("tabs", () => {
-  it("starts on Uncommitted unless the setting names another tab", () => {
-    expect(configuredBase("")).toBe("HEAD");
-    expect(configuredBase(undefined)).toBe("HEAD");
-    expect(configuredBase("production")).toBe("production");
-    expect(configuredBase("nonsense")).toBe("HEAD");
-    expect(tabName("production")).toBe("All");
-    expect(tabName("session")).toBe("This session");
+  it("starts on All unless the setting names another tab", () => {
+    expect(configuredTab("")).toBe("all");
+    expect(configuredTab(undefined)).toBe("all");
+    expect(configuredTab("committed")).toBe("committed");
+    expect(configuredTab("HEAD")).toBe("all");
+    expect(tabName("all")).toBe("All");
+    expect(tabName("uncommitted")).toBe("Uncommitted");
+    expect(tabName("committed")).toBe("Committed");
   });
 
-  it("falls back from Uncommitted to This session without git", () => {
-    expect(effectiveBase("HEAD", false)).toBe("session");
-    expect(effectiveBase("HEAD", undefined)).toBe("HEAD"); // older servers don't say
-    expect(effectiveBase("saved", false)).toBe("saved");
+  it("falls back from Committed to Uncommitted without git", () => {
+    expect(effectiveTab("committed", false)).toBe("uncommitted");
+    expect(effectiveTab("committed", undefined)).toBe("committed");
+    expect(effectiveTab("all", false)).toBe("all");
   });
 
   it("says plainly that there's nothing to show, per tab", () => {
-    expect(noChangesText("HEAD", undefined)).toBe("No uncommitted CSS changes.");
-    expect(noChangesText("production", { mainRef: "origin/main", behind: 1, mainShown: false })).toBe("Your branch has no CSS changes.");
-    expect(noChangesText("production", { mainRef: "origin/main", behind: 1, mainShown: true })).toBe("No CSS changes compared with the live site.");
+    expect(noChangesText("uncommitted", undefined)).toBe("No saved CSS changes compared with the live site.");
+    expect(noChangesText("committed", { mainRef: "origin/main", behind: 1, mainShown: false })).toBe("Your branch has no committed CSS changes.");
+    expect(noChangesText("all", { mainRef: "origin/main", behind: 1, mainShown: false })).toBe("Your branch has no CSS changes.");
+    expect(noChangesText("all", { mainRef: "origin/main", behind: 1, mainShown: true })).toBe("No CSS changes compared with the live site.");
   });
 });
 

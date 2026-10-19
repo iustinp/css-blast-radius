@@ -328,7 +328,7 @@ describe("local server", () => {
     expect(note.params.files).toContain(other);
   }, 15_000);
 
-  it('starts "This session" for each new window, not for a reconnect or a second window', async () => {
+  it("keeps a folder's link and tab across windows; a window alone drops files others left open", async () => {
     const proj2 = path.join(tmp, "proj2");
     fs.mkdirSync(path.join(proj2, "styles"), { recursive: true });
     const file = path.join(proj2, "styles/main.css");
@@ -338,49 +338,43 @@ describe("local server", () => {
     // Until the server has seen every window close (not a fixed wait: slow under a full test run).
     const settle = () => until(() => [...srv.app.projects.values()].every((p) => p.root !== proj2 || p.peers.size === 0));
     const session = (c: RpcClient) => c.call("analysis/queryImpacts", { scope: "session" });
+    const files = async (c: RpcClient) => (await session(c)).files.map((f: any) => [f.open, f.changes]);
 
     const a = await RpcClient.connect(port);
     // The editor sends the groups it keeps for this folder.
-    const first = await a.call("initialize", { workspaceRoot: proj2, windowId: "a", groups: [allId, allId] });
-    expect(first.sessionStarted).toBe(true);
+    const first = await a.call("initialize", { workspaceRoot: proj2, groups: [allId, allId] });
+    expect(first.capabilities.tabs).toEqual(["all", "uncommitted", "committed"]);
     expect(first.status.scope).toMatchObject({ linked: true, groups: [{ id: allId }] });
     expect(first.status.git).toBe(false);
-    await a.call("session/setDiffBase", { base: "session" });
+    expect(first.status.tab).toBe("all");
+    // Committed needs git: saved files are the closest.
+    expect((await a.call("session/setTab", { tab: "committed" })).tab).toBe("uncommitted");
     const edited = original.replace("color: blue;", "color: red;");
     fs.writeFileSync(file, edited);
     await until(async () => (await session(a)).total.exact === 2);
+    // Unsaved typing isn't counted on Uncommitted, whose version isn't the editor's then.
+    const typed = edited.replace("font-weight: bold;", "font-weight: 300;");
+    const opened = await a.call("document/open", { path: file, text: typed, version: 1 });
+    expect(opened.answer.changes.map((c: any) => c.selector)).toEqual([".btn"]);
+    expect(opened.answer.matchesEditor).toBe(false);
+    await a.call("session/setTab", { tab: "all" });
+    expect(await files(a)).toEqual([[true, 2]]);
 
+    // A second window shares the open file.
     const b = await RpcClient.connect(port);
-    expect((await b.call("initialize", { workspaceRoot: proj2, windowId: "b" })).sessionStarted).toBe(false);
-    expect((await session(b)).total.exact).toBe(2);
+    await b.call("initialize", { workspaceRoot: proj2 });
+    expect(await files(b)).toEqual([[true, 2]]);
     a.close();
     b.close();
     await settle();
-    // The window that joined reconnects (sleep, server hiccup): still the same session.
-    const b2 = await RpcClient.connect(port);
-    expect((await b2.call("initialize", { workspaceRoot: proj2, windowId: "b" })).sessionStarted).toBe(false);
-    expect((await session(b2)).total.exact).toBe(2);
-    b2.close();
-    await settle();
 
-    // A new window once the others closed (or a reload): the CSS as it is now is the start.
+    // Alone (a reload): it reopens its own files, so the one left open is closed. No groups sent: the link stays.
     const c = await RpcClient.connect(port);
-    // Sending no groups keeps the current link.
-    const third = await c.call("initialize", { workspaceRoot: proj2, windowId: "c" });
-    expect(third.sessionStarted).toBe(true);
+    const third = await c.call("initialize", { workspaceRoot: proj2 });
     expect(third.status.scope).toMatchObject({ linked: true, groups: [{ id: allId }] });
-    expect(third.status.diffBase).toBe("session");
-    expect((await session(c)).total.exact).toBe(0);
-    // A file the window restores with unsaved typing: that typing was before this session.
-    const typed = edited.replace("padding: 8px 16px;", "padding: 0;");
-    const opened = await c.call("document/open", { path: file, text: typed, version: 1, atStart: true });
-    expect(opened.session.total.exact).toBe(0);
+    expect(third.status.tab).toBe("all");
+    expect(await files(c)).toEqual([[false, 1]]);
     c.close();
-    await settle();
-
-    const again = await RpcClient.connect(port);
-    expect((await again.call("initialize", { workspaceRoot: proj2, windowId: "c" })).sessionStarted).toBe(false);
-    again.close();
   }, 20_000);
 
   it("asks for a rescan when the site changes", async () => {

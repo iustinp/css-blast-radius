@@ -440,39 +440,44 @@ How numbers read:
   That is just its selector's bitmap. It doesn't depend on history and is
   useful before editing anything.
 - **Session total** (status bar): *how many pages can my edits reach?* The
-  union over every changed rule, in every file, compared with a **diff
-  base**. The panel shows the bases as tabs, broadest first (All = production,
-  Uncommitted = `HEAD`, This session = session start, Unsaved = last save);
-  one base is active per project session, and it drives the cursor count, the
-  status bar, the list and the visual diff. A window opens on
-  `cssBlastRadius.diffBase` (default `HEAD`; `session` without git) and keeps
-  its tab across reconnects:
-  - production — **the live site as last scanned**: "what would
-    deploying this reach?" Needs no git. In a git repository, only **the
-    branch's own changes** count: each file is diffed against its version
-    where the branch left the deployed branch (`merge-base HEAD origin/main`;
-    `origin/HEAD`'s target when set, else `main`/`master`), and changes the
-    live copy already has (e.g. squash-merged earlier) are dropped. Newer
-    commits of the deployed branch that the branch lacks are therefore not
-    "my edits"; the panel and hover say how many there are
-    ("main has 7 newer commits not in your branch"). The visual diff swaps in
-    the live copy before and the live copy with the branch's changes merged
-    in after (`git merge-file`, as a merge would); if the same lines changed
-    on both sides it compares the branch's own versions and warns. The
-    branch point is re-read on commits, checkouts and fetches.
-    `setDiffBase {mainChanges: true}` (the panel's "Show main's N newer
-    commits" box, offered when `behind > 0`) compares with the live copy
-    as is instead, so the deployed branch's newer changes count as undone;
-    `SessionTotal.branch.mainShown` says which;
-  - `HEAD` — your uncommitted changes (saved or not);
-  - session start — a snapshot of the CSS on disk, taken when the session
-    is created and again when a new editor window (`initialize {windowId}`)
-    is the only one attached: a reload starts over, a second window doesn't,
-    nor does a reconnect of any window attached since the start
-    (`InitializeResult.sessionStarted`). The window then
-    reopens its files with `document/open {atStart: true}`, so unsaved text
-    it restores counts as the start;
-  - last save — unsaved typing only.
+  union over every changed rule, in every file, compared with **the live
+  site as last scanned** ("what would deploying this reach?"; auto-rescan
+  keeps the scan equal to the deployed branch). The panel's **tabs** choose
+  which of the developer's changes count, broadest first; one tab is active
+  per project session, and it drives the cursor count, the status bar, the
+  list and the visual diff, whose "before" is always the scanned page:
+  - **All** — the editor's text, saved or not, and whatever other tools
+    wrote;
+  - **Uncommitted** — the files as saved (the editor's saved text, re-read
+    on save and from the watcher): commits plus saved changes;
+  - **Committed** — the files at `HEAD`; without git it falls back to
+    Uncommitted (`capabilities.tabs`).
+
+  A window opens on `cssBlastRadius.defaultTab` (default `all`) and keeps
+  its tab across reconnects (`session/setTab`). When the tab counts another
+  version of an open file than the editor shows, its answer has
+  `matchesEditor: false`: the editor hides the cursor count, hover and
+  line diagnostics, since their lines belong to that version; rule counts
+  and `analysis/getChange` are mapped onto the editor's text. A file the
+  scan has no stylesheet for is compared with `HEAD`, else with the file on
+  disk (`FileAnswer.diffBase`).
+
+  The comparison needs no git. In a git repository, only **the branch's
+  own changes** count: each file is diffed against its version
+  where the branch left the deployed branch (`merge-base HEAD origin/main`;
+  `origin/HEAD`'s target when set, else `main`/`master`), and changes the
+  live copy already has (e.g. squash-merged earlier) are dropped. Newer
+  commits of the deployed branch that the branch lacks are therefore not
+  "my edits"; the panel and hover say how many there are
+  ("main has 7 newer commits not in your branch"). The visual diff swaps in
+  the live copy before and the live copy with the branch's changes merged
+  in after (`git merge-file`, as a merge would); if the same lines changed
+  on both sides it compares the branch's own versions and warns. The
+  branch point is re-read on commits, checkouts and fetches.
+  `setTab {mainChanges: true}` (the panel's "Show main's N newer
+  commits" box, offered when `behind > 0`) compares with the live copy
+  as is instead, so the deployed branch's newer changes count as undone;
+  `SessionTotal.branch.mainShown` says which, on every tab.
 - **Scope:** counts cover only the pages of the page groups linked to the
   project (§10.5) that are active. Nothing linked means `0` with reason
   `no-linked-groups`, and the status bar asks to link groups.
@@ -773,7 +778,7 @@ migrated or refused, never read silently.
 | `analysis/assess` | 2 | Check every page of a list visually in the background ("Assess impact"); progress via `analysis/assessProgress` |
 | `analysis/getDrilldown` | 1–2 | One page: matching elements (L1); before/after measurements when requested (L2) |
 | `analysis/openLive` | 3 | Live check of a capture state |
-| `session/setDiffBase` | — | Production (the live site as last scanned), `HEAD`, last save or session start; `mainChanges` also counts the deployed branch's newer commits |
+| `session/setTab` | — | Which changes count against the live site as last scanned: `all`, `uncommitted` (saved) or `committed` (`HEAD`); `mainChanges` also counts the deployed branch's newer commits (protocol minor 9) |
 | `session/setSelection` | — | The edits picked in the panel (per file: all, or some change ids; `null`: every edit). Page lists without a path, Assess impact and the diff viewer follow it (§6.6) |
 | `index/capture` | — | Rescan some pages, or the linked active groups |
 | `index/getStatus`, `server/health` | — | Readiness, coverage, freshness |
@@ -800,9 +805,10 @@ never sent from the browser.
 
 Two sources report changes, with clear ownership:
 
-- **Open files:** VS Code document events are authoritative. The daemon marks
-  the path as editor-owned and ignores file-system events for it, unless the
-  content hash differs (an external overwrite).
+- **Open files:** VS Code document events are authoritative for the
+  editor's text (the All tab). File-system events still re-read the saved
+  text, which the Uncommitted tab counts; a window that is the only one
+  attached reopens its files on connect, closing what others left open.
 - **Closed files:** the daemon's file watcher is authoritative (branch
   switches, builds, generated files, synced changes).
 - **On save:** `document/save` carries the content hash and version; the
@@ -937,7 +943,7 @@ adapters and steps 7–8 are not.
    heuristic cascade (`cascade.ts`) stops feeding answers.
    *Gate:* overridden fixture edits report "matches, no change"; real changes
    are detected.
-6. **Diff base, stylesheet mapping, build adapters.** `session/setDiffBase`;
+6. **Diff base, stylesheet mapping, build adapters.** `session/setTab`;
    source-map, manifest, config and hash mapping; asynchronous adapters for
    Sass first, then Tailwind and CSS Modules.
 

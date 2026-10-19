@@ -54,7 +54,10 @@ export interface FileAnswer {
   indexRevision: number | null;
   editRevision: number;
   file: string;
+  /** What the file was compared with: production (the live site), or HEAD/saved when it wasn't captured. */
   diffBase: string;
+  /** false: the tab counts another version of this open file (saved, HEAD), so the changes' lines aren't the editor's. */
+  matchesEditor?: boolean;
   /** The text doesn't parse right now; the answer is for the last valid text. */
   editing: boolean;
   total: Count;

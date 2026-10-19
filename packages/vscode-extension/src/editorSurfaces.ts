@@ -7,7 +7,7 @@ import type { DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
 import { isCssDocument, type DocumentSync } from "./documentSync";
 import {
-  DIFF_BASE_LABEL,
+  BASE_LABEL,
   noChangesText,
   tabName,
   branchNote,
@@ -103,7 +103,8 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
       if (ed.document.uri.fsPath !== path) continue;
       const normal: vscode.DecorationOptions[] = [];
       const attention: vscode.DecorationOptions[] = [];
-      if (a && this.state.status?.scope?.linked && vscode.workspace.getConfiguration("cssBlastRadius", ed.document.uri).get<boolean>("cursorCount") !== false
+      // The tab counted another version of the file (saved, committed): its lines aren't the editor's.
+      if (a && a.matchesEditor !== false && this.state.status?.scope?.linked && vscode.workspace.getConfiguration("cssBlastRadius", ed.document.uri).get<boolean>("cursorCount") !== false
         && vscode.window.activeTextEditor === ed && ed.selections.length) {
         const line = ed.selection.active.line;
         const ch = changeAtCursor(a.changes, this.rulesFor(a), line + 1);
@@ -158,7 +159,9 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     }
     const out: vscode.Diagnostic[] = [];
     const at = (line: number) => new vscode.Range(Math.max(line - 1, 0), 0, Math.max(line - 1, 0), 1000);
-    for (const ch of a.changes) {
+    // Lines of another version of the file (the tab's) would point at the wrong ones here.
+    const lines = a.matchesEditor !== false;
+    for (const ch of lines ? a.changes : []) {
       if (!this.isAttention(ch)) continue;
       const lost = ch.kind === "removed" ? ch.lost ?? ch.pages : ch.lost!;
       const msg =
@@ -169,7 +172,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
       d.source = "CSS Blast Radius";
       out.push(d);
     }
-    for (const r of a.totalReasons) {
+    for (const r of lines ? a.totalReasons : []) {
       const m = /^(?:invalid-on-save|parse-error):line (\d+)/.exec(r);
       if (!m) continue;
       const d = new vscode.Diagnostic(at(Number(m[1])), reasonText(r), vscode.DiagnosticSeverity.Warning);
@@ -226,8 +229,8 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     item.text = `◎ ${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["cssBlastRadius.showAllPages", "cssBlastRadius.linkGroups"] };
-    const base = s?.diffBase ?? st?.diffBase ?? "production";
-    md.appendMarkdown(`**CSS Blast Radius** · ${tabName(base)}: compared with ${DIFF_BASE_LABEL[base] ?? "the live site"}\n\n`);
+    const tab = s?.tab ?? st?.tab ?? "all";
+    md.appendMarkdown(`**CSS Blast Radius** · ${tabName(tab)} tab, compared with the live site\n\n`);
     const note = branchNote(s?.branch);
     if (note) md.appendMarkdown(`${note}\n\n`);
     md.appendMarkdown(`Linked groups: ${st.scope.groups.map((g) => g.name.replace(/[\\`*_~\[\]<>]/g, "\\$&") + (g.active ? "" : " (paused)")).join(", ") || "none"} (${st.scope.pages.toLocaleString("en-US")} active pages)\n\n`);
@@ -237,10 +240,9 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
         md.appendMarkdown(`- \`${vscode.workspace.asRelativePath(f.file)}\`: ${formatCount(f.pages)} (${f.changes} change${f.changes === 1 ? "" : "s"})\n`);
       }
       if (s.files.length > 12) md.appendMarkdown(`- …and ${s.files.length - 12} more files\n`);
-    } else md.appendMarkdown(`${noChangesText(base, s?.branch)}\n`);
+    } else md.appendMarkdown(`${noChangesText(tab, s?.branch)}\n`);
     if (st) {
-      const scanned = st.capturedAt ? formatAge(Math.max(0, Date.now() - Date.parse(st.capturedAt))) : "not yet";
-      md.appendMarkdown(`\n\n${s?.diffBase === "production" || !s ? "Compared with the live site" : "The live site was scanned"} (${s?.diffBase === "production" || !s ? "scanned " : ""}${scanned})`);
+      md.appendMarkdown(`\n\n${st.capturedAt ? `Live site scanned ${formatAge(Math.max(0, Date.now() - Date.parse(st.capturedAt)))}` : "Live site not scanned yet"}`);
       if (st.failedPages) md.appendMarkdown(` · ${st.failedPages} failed`);
       if (st.markupChanged) md.appendMarkdown("\n\n$(warning) Pages changed since the last scan.");
     }
@@ -291,7 +293,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     const path = doc.uri.fsPath;
     const a = this.state.answers.get(path);
     const line = pos.line + 1;
-    const ch = a && changeAtCursor(a.changes, this.rulesFor(a), line);
+    const ch = a && a.matchesEditor !== false && changeAtCursor(a.changes, this.rulesFor(a), line);
     if (!ch || !a) return undefined;
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["cssBlastRadius.showPages", "cssBlastRadius.showAllPages"] };
@@ -325,7 +327,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   }
 
   private footer(a: FileAnswer): string {
-    const parts = [`compared with ${DIFF_BASE_LABEL[a.diffBase] ?? "the live site"}`];
+    const parts = [`compared with ${BASE_LABEL[a.diffBase] ?? "the live site"}`];
     if (a.freshness) parts.push(`scanned ${formatAge(a.freshness.ageMs)}`);
     if (!a.mapping.mapped) parts.push("file not matched to a stylesheet on the live site");
     if (a.editing) parts.push("finish typing to update");

@@ -18,7 +18,7 @@ const rule = (line: number, endLine: number): RuleCount => ({
   line, endLine, selector: ".a", pages: count(362), conditions: [], reasons: [],
 });
 const session = (exact: number, editRevision: number): SessionTotal => ({
-  total: count(exact), editRevision, indexRevision: 1, diffBase: "production", reasons: [], files: [],
+  total: count(exact), editRevision, indexRevision: 1, tab: "all", reasons: [], files: [],
 });
 
 describe("count at the cursor", () => {

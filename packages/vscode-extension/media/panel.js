@@ -300,32 +300,30 @@
 
   let tabsMsg = null;
 
-  // Tabs: what your CSS is compared with. A click shows the tab right away; the list follows.
+  // Tabs: which of your changes count. A click shows the tab right away; the list follows.
   function renderTabs(active) {
     const box = $("tabs");
     box.replaceChildren();
     for (const tab of tabsMsg.tabs) {
-      const node = button(tab.name, tab.base === active, () => {
-        if (tab.base === active) return;
-        renderTabs(tab.base);
-        $("mainBox").hidden = true;
-        $("scanLine").hidden = true;
+      const node = button(tab.name, tab.tab === active, () => {
+        if (tab.tab === active) return;
+        renderTabs(tab.tab);
         $("pages").replaceChildren(el("div", "empty muted", "Finding pages…"));
-        vscode.postMessage({ type: "tab", base: tab.base });
+        vscode.postMessage({ type: "tab", tab: tab.tab });
       });
       node.setAttribute("role", "tab");
-      node.setAttribute("aria-selected", tab.base === active ? "true" : "false");
+      node.setAttribute("aria-selected", tab.tab === active ? "true" : "false");
       node.title = tab.tip;
       box.append(node);
     }
-    const scan = active === "production" && tabsMsg.scan;
+    const scan = tabsMsg.scan;
     $("scanLine").hidden = !scan;
     if (scan) {
       $("scanLine").textContent = scan.text;
       $("scanLine").title = scan.tip;
       $("scanLine").classList.toggle("busy", scan.busy);
     }
-    const main = active === "production" && tabsMsg.main;
+    const main = tabsMsg.main;
     $("mainBox").hidden = !main;
     if (!main) return;
     $("mainChanges").checked = main.shown;
@@ -537,7 +535,7 @@
     }
     if (m.type === "tabs") {
       tabsMsg = m;
-      renderTabs(m.base);
+      renderTabs(m.tab);
       return;
     }
     if (m.type === "error") {
@@ -592,7 +590,7 @@
     const edits = m.chips.reduce((n, c) => n + c.changed, 0);
     const files = `${fmt(m.chips.length)} file${m.chips.length === 1 ? "" : "s"}`;
     $("meta").textContent = `${m.all ? `${plural(edits, "edit", "edits")} in ${files}` : `${fmt(m.pickedEdits)} of ${plural(edits, "edit", "edits")} picked in ${files}`}`
-      + ` · checked in ${fmt(m.ms || 0)} ms · compared with ${m.baseLabel}`;
+      + ` · checked in ${fmt(m.ms || 0)} ms · compared with the live site`;
     $("branch").textContent = m.branchNote ? `ⓘ ${m.branchNote}` : "";
     $("branch").hidden = !m.branchNote;
     $("warning").textContent = m.lostChanges > 1

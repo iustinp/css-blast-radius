@@ -14,7 +14,8 @@ export const ERR = {
   unknownDocument: -32004,
 } as const;
 
-export type DiffBaseKind = "HEAD" | "saved" | "session" | "production";
+/** The panel's tabs: which of your changes count, each compared with the scanned (live) site. */
+export type Tab = "all" | "uncommitted" | "committed";
 export type Health = "READY" | "DEGRADED" | "BLOCKED";
 
 export interface Count {
@@ -100,7 +101,10 @@ export interface FileAnswer {
   indexRevision: number | null;
   editRevision: number;
   file: string;
+  /** What the edits are compared with: production (the live site), HEAD or saved (no captured stylesheet). */
   diffBase: string;
+  /** False when the tab counted another version of this open file (saved, committed) than the editor shows. */
+  matchesEditor?: boolean;
   editing: boolean;
   total: Count;
   totalReasons: string[];
@@ -121,7 +125,7 @@ export interface IndexStatus {
   failedPages: number;
   variants: string[];
   markupChanged: boolean;
-  diffBase: DiffBaseKind;
+  tab: Tab;
   /** In a git repository (servers before protocol 1.3 leave it out). */
   git?: boolean;
   capture?: { running: boolean; done: number; total: number; error?: string };
@@ -173,11 +177,9 @@ export interface InitializeResult {
   schemaVersion: number;
   mode: "local";
   repository: { workspaceRoot: string; siteRoot?: string; baseUrl?: string };
-  capabilities: { levels: number[]; capture: boolean; diffBases: DiffBaseKind[] };
+  capabilities: { levels: number[]; capture: boolean; tabs: Tab[] };
   status: IndexStatus;
   sessionId: string;
-  /** "This session" starts now: open files' current text (saved or not) is its start. */
-  sessionStarted?: boolean;
   serverUrl: string;
   groups: GroupInfo[];
   watch?: WatchStatus;
@@ -186,7 +188,7 @@ export interface InitializeResult {
 export interface SessionTotal {
   editRevision: number;
   indexRevision: number | null;
-  diffBase: DiffBaseKind;
+  tab: Tab;
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;

@@ -58,10 +58,10 @@ export class DocumentSync implements vscode.Disposable {
     );
   }
 
-  /** (Re)open every CSS document: called after each (re)connect. `atStart`: "This session" starts with this text. */
-  async openAll(atStart = false): Promise<void> {
+  /** (Re)open every CSS document: called after each (re)connect. */
+  async openAll(): Promise<void> {
     this.docs.clear();
-    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map((d) => this.open(d, atStart)));
+    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map((d) => this.open(d)));
   }
 
   isTracked(path: string): boolean {
@@ -87,7 +87,7 @@ export class DocumentSync implements vscode.Disposable {
     }
   }
 
-  private open(doc: vscode.TextDocument, atStart = false): Promise<void> {
+  private open(doc: vscode.TextDocument): Promise<void> {
     if (!isCssDocument(doc) || !this.client.connected) return Promise.resolve();
     const path = doc.uri.fsPath;
     const t: Tracked = this.docs.get(path) ?? { doc, version: 0, queue: [], inFlight: 0, idle: [], dirty: doc.isDirty };
@@ -98,7 +98,7 @@ export class DocumentSync implements vscode.Disposable {
     t.queue = [];
     t.version = 1;
     const opening = this.client
-      .call<DocResult>("document/open", { path, text: doc.getText(), version: t.version, ...(atStart ? { atStart } : {}) })
+      .call<DocResult>("document/open", { path, text: doc.getText(), version: t.version })
       .then((r) => this.accept(r))
       .catch((err) => this.log(`document/open ${path}: ${err?.message ?? err}`))
       .finally(() => {

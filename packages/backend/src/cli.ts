@@ -15,7 +15,7 @@ import path from "node:path";
 import { startDaemon } from "./rpc/server.js";
 import { DEFAULT_PORT, startServer } from "./server/http.js";
 import { Session } from "./daemon/session.js";
-import { DIFF_BASES, type DiffBaseKind } from "./daemon/diffBase.js";
+import { TABS, type Tab } from "./daemon/diffBase.js";
 import { loadConfig } from "./config.js";
 import { Store } from "./index/store.js";
 import { Capturer } from "./capture/capture.js";
@@ -25,7 +25,7 @@ const USAGE = `usage:
   css-blast-radius serve   [--port ${DEFAULT_PORT}] [--host 127.0.0.1] [--data <dir>]   (default data: ~/.css-blast-radius)
   css-blast-radius daemon  --workspace <dir> [--socket <path>] [--l1-workers <n>]
   css-blast-radius capture --workspace <dir> [--urls <path,...>] [--concurrency <n>]
-  css-blast-radius impact  --workspace <dir> [--diff-base ${DIFF_BASES.join("|")}] [--pages]
+  css-blast-radius impact  --workspace <dir> [--tab ${TABS.join("|")}] [--pages]
 site options: --site <dir>  --base-url <url>  --data <dir>`;
 
 function parseArgs(argv: string[]): { cmd?: string; flags: Map<string, string> } {
@@ -69,8 +69,8 @@ async function main(): Promise<number> {
     baseUrl: flags.get("base-url"),
     dataDir: flags.get("data"),
   };
-  const diffBase = flags.get("diff-base") as DiffBaseKind | undefined;
-  if (diffBase && !DIFF_BASES.includes(diffBase)) throw new Error(`--diff-base must be one of ${DIFF_BASES.join(", ")}`);
+  const tab = flags.get("tab") as Tab | undefined;
+  if (tab && !TABS.includes(tab)) throw new Error(`--tab must be one of ${TABS.join(", ")}`);
 
   switch (cmd) {
     case "serve": {
@@ -104,7 +104,7 @@ async function main(): Promise<number> {
       const daemon = await startDaemon({
         workspaceRoot,
         ...site,
-        diffBase,
+        tab,
         l1Workers: l1 === undefined ? undefined : Number(l1),
         socketPath,
         log: (m) => process.stderr.write(`[css-blast-radius] ${m}\n`),
@@ -136,7 +136,7 @@ async function main(): Promise<number> {
       return res.failed ? 2 : 0;
     }
     case "impact": {
-      const session = await Session.create({ workspaceRoot, ...site, diffBase, watch: false, l1Workers: 0 });
+      const session = await Session.create({ workspaceRoot, ...site, tab, watch: false, l1Workers: 0 });
       try {
         const st = session.status();
         if (!st.ready) {
@@ -146,11 +146,11 @@ async function main(): Promise<number> {
         await session.l1Idle(30_000);
         const total = session.sessionTotal();
         if (!total.files.length) {
-          console.log(`no CSS changes vs ${total.diffBase}`);
+          console.log(`no CSS changes (${total.tab}) vs the live site`);
           return 0;
         }
         for (const f of total.files) console.log(`${f.file}: ${fmt(f.pages)} (${f.changes} changes)`);
-        console.log(`total: ${fmt(total.total)} of ${st.pages} pages vs ${total.diffBase}${total.reasons.length ? ` — ${total.reasons.join("; ")}` : ""}`);
+        console.log(`total: ${fmt(total.total)} of ${st.pages} pages (${total.tab})${total.reasons.length ? ` — ${total.reasons.join("; ")}` : ""}`);
         if (flags.has("pages")) {
           const pages = await session.getPages({ limit: 100_000 });
           for (const p of pages.pages) console.log(`  ${p.set.padEnd(8)} ${p.url}`);
