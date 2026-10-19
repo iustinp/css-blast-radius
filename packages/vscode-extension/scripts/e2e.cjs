@@ -409,6 +409,16 @@ async function run() {
       assert(data.result.pages.every((x) => x.groups.includes("Home & About")), "page group names missing from rows");
       assert(data.chips.some((chip) => chip.path === file && chip.changes.length), "no file/change chips");
     });
+    await check("another copy of the file closing (git's or the live copy behind change bars) keeps the count at the cursor", async () => {
+      const copy = { ...doc, uri: { ...doc.uri, scheme: "git", toString: () => `git://${file}?ref=HEAD` }, getText: () => original, isDirty: false };
+      events.change.fire({ document: copy, contentChanges: [{ range: new Range(new Position(0, 0), new Position(0, 0)), text: "/* x */" }] });
+      events.close.fire(copy);
+      await new Promise((r) => setTimeout(r, 500));
+      const at = doc.find("outline");
+      editor.select(new Position(at.line, 4));
+      assert(decoration().some((t) => t.includes("2 pages")), `no count at the cursor: ${JSON.stringify(decoration())}`);
+      assert(vscode.hoverProvider.provideHover(doc, editor.selection.active), "no hover");
+    });
     await check("edit card: the whole rule, the typed declaration in green; Go to rule and Copy", async () => {
       const p = pagesPanel();
       const ch = lastPages(p).chips.find((c) => c.path === file).changes[0];

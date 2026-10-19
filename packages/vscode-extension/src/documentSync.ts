@@ -68,6 +68,12 @@ export class DocumentSync implements vscode.Disposable {
     return this.docs.has(path);
   }
 
+  /** The file's own document: git's copy and the live copy behind the change bars share its path, not its URI. */
+  private tracked(doc: vscode.TextDocument): Tracked | undefined {
+    const t = this.docs.get(doc.uri.fsPath);
+    return t && t.doc.uri.toString() === doc.uri.toString() ? t : undefined;
+  }
+
   /** Resolves once every edit made so far has been answered. */
   whenSynced(path: string): Promise<void> {
     const t = this.docs.get(path);
@@ -110,7 +116,7 @@ export class DocumentSync implements vscode.Disposable {
   }
 
   private change(e: vscode.TextDocumentChangeEvent): void {
-    const t = this.docs.get(e.document.uri.fsPath);
+    const t = this.tracked(e.document);
     if (!t || e.contentChanges.length === 0) return;
     // Clean before and after: reloaded from disk. Not an undo back to the saved text (dirty before).
     const wasDirty = t.dirty;
@@ -158,7 +164,7 @@ export class DocumentSync implements vscode.Disposable {
   }
 
   private async save(doc: vscode.TextDocument): Promise<void> {
-    const t = this.docs.get(doc.uri.fsPath);
+    const t = this.tracked(doc);
     if (!t) return;
     t.savedAt = Date.now();
     t.dirty = false;
@@ -180,7 +186,7 @@ export class DocumentSync implements vscode.Disposable {
 
   private close(doc: vscode.TextDocument): void {
     const path = doc.uri.fsPath;
-    const t = this.docs.get(path);
+    const t = this.tracked(doc);
     if (!t) return;
     this.docs.delete(path);
     for (const r of t.idle.splice(0)) r();
