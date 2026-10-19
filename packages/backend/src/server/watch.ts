@@ -3,7 +3,8 @@
 // the site (/query-index.json) which pages authors edited. It then rescans just
 // the pages a change reaches:
 //  - a stylesheet change goes through the blast-radius engine; pages it doesn't
-//    reach only get the new file recorded (no browser);
+//    reach only get the new file recorded (no browser), as do pages outside
+//    the active groups (the editor compares with every scanned stylesheet);
 //  - any other file a page loaded (scripts, blocks, images, head.html) rescans
 //    the pages that loaded it;
 //  - an edited page, or a fragment it loaded (/nav, /footer…), rescans it.
@@ -78,7 +79,10 @@ interface CssGroup {
   /** The page's recorded path (as served, percent-encoded). */
   pathname: string;
   oldHash: string;
+  /** Pages of active groups. */
   pages: PageRow[];
+  /** Pages outside them: not rescanned, but the copy of the stylesheet they hold is the editor's live copy. */
+  others: PageRow[];
   /** Page id → the asset URLs it loaded the file under. */
   urls: Map<number, string[]>;
 }
@@ -437,7 +441,8 @@ export class Watcher {
     if (memo && memo.sha === T && memo.rev === idx.revision.id) return { ...none, sha: T, status: { ...memo.status, ...note } };
 
     const tree = await this.treeOf(repo.top, T);
-    const pages = idx.pages.filter((p) => p.status === "ok" && active.has(p.url));
+    const scanned = idx.pages.filter((p) => p.status === "ok");
+    const pages = scanned.filter((p) => active.has(p.url));
     const css = new Map<string, CssGroup>();
     /** Repo path → pages to rescan when the site changed it, with what each page recorded (when known). */
     const other = new Map<string, Array<{ page: PageRow; was?: string }>>();
@@ -450,7 +455,8 @@ export class Watcher {
     let example: string | undefined;
     const head = tree.get("head.html");
 
-    for (const page of pages) {
+    for (const page of scanned) {
+      const kept = active.has(page.url);
       const cssPaths = new Set<string>();
       const assetPaths = new Set<string>();
       for (const [url, val] of Object.entries(page.assets)) {
@@ -468,14 +474,16 @@ export class Watcher {
         if ((await this.blobHash(repo.top, blob)) === hash) continue;
         const gk = `${sp.path}\n${hash}`;
         let g = css.get(gk);
-        if (!g) css.set(gk, (g = { key: idx.sheetKey(sp.pathname) ?? sp.pathname, path: sp.path, pathname: sp.pathname, oldHash: hash, pages: [], urls: new Map() }));
+        if (!g) css.set(gk, (g = { key: idx.sheetKey(sp.pathname) ?? sp.pathname, path: sp.path, pathname: sp.pathname, oldHash: hash, pages: [], others: [], urls: new Map() }));
         const list = g.urls.get(page.id);
         if (list) list.push(url);
         else {
           g.urls.set(page.id, [url]);
-          g.pages.push(page);
+          (kept ? g.pages : g.others).push(page);
         }
       }
+      // Paused groups and pages no group lists any more aren't kept up to date: only their stylesheets.
+      if (!kept) continue;
       if (page.loaded) {
         for (const [pathname, was] of Object.entries(page.loaded)) {
           const path = decodePath(pathname);
@@ -555,9 +563,9 @@ export class Watcher {
       const newHash = sha256(body);
       if (newHash === g.oldHash) continue; // the site still serves the scanned version
       this.host.store.putBlob(body);
-      const reached = await this.reached(idx, g, body.toString("utf8"));
+      const reached = g.pages.length ? await this.reached(idx, g, body.toString("utf8")) : new Set<string>();
       const loaded = blobId(body);
-      for (const p of g.pages) {
+      for (const p of [...g.pages, ...g.others]) {
         if (rescan.has(p.url)) continue;
         if (reached.has(p.url)) {
           rescan.set(p.url, `/${g.path}`);

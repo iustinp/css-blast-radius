@@ -732,7 +732,10 @@ sitemap (with an optional filter such as `/blog/*`), a CSV file or pasted
 addresses. A group can be:
 
 - **paused**: not counted and not rescanned, to save resources when nobody
-  works on that part of the site; resuming queues its never-scanned pages;
+  works on that part of the site; resuming queues its never-scanned pages.
+  Its pages (and pages no group lists any more) still record the deployed
+  branch's new stylesheets, without a browser: the editor compares files with
+  every scanned stylesheet, so none may stay old;
 - **rescanned**: sitemap groups re-read the sitemap first, so new pages join
   and removed pages leave; excluded pages stay out;
 - **deleted**: soft delete, undoable for 5 minutes.

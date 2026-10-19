@@ -14,6 +14,7 @@ import { startServer, type RunningServer } from "../src/server/http.js";
 import { indexPath } from "../src/server/watch.js";
 
 const PAGES = ["/index.html", "/about.html", "/cards.html"];
+const LIB = "/library.html";
 
 const page = (title: string, body: string, nav: boolean, cards = false) => `<!doctype html>
 <html><head><title>${title}</title>
@@ -28,12 +29,15 @@ const FILES: Record<string, string> = {
   "scripts/scripts.js": `if (document.body && document.body.dataset.nav) fetch("/nav.plain.html").then((r) => r.text()).then((t) => { document.querySelector("header").innerHTML = t; });\n`,
   "blocks/cards/cards.css": `.cards { display: grid; gap: 8px; }\n.card { padding: 4px; }\n`,
   "blocks/cards/cards.js": `document.addEventListener("DOMContentLoaded", () => {});\n`,
+  "tools/library/library.css": `.library { color: gray; }\n`,
 };
 const SITE_ONLY: Record<string, string> = {
   "index.html": page("Home", `<h1 class="hero">Hello</h1><p>Welcome</p>`, true),
   "about.html": page("About", `<h1>About us</h1><p>Text</p>`, false),
   "cards.html": page("Cards", `<div class="cards"><div class="card">A</div><div class="card">B</div></div>`, true, true),
   "nav.plain.html": `<nav><a href="/">Home</a> <a href="/about">About</a></nav>`,
+  // The only page that loads library.css.
+  "library.html": `<!doctype html><html><head><title>Library</title><link rel="stylesheet" href="/tools/library/library.css"></head><body><main><div class="library">Lib</div></main></body></html>`,
 };
 
 describe("watcher: keeps the scan up to date", () => {
@@ -233,6 +237,28 @@ describe("watcher: keeps the scan up to date", () => {
     const again = await check();
     expect(again.rescanned).toEqual([]);
     expect(again.watch.code.state).toBe("up-to-date");
+  }, 60_000);
+
+  it("records the new stylesheet for a paused group's pages without rescanning them", async () => {
+    const g = await api("POST", "/groups", { name: "Library", source: { type: "paste" }, urls: [LIB], scan: true });
+    await srv.app.jobs.idle();
+    await api("PATCH", `/groups/${g.id}`, { active: false });
+    expect((await check()).watch.code.state).toBe("up-to-date");
+    const at = () => srv.app.index()!.pages.find((p) => p.url === LIB)!.capturedAt;
+    const was = at();
+    write("tools/library/library.css", `.library { color: green; }\n`);
+    const sha = push("library color");
+    deploy();
+    const { watch, rescanned } = await check();
+    expect(watch.code.state).toBe("updating");
+    expect(rescanned).toEqual([]);
+    expect(at()).toBe(was);
+    // The editor compares tools/library/library.css with this copy: it matches the deployed branch now.
+    const now = await servedHash("tools/library/library.css");
+    expect(sheetHash(LIB, "/tools/library/library.css")).toBe(now);
+    expect(srv.app.index()!.sheets.get("/tools/library/library.css")?.hash).toBe(now);
+    const again = await check();
+    expect(again.watch.code).toMatchObject({ state: "up-to-date", scanCommit: sha, behind: 0 });
   }, 60_000);
 
   it("can be turned off", async () => {
