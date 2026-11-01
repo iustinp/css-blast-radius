@@ -165,7 +165,11 @@ node fixtures/generate-large-site.mjs /tmp/cbr-ws
 git -C /tmp/cbr-ws init -q && git -C /tmp/cbr-ws add -A && git -C /tmp/cbr-ws commit -qm site
 node packages/backend/dist/cli.js capture --workspace /tmp/cbr-ws --data /tmp/cbr-data
 node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cbr-data --pages
+# The panel's Assess impact: every reached page rendered before/after your edits, on each device:
+node packages/backend/dist/cli.js assess  --workspace /tmp/cbr-ws --data /tmp/cbr-data --pages
 ```
+
+`impact` prints the counts once L1 has checked new selectors on the stored pages (`--wait <s>`, default 60). `assess` then splits the reached pages into those that look different, those with no visual change (the rule applies, but nothing renders differently) and those that couldn't be checked; `--pages` lists each one with its changed and moved elements per device.
 
 **`cbr.config.json`** (optional, in the workspace root; CLI/daemon only):
 - `root`, `baseUrl`, `urls`.
@@ -177,7 +181,7 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 ## Tests
 
 ```bash
-npm test                                         # backend (195) + extension (35) unit tests
+npm test                                         # backend (199) + extension (35) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
 node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (16 checks)

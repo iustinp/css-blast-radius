@@ -1008,6 +1008,32 @@ export class Session extends EventEmitter {
     return true;
   }
 
+  /**
+   * The total once L1 has refined it (bounded). Asking for the total is what queues the L1
+   * work for new selectors, so waiting for L1 before asking returns the L0 answer.
+   */
+  async settledTotal(timeoutMs = 60_000): Promise<SessionTotal> {
+    const deadline = Date.now() + timeoutMs;
+    let total = this.sessionTotal();
+    while (this.l1Running && Date.now() < deadline) {
+      await this.l1Idle(deadline - Date.now());
+      total = this.sessionTotal();
+    }
+    return total;
+  }
+
+  /** Runs an impact assessment of the list to the end (bounded): see assess(). */
+  async assessAll(p: AssessParams, timeoutMs = 30 * 60_000, onProgress?: (done: number, total: number) => void): Promise<AssessmentSummary> {
+    const deadline = Date.now() + timeoutMs;
+    await this.assess(p);
+    for (;;) {
+      const s = this.rankByImpact((await this.listPages(p)).items);
+      onProgress?.(s.done, s.total);
+      if (!s.running || Date.now() >= deadline) return s;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
   // ----------------------------------------------------------- selection
 
   /** Picks the edits that page lists without a path, impact assessment and the diff viewer apply (absent: every edit). */

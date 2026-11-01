@@ -5,6 +5,7 @@
 //   css-blast-radius daemon  --workspace <dir> [--socket <path>] [site options]
 //   css-blast-radius capture --workspace <dir> [--urls /a.html,/b.html] [site options]
 //   css-blast-radius impact  --workspace <dir> [--diff-base HEAD|saved|production] [--pages] [site options]
+//   css-blast-radius assess  --workspace <dir> [--tab …] [--pages] [site options]
 //
 // Site options: --site <dir> (static site root), --base-url <url>, --data <dir>.
 // Without a subcommand, `--root <dir>` starts the daemon (older extensions).
@@ -25,8 +26,11 @@ const USAGE = `usage:
   css-blast-radius serve   [--port ${DEFAULT_PORT}] [--host 127.0.0.1] [--data <dir>]   (default data: ~/.css-blast-radius)
   css-blast-radius daemon  --workspace <dir> [--socket <path>] [--l1-workers <n>]
   css-blast-radius capture --workspace <dir> [--urls <path,...>] [--concurrency <n>]
-  css-blast-radius impact  --workspace <dir> [--tab ${TABS.join("|")}] [--pages]
-site options: --site <dir>  --base-url <url>  --data <dir>`;
+  css-blast-radius impact  --workspace <dir> [--tab ${TABS.join("|")}] [--pages] [--wait <s>]
+  css-blast-radius assess  --workspace <dir> [--tab ${TABS.join("|")}] [--pages] [--wait <s>]
+site options: --site <dir>  --base-url <url>  --data <dir>
+--wait: how long L1 may refine the counts (default 60 s).
+assess: renders every reached page before and after the edits (the panel's Assess impact).`;
 
 function parseArgs(argv: string[]): { cmd?: string; flags: Map<string, string> } {
   const flags = new Map<string, string>();
@@ -71,6 +75,8 @@ async function main(): Promise<number> {
   };
   const tab = flags.get("tab") as Tab | undefined;
   if (tab && !TABS.includes(tab)) throw new Error(`--tab must be one of ${TABS.join(", ")}`);
+  const wait = Number(flags.get("wait") ?? 60);
+  if (!(wait >= 0)) throw new Error("--wait must be a number of seconds");
 
   switch (cmd) {
     case "serve": {
@@ -135,7 +141,8 @@ async function main(): Promise<number> {
       console.log(`revision ${res.revision}: ${res.pages} pages (${res.captured} captured, ${res.failed} failed) in ${(res.durationMs / 1000).toFixed(1)} s → ${cfg.dataDir}`);
       return res.failed ? 2 : 0;
     }
-    case "impact": {
+    case "impact":
+    case "assess": {
       const session = await Session.create({ workspaceRoot, ...site, tab, watch: false, l1Workers: 0 });
       try {
         const st = session.status();
@@ -143,17 +150,40 @@ async function main(): Promise<number> {
           console.error(`no index: run \`css-blast-radius capture --workspace ${workspaceRoot}\` first`);
           return 3;
         }
-        await session.l1Idle(30_000);
-        const total = session.sessionTotal();
+        const total = await session.settledTotal(wait * 1000);
         if (!total.files.length) {
           console.log(`no CSS changes (${total.tab}) vs the live site`);
           return 0;
         }
         for (const f of total.files) console.log(`${f.file}: ${fmt(f.pages)} (${f.changes} changes)`);
         console.log(`total: ${fmt(total.total)} of ${st.pages} pages (${total.tab})${total.reasons.length ? ` — ${total.reasons.join("; ")}` : ""}`);
+        if (cmd === "impact") {
+          if (flags.has("pages")) {
+            const pages = await session.getPages({ limit: 100_000 });
+            for (const p of pages.pages) console.log(`  ${p.set.padEnd(8)} ${p.url}`);
+          }
+          return 0;
+        }
+        const tty = process.stderr.isTTY;
+        const s = await session.assessAll({}, undefined, (done, all) => {
+          if (tty && all) process.stderr.write(`\rassessing ${done}/${all}`);
+        });
+        if (tty) process.stderr.write("\n");
+        const { pages } = await session.getPages({ limit: 100_000 });
+        const by = (status: string) => pages.filter((p) => p.impact?.status === status);
+        const notAssessed = pages.filter((p) => !p.impact).length;
+        console.log(
+          `assessed ${s.assessed} of ${pages.length} pages: ${by("changed").length} look different, ${by("unchanged").length} no visual change, ${by("inconclusive").length} couldn't be checked${notAssessed ? `, ${notAssessed} not assessed` : ""}`,
+        );
         if (flags.has("pages")) {
-          const pages = await session.getPages({ limit: 100_000 });
-          for (const p of pages.pages) console.log(`  ${p.set.padEnd(8)} ${p.url}`);
+          for (const p of pages) {
+            const im = p.impact;
+            if (!im) console.log(`  ${"pending".padEnd(10)} ${p.url}`);
+            else if (im.status === "changed") {
+              const devices = im.devices.map((d) => `${d.name}: ${d.changed} changed, ${d.moved} moved`).join("; ");
+              console.log(`  ${"changed".padEnd(10)} ${p.url} (${devices})`);
+            } else console.log(`  ${im.status.padEnd(10)} ${p.url}${im.reason ? ` — ${im.reason}` : ""}`);
+          }
         }
         return 0;
       } finally {
