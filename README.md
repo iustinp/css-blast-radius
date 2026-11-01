@@ -172,11 +172,12 @@ node packages/backend/dist/cli.js impact  --workspace /tmp/cbr-ws --data /tmp/cb
 - `profiles`, `recipes` (click/hover/fill steps captured as extra states).
 - `stylesheets` (`{ urlPrefix, dir }` mappings).
 - `capture`, `dataDir`.
+  - `capture.block`: requests to abort during the capture, as regular expressions tested case-insensitively against each request URL. Use it for scripts that keep the CPU busy and slow every page down without changing which styles apply, such as a proof-of-work captcha: `"block": ["/altcha/", "/captcha/"]`. The page document itself is never blocked. The server reads the same list from `block` in its `settings.json`, and the setup page keeps it when you save.
 
 ## Tests
 
 ```bash
-npm test                                         # backend (184) + extension (35) unit tests
+npm test                                         # backend (193) + extension (35) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
 node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (16 checks)
