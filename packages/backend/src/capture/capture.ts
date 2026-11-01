@@ -386,7 +386,7 @@ export class Capturer {
         row.lang = c.lang;
       }
 
-      this.crossCheck(url, tree, keys, status, builder);
+      this.crossCheck(id, url, tree, keys, status, builder);
 
       if (sampled(`fid:${url}:${v.id}`, cfg.capture.fidelitySample)) {
         const f = await this.checkFidelity(ctx, full, c, row);
@@ -440,7 +440,7 @@ export class Capturer {
    * must match on the tree; a sample of non-matches must not. Features of a
    * disagreeing selector are marked unsupported for L1.
    */
-  private crossCheck(url: string, tree: CompactTree, keys: string[], status: Map<string, number>, builder: IndexBuilder): void {
+  private crossCheck(id: number, url: string, tree: CompactTree, keys: string[], status: Map<string, number>, builder: IndexBuilder): void {
     const decoded = decodeTree(tree);
     for (const key of keys) {
       const st = status.get(key);
@@ -455,7 +455,7 @@ export class Capturer {
       }
       const agree = hit === (st === 1);
       for (const f of analyzeComplex(key).features.length ? analyzeComplex(key).features : ["simple"]) {
-        builder.addMatcherCheck(f, agree, agree ? undefined : `${key} on ${url}: chromium=${st === 1} l1=${hit}`);
+        builder.addMatcherCheck(id, f, agree, agree ? undefined : `${key} on ${url}: chromium=${st === 1} l1=${hit}`);
       }
     }
   }

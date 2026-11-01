@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS selector_match (
 CREATE TABLE IF NOT EXISTS matcher_check (
   rev INTEGER NOT NULL, feature TEXT NOT NULL, agree INTEGER NOT NULL, disagree INTEGER NOT NULL,
   example TEXT, PRIMARY KEY (rev, feature));
+CREATE TABLE IF NOT EXISTS matcher_check_page (
+  rev INTEGER NOT NULL, page INTEGER NOT NULL, feature TEXT NOT NULL, agree INTEGER NOT NULL,
+  disagree INTEGER NOT NULL, example TEXT, PRIMARY KEY (rev, page, feature));
 `;
 
 /** Reads a blob without a Store (worker threads don't open SQLite). */
@@ -181,7 +184,7 @@ export class Store {
     const ids = [...new Set([cur, ...keep])].filter(Boolean);
     const list = ids.join(",") || "0";
     this.db.transaction(() => {
-      for (const t of ["page", "stylesheet", "token_posting", "usage_posting", "selector_match", "matcher_check"]) {
+      for (const t of ["page", "stylesheet", "token_posting", "usage_posting", "selector_match", "matcher_check", "matcher_check_page"]) {
         this.db.exec(`DELETE FROM ${t} WHERE rev NOT IN (${list})`);
       }
       this.db.exec(`DELETE FROM index_revision WHERE id NOT IN (${list})`);
