@@ -184,7 +184,11 @@ export class IndexBuilder {
   private readonly usage = new Map<string, PageSet>();
   private readonly sheets = new Map<string, { hash?: string; pages: PageSet }>();
   private readonly selectors = new Map<string, { byVariant: PageSet[]; evaluated: PageSet; rejected: PageSet }>();
-  private readonly checks = new Map<string, MatcherCheck>();
+  /**
+   * Matcher checks per page id, so a partial recapture replaces those of the pages it
+   * recaptures. -1 holds the totals of an older scan that didn't record pages.
+   */
+  private readonly checks = new Map<number, Map<string, MatcherCheck>>();
 
   constructor(
     readonly variants: VariantInfo[],
@@ -218,8 +222,16 @@ export class IndexBuilder {
     for (const [k, v] of prev.runtimeTokens) this.runtime.set(k, kept(v));
     for (const [k, v] of prev.usage) this.usage.set(k, kept(v));
     for (const [k, v] of prev.sheets) this.sheets.set(k, { hash: v.hash, pages: kept(v.pages) });
-    for (const c of prev.matcherChecks) this.checks.set(c.feature, { ...c });
-    const rows = prev["store"].db
+    const db = prev["store"].db;
+    const checkRows = db
+      .prepare("SELECT page, feature, agree, disagree, example FROM matcher_check_page WHERE rev = ?")
+      .all(prev.revision.id) as any[];
+    for (const r of checkRows) {
+      if (r.page !== -1 && !keep.has(r.page)) continue;
+      this.pageChecks(r.page).set(r.feature, { feature: r.feature, agree: r.agree, disagree: r.disagree, example: r.example ?? undefined });
+    }
+    if (!checkRows.length) for (const c of prev.matcherChecks) this.pageChecks(-1).set(c.feature, { ...c });
+    const rows = db
       .prepare("SELECT key FROM selector_match WHERE rev = ?")
       .all(prev.revision.id) as Array<{ key: string }>;
     for (const { key } of rows) {
@@ -302,9 +314,16 @@ export class IndexBuilder {
     else if (status === 2) e.rejected.add(id);
   }
 
-  addMatcherCheck(feature: string, agree: boolean, example?: string): void {
-    let c = this.checks.get(feature);
-    if (!c) this.checks.set(feature, (c = { feature, agree: 0, disagree: 0 }));
+  private pageChecks(id: number): Map<string, MatcherCheck> {
+    let m = this.checks.get(id);
+    if (!m) this.checks.set(id, (m = new Map()));
+    return m;
+  }
+
+  addMatcherCheck(id: number, feature: string, agree: boolean, example?: string): void {
+    const checks = this.pageChecks(id);
+    let c = checks.get(feature);
+    if (!c) checks.set(feature, (c = { feature, agree: 0, disagree: 0 }));
     if (agree) c.agree++;
     else {
       c.disagree++;
@@ -348,8 +367,20 @@ export class IndexBuilder {
         if (!nonEmpty(e.evaluated)) continue;
         insSel.run(rev, k, Buffer.concat(e.byVariant.map((s) => s.toBuffer())), e.evaluated.toBuffer(), nonEmpty(e.rejected) ? e.rejected.toBuffer() : null);
       }
+      const insPageCheck = db.prepare("INSERT INTO matcher_check_page (rev, page, feature, agree, disagree, example) VALUES (?, ?, ?, ?, ?, ?)");
+      const totals = new Map<string, MatcherCheck>();
+      for (const [page, checks] of this.checks) {
+        for (const c of checks.values()) {
+          insPageCheck.run(rev, page, c.feature, c.agree, c.disagree, c.example ?? null);
+          let t = totals.get(c.feature);
+          if (!t) totals.set(c.feature, (t = { feature: c.feature, agree: 0, disagree: 0 }));
+          t.agree += c.agree;
+          t.disagree += c.disagree;
+          t.example ??= c.example;
+        }
+      }
       const insCheck = db.prepare("INSERT INTO matcher_check (rev, feature, agree, disagree, example) VALUES (?, ?, ?, ?, ?)");
-      for (const c of this.checks.values()) insCheck.run(rev, c.feature, c.agree, c.disagree, c.example ?? null);
+      for (const c of totals.values()) insCheck.run(rev, c.feature, c.agree, c.disagree, c.example ?? null);
     })();
     store.publishRevision(rev, this.size, notes);
   }

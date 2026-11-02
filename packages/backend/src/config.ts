@@ -57,6 +57,12 @@ export interface CbrConfig {
     fidelitySample: number;
     /** Share of non-matching selectors cross-checked with the L1 matcher. */
     matcherSample: number;
+    /**
+     * Requests to abort before they load: regular expressions tested (case-insensitively)
+     * against each request URL, e.g. a proof-of-work captcha that keeps every CPU core busy
+     * while the page is open. The page document itself is never blocked.
+     */
+    block: string[];
   };
   dataDir: string;
 }
@@ -101,6 +107,7 @@ export function loadConfig(workspaceRoot: string, overrides: Partial<{ siteRoot:
       timeoutMs: raw.capture?.timeoutMs ?? 20_000,
       fidelitySample: raw.capture?.fidelitySample ?? 0.1,
       matcherSample: raw.capture?.matcherSample ?? 0.1,
+      block: raw.capture?.block ?? [],
     },
     dataDir: overrides.dataDir ? abs(overrides.dataDir) : abs(raw.dataDir ?? ".css-blast-radius"),
   };

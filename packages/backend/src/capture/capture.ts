@@ -310,7 +310,7 @@ export class Capturer {
         await runRecipe(page, v.recipeDef);
         await page.evaluate(SETTLE_SCRIPT);
       }
-      const c = (await page.evaluate(COLLECT_SCRIPT)) as Collected;
+      let c = (await page.evaluate(COLLECT_SCRIPT)) as Collected;
 
       // Stylesheets → models → the relaxed selectors this page must evaluate.
       const sheets: SheetInfo[] = [];
@@ -337,7 +337,16 @@ export class Capturer {
       const keySet = new Set<string>();
       for (const s of sheets) for (const k of s.keys) keySet.add(k);
       const keys = [...keySet];
-      const statuses = keys.length ? ((await page.evaluate(evalSelectorsScript(keys))) as string) : "";
+      // The page's scripts keep running while the stylesheets are parsed above (a rotating
+      // carousel, lazy decoration). Take the tree again in the same task as Chromium's matches,
+      // so both describe one DOM: a disagreement between them marks the selector's features
+      // unsupported for L1 on every page. The stylesheets stay the ones read first.
+      let statuses = "";
+      if (keys.length) {
+        const [fresh, result] = (await page.evaluate(`[${COLLECT_SCRIPT}, ${evalSelectorsScript(keys)}]`)) as [Collected, string];
+        c = { ...fresh, links: c.links, inline: c.inline, adopted: c.adopted };
+        statuses = result;
+      }
       const status = new Map<string, number>();
       for (let i = 0; i < keys.length; i++) {
         const st = statuses.charCodeAt(i) - 48;
@@ -377,7 +386,7 @@ export class Capturer {
         row.lang = c.lang;
       }
 
-      this.crossCheck(url, tree, keys, status, builder);
+      this.crossCheck(id, url, tree, keys, status, builder);
 
       if (sampled(`fid:${url}:${v.id}`, cfg.capture.fidelitySample)) {
         const f = await this.checkFidelity(ctx, full, c, row);
@@ -431,7 +440,7 @@ export class Capturer {
    * must match on the tree; a sample of non-matches must not. Features of a
    * disagreeing selector are marked unsupported for L1.
    */
-  private crossCheck(url: string, tree: CompactTree, keys: string[], status: Map<string, number>, builder: IndexBuilder): void {
+  private crossCheck(id: number, url: string, tree: CompactTree, keys: string[], status: Map<string, number>, builder: IndexBuilder): void {
     const decoded = decodeTree(tree);
     for (const key of keys) {
       const st = status.get(key);
@@ -446,7 +455,7 @@ export class Capturer {
       }
       const agree = hit === (st === 1);
       for (const f of analyzeComplex(key).features.length ? analyzeComplex(key).features : ["simple"]) {
-        builder.addMatcherCheck(f, agree, agree ? undefined : `${key} on ${url}: chromium=${st === 1} l1=${hit}`);
+        builder.addMatcherCheck(id, f, agree, agree ? undefined : `${key} on ${url}: chromium=${st === 1} l1=${hit}`);
       }
     }
   }
@@ -491,12 +500,28 @@ export async function newProfileContext(browser: Browser, p: Profile, opts: { in
   return ctx;
 }
 
+/** Whether a request URL matches one of the site's `capture.block` patterns. */
+export function isBlocked(cfg: CbrConfig, url: string): boolean {
+  return (cfg.capture.block ?? []).some((pattern) => {
+    try {
+      return RegExp(pattern, "i").test(url);
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * Answers a request from the site: files under siteRoot in root mode
  * (other origins aborted), the network in live mode. Returns what was served.
+ * Requests matching `capture.block` are aborted, except the page document.
  */
 export async function serveSite(cfg: CbrConfig, route: Route): Promise<{ body: Buffer; ct: string; status: number } | undefined> {
   const url = assetKey(route.request().url());
+  if (route.request().resourceType() !== "document" && isBlocked(cfg, url)) {
+    await route.abort();
+    return undefined;
+  }
   let u: URL;
   try {
     u = new URL(url);

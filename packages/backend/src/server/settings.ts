@@ -20,6 +20,8 @@ export interface SiteSettings {
   /** Absolute path of a folder holding the built site's HTML, or "". */
   siteFolder: string;
   devices: Device[];
+  /** Requests to abort before they load (capture.block in cbr.config.json). */
+  block?: string[];
   /** Keeping the scan up to date with the site (absent: on, every minute). */
   watch?: WatchSettings;
 }
@@ -107,16 +109,33 @@ export function validateSettings(input: any): SiteSettings {
     folder = resolve(siteFolder);
     if (!existsSync(folder) || !statSync(folder).isDirectory()) throw new UserError(`The folder ${folder} doesn't exist.`);
   }
-  return { siteUrl: url, siteFolder: folder, devices };
+  const s: SiteSettings = { siteUrl: url, siteFolder: folder, devices };
+  if (input?.block !== undefined) {
+    if (!Array.isArray(input.block)) throw new UserError("Blocked requests must be a list of patterns.");
+    s.block = (input.block as unknown[]).map((p) => String(p).trim()).filter(Boolean);
+    for (const p of s.block) {
+      try {
+        RegExp(p, "i");
+      } catch {
+        throw new UserError(`“${p}” isn't a valid pattern for blocked requests.`);
+      }
+    }
+  }
+  return s;
 }
 
 export function isConfigured(s: SiteSettings): boolean {
   return !!(s.siteUrl || s.siteFolder);
 }
 
-/** Identifies the site an index was built for: another site means a full rescan. */
+/**
+ * Identifies the site an index was built for: another site, other devices or other
+ * blocked requests (pages load differently) mean a full rescan.
+ */
 export function siteKey(s: SiteSettings): string {
-  return JSON.stringify([s.siteUrl, s.siteFolder, [...s.devices].sort()]);
+  const key: unknown[] = [s.siteUrl, s.siteFolder, [...s.devices].sort()];
+  if (s.block?.length) key.push([...new Set(s.block)].sort());
+  return JSON.stringify(key);
 }
 
 /** The capture/analysis config for the site; workspaceRoot is set per project. */
@@ -130,7 +149,9 @@ export function buildConfig(s: SiteSettings, dataDir: string, urls: string[] = [
     profiles: s.devices.map((d) => DEVICES[d]),
     recipes: [],
     stylesheets: [],
-    capture: { concurrency: 6, timeoutMs: 20_000, fidelitySample: 0.1, matcherSample: 0.1 },
+    capture: {
+      concurrency: 6, timeoutMs: 20_000, fidelitySample: 0.1, matcherSample: 0.1, block: s.block ?? [],
+    },
     dataDir,
   };
 }
