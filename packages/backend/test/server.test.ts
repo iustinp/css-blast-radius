@@ -381,4 +381,15 @@ describe("local server", () => {
     const r = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"] });
     expect(r.json.needsRescan).toBe(true);
   });
+
+  it("asks for a rescan when blocked requests change, and keeps them for the same site only", async () => {
+    const blocked = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"], block: ["/altcha/"] });
+    expect(blocked.json.needsRescan).toBe(true);
+    const same = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"] });
+    expect(same.json.needsRescan).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "settings.json"), "utf8")).block).toEqual(["/altcha/"]);
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "cbr-other-site-"));
+    await api("PUT", "/api/site", { siteFolder: other, devices: ["desktop", "mobile"] });
+    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "settings.json"), "utf8")).block).toBeUndefined();
+  });
 });

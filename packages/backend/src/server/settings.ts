@@ -128,9 +128,14 @@ export function isConfigured(s: SiteSettings): boolean {
   return !!(s.siteUrl || s.siteFolder);
 }
 
-/** Identifies the site an index was built for: another site means a full rescan. */
+/**
+ * Identifies the site an index was built for: another site, other devices or other
+ * blocked requests (pages load differently) mean a full rescan.
+ */
 export function siteKey(s: SiteSettings): string {
-  return JSON.stringify([s.siteUrl, s.siteFolder, [...s.devices].sort()]);
+  const key: unknown[] = [s.siteUrl, s.siteFolder, [...s.devices].sort()];
+  if (s.block?.length) key.push([...new Set(s.block)].sort());
+  return JSON.stringify(key);
 }
 
 /** The capture/analysis config for the site; workspaceRoot is set per project. */

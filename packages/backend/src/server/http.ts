@@ -532,10 +532,10 @@ export class App {
       case "PUT /site": {
         const next = validateSettings(body);
         if (this.settings.watch) next.watch = this.settings.watch;
-        // The setup page has no field for blocked requests: keep the ones set in settings.json.
-        if (next.block === undefined && this.settings.block) next.block = this.settings.block;
-        const moved = siteKey(next) !== siteKey(this.settings);
         const otherSite = next.siteUrl !== this.settings.siteUrl || next.siteFolder !== this.settings.siteFolder;
+        // The setup page has no field for blocked requests: keep the site's ones from settings.json.
+        if (next.block === undefined && !otherSite && this.settings.block) next.block = this.settings.block;
+        const moved = siteKey(next) !== siteKey(this.settings);
         this.reconfigure(next);
         this.watcher.reset(otherSite);
         this.changed();
