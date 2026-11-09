@@ -519,6 +519,10 @@ function watchCard() {
   const content = `<div class="watch-row">
       <span class="k">Page edits</span>${watchPill(ct.state)}
       <div class="v">${esc(ct.message || "")}</div>
+    </div>
+    <div class="watch-row">
+      <span class="k">New pages</span><label class="switch" title="${w.newPages ? "Stop adding new pages" : "Add new pages"}"><input type="checkbox" id="watchNewPages" ${w.newPages ? "checked" : ""}><span></span></label>
+      <div class="v small muted">${w.newPages ? "A page that appears in /query-index.json joins the sitemap group with the most pages in its folder, and is scanned." : "Off: new pages join a sitemap group only when you rescan it."}</div>
     </div>`;
   const checked = w.checkedAt ? `<div class="watch-row"><span class="small muted">Last checked ${timeAgo(w.checkedAt)}. Only runs while this server runs; changes made meanwhile are caught up on the next check.</span></div>` : "";
   return `<div class="card">${head}${code}${content}${checked}</div>`;
@@ -1090,8 +1094,8 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("change", async (e) => {
   const t = e.target;
-  if (t.id === "watchToggle" || t.id === "watchInterval") {
-    const body = t.id === "watchToggle" ? { enabled: t.checked } : { intervalSec: Number(t.value) };
+  if (t.id === "watchToggle" || t.id === "watchInterval" || t.id === "watchNewPages") {
+    const body = t.id === "watchToggle" ? { enabled: t.checked } : t.id === "watchNewPages" ? { newPages: t.checked } : { intervalSec: Number(t.value) };
     try { applyState(await api("/api/watch", { method: "PUT", body: JSON.stringify(body) })); } catch (err) { toast(err.message, null, null, true); }
     return;
   }

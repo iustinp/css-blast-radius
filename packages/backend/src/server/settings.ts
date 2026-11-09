@@ -31,16 +31,18 @@ export interface WatchSettings {
   intervalSec: number;
   /** The site's repository folder, when the editor's projects don't include it. */
   repo?: string;
+  /** Pages new in the site's query index join the nearest sitemap group (absent: on). */
+  newPages?: boolean;
 }
 
 export const DEFAULT_WATCH: WatchSettings = { enabled: true, intervalSec: 60 };
 
 /** The watch settings, with the check interval kept between 15 s and an hour. */
-export function watchSettings(s: SiteSettings): WatchSettings {
+export function watchSettings(s: SiteSettings): WatchSettings & { newPages: boolean } {
   const w = s.watch ?? DEFAULT_WATCH;
   const n = Math.round(Number(w.intervalSec));
   const intervalSec = Number.isFinite(n) ? Math.min(3600, Math.max(15, n)) : DEFAULT_WATCH.intervalSec;
-  return { enabled: w.enabled !== false, intervalSec, ...(typeof w.repo === "string" && w.repo ? { repo: w.repo } : {}) };
+  return { enabled: w.enabled !== false, intervalSec, newPages: w.newPages !== false, ...(typeof w.repo === "string" && w.repo ? { repo: w.repo } : {}) };
 }
 
 /** An error whose message is shown to the user as is. */

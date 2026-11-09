@@ -133,6 +133,11 @@ export class App {
       config: () => this.cfg,
       projectRoots: () => [...this.projects.values()].reverse().map((p) => p.root),
       activeUrls: () => this.groups.activeUrls(),
+      groups: () => this.groups.all(),
+      addPages: (id, urls) => {
+        this.groups.addPages(id, urls);
+        this.groupsChanged();
+      },
       changed: (status) => {
         for (const peer of this.peers) peer.notify("scan/watch", status);
         this.changed();
@@ -544,6 +549,7 @@ export class App {
       case "PUT /watch": {
         const w = watchSettings(this.settings);
         if (body?.enabled !== undefined) w.enabled = body.enabled === true;
+        if (body?.newPages !== undefined) w.newPages = body.newPages === true;
         if (body?.intervalSec !== undefined) {
           const n = Number(body.intervalSec);
           if (!Number.isFinite(n)) throw new UserError("The check interval must be a number of seconds.");

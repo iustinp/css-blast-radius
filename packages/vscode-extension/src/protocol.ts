@@ -145,6 +145,8 @@ export interface GroupInfo {
 export interface WatchStatus {
   enabled: boolean;
   intervalSec: number;
+  /** Pages new in the site's query index join the nearest sitemap group. */
+  newPages: boolean;
   checking: boolean;
   checkedAt?: string;
   code: {

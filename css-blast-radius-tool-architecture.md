@@ -737,7 +737,11 @@ addresses. A group can be:
   branch's new stylesheets, without a browser: the editor compares files with
   every scanned stylesheet, so none may stay old;
 - **rescanned**: sitemap groups re-read the sitemap first, so new pages join
-  and removed pages leave; excluded pages stay out;
+  and removed pages leave; excluded pages stay out. Auto-rescan also adds a
+  page new in the site's query index to the sitemap group with the most pages
+  in its nearest folder (top level: only groups with top-level pages), and
+  scans it; the query index paths seen so far are kept in the store's meta so
+  pages that already existed are never added;
 - **deleted**: soft delete, undoable for 5 minutes.
 
 A page can be in several groups; it is scanned once. Scans run in one serial,

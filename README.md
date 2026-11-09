@@ -71,8 +71,9 @@ Every tab compares your CSS with the pages as last scanned, so the scan should m
 
 - **Code**: it finds the site's git repository among your VS Code projects (for an Edge Delivery site, the one whose remote is `<owner>/<repo>` from the `ref--repo--owner.aem.page` address; or enter the folder), and asks the remote for the deployed branch's latest commit (the site's branch for Edge Delivery, else the default branch), fetching it when it moved. It compares each file every page loaded with that commit: a changed script or block rescans the pages that loaded it; a changed stylesheet rescans only the pages the blast-radius engine says it reaches, and the other pages just record the new stylesheet. Pages of paused groups (and pages no group lists any more) aren't rescanned, but they record the new stylesheet too, so your editor never compares with an old copy. It waits until the site serves the new files (up to 90 s for CDN caches) before acting.
 - **Page edits**: it reads the site's `/query-index.json` and each fragment's date (`/nav.plain.html`, …), and rescans a page edited after its scan, or showing an edited fragment.
+- **New pages**: a page that appears in `/query-index.json` joins a sitemap group and is scanned. The group is picked by the page's address: from the page's own folder up, the first folder where a sitemap group has pages (siblings, the folder's own page, or pages deeper in it), and there the group with the most pages. With no shared folder, only a group with top-level pages (`/`, `/about`) takes it, so a `/blog/*` group doesn't collect `/careers/x`. A group's path filter is respected; hand-picked lists (pasted or CSV) and excluded pages are left alone, as are fragments (`/nav`, `/footer`, …) and hidden paths (`/.da/…`). A page joining a paused group is scanned when the group resumes. Pages already on the site when this started are never added. Turn it off with the **New pages** switch.
 
-The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo}`, `POST /api/watch/check`.
+The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo, newPages}`, `POST /api/watch/check`.
 
 ### 3. Link your project in VS Code (once per project)
 
@@ -202,7 +203,7 @@ Not yet implemented:
 - Source maps and build adapters (Sass, PostCSS, CSS-in-JS).
 
 Known limitations:
-- **Not captured:** Shadow DOM and iframes, and pages added after the last scan (rescan the group).
+- **Not captured:** Shadow DOM and iframes, and new pages missing from `/query-index.json` or not near a sitemap group (rescan the group).
 - **Scans:** a page removed from every group stays in the stored index until **Rescan all**, but it isn't counted.
 - **Linked groups not scanned yet:** counts show 0 with "no linked groups" until the first scan finishes.
 - **Selectors:** `:state()` and `:local-link` are treated as interaction states, so they count as `possible`. A new selector using `:dir()` stays `possible` until L2, because the L1 matcher (css-select) can't evaluate it; captured selectors are exact.

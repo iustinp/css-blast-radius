@@ -8,7 +8,9 @@
 //  - any other file a page loaded (scripts, blocks, images, head.html) rescans
 //    the pages that loaded it;
 //  - an edited page, or a fragment it loaded (/nav, /footer…), rescans it.
-// Code is only rescanned once the site serves the new files.
+// Code is only rescanned once the site serves the new files. A page that shows
+// up in the query index for the first time joins the sitemap group with the
+// most pages in its nearest folder, and is scanned with the rest.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -23,8 +25,10 @@ import type { PageRow, Store } from "../index/store.js";
 import type { L1Pool } from "../l1/pool.js";
 import type { WatchStatus } from "../rpc/protocol.js";
 import { PageSet } from "../util/pageSet.js";
+import type { Group } from "./groups.js";
 import type { Jobs } from "./jobs.js";
 import { watchSettings, type SiteSettings } from "./settings.js";
+import { wildcard } from "./sitemap.js";
 
 const exec = promisify(execFile);
 
@@ -39,6 +43,8 @@ export interface WatchHost {
   projectRoots(): string[];
   /** Pages of active groups (paused groups aren't kept up to date). */
   activeUrls(): Set<string>;
+  groups(): Group[];
+  addPages(groupId: string, urls: string[]): void;
   /** The status changed. */
   changed(status: WatchStatus): void;
   log(msg: string): void;
@@ -70,7 +76,18 @@ interface ContentResult {
   status: ContentStatus;
   /** Page → when the edit that reached it was made (ms). */
   rescan: Map<string, number>;
+  /** New pages by the group they join. */
+  added?: Map<Group, string[]>;
+  /** New pages no sitemap group is near. */
+  unplaced?: string[];
+  /** Every query index path seen so far, when it grew (recorded once the new pages are added). */
+  known?: Set<string>;
 }
+
+/** The store meta key holding the query index paths seen so far. */
+const KNOWN_PAGES = "watch_known_pages";
+/** Fragments (shown inside pages), not pages. */
+const FRAGMENT = /(^|[-/])(nav|header|footer|fragments?)([-/]|$)/i;
 
 /** Pages that load one version of one stylesheet. */
 interface CssGroup {
@@ -109,6 +126,7 @@ const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("he
 const short = (sha: string | undefined) => sha?.slice(0, 7);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const message = (err: unknown) => String((err as Error)?.message ?? err).split("\n")[0];
+const listed = (items: string[], n = 3) => `${items.slice(0, n).join(", ")}${items.length > n ? ` and ${items.length - n} more` : ""}`;
 
 /** EDS preview/live hosts: <branch>--<repo>--<owner>.aem.page */
 const EDS_HOST = /^([a-z0-9-]+)--([a-z0-9-]+)--([a-z0-9-]+)\.(?:aem|hlx)\.(?:page|live)$/i;
@@ -156,6 +174,28 @@ function sitePathUrl(origin: string, path: string): string {
   return `${origin}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/**
+ * The group a new page joins: from the page itself (pages under it) up through
+ * its folders, the first where a group has pages (siblings, the folder's own
+ * page, or pages deeper in it), and there the group with the most. At the top of the site only top-level
+ * pages count, so a /blog group doesn't collect /careers/x.
+ */
+export function nearestGroup<T extends { members: string[] }>(path: string, groups: T[]): T | undefined {
+  const segs = path.split("/").filter(Boolean);
+  for (let d = segs.length; d >= 0; d--) {
+    const folder = `/${segs.slice(0, d).join("/")}`;
+    const near = (m: string) => (d ? m === folder || m.startsWith(`${folder}/`) : m.split("/").filter(Boolean).length <= 1);
+    let best: T | undefined;
+    let most = 0;
+    for (const g of groups) {
+      const n = g.members.filter(near).length;
+      if (n > most) [best, most] = [g, n];
+    }
+    if (best) return best;
+  }
+  return undefined;
+}
+
 async function eachLimited<T>(items: Iterable<T>, n: number, fn: (item: T) => Promise<void>): Promise<void> {
   const list = [...items];
   let i = 0;
@@ -194,7 +234,7 @@ export class Watcher {
 
   constructor(private readonly host: WatchHost) {
     const w = watchSettings(host.settings());
-    this.status = { enabled: w.enabled, intervalSec: w.intervalSec, checking: false, code: { state: "off" }, content: { state: "off" } };
+    this.status = { enabled: w.enabled, intervalSec: w.intervalSec, newPages: w.newPages, checking: false, code: { state: "off" }, content: { state: "off" } };
   }
 
   /** Starts checking on a timer (first check soon after). */
@@ -217,9 +257,9 @@ export class Watcher {
     this.served.clear();
     this.attempted.clear();
     this.handled.clear();
-    if (siteMoved) for (const k of ["watch_sha", "watch_repo"]) this.host.store.setMeta(k, "");
+    if (siteMoved) for (const k of ["watch_sha", "watch_repo", KNOWN_PAGES]) this.host.store.setMeta(k, "");
     const w = watchSettings(this.host.settings());
-    this.status = { ...this.status, enabled: w.enabled, intervalSec: w.intervalSec };
+    this.status = { ...this.status, enabled: w.enabled, intervalSec: w.intervalSec, newPages: w.newPages };
     if (!w.enabled) this.status = { ...this.status, checking: false, code: { state: "off" }, content: { state: "off" } };
     this.emit();
     this.soon(2000);
@@ -266,6 +306,7 @@ export class Watcher {
     const st = this.status;
     st.enabled = w.enabled;
     st.intervalSec = w.intervalSec;
+    st.newPages = w.newPages;
     if (!w.enabled) {
       this.status = { ...st, checking: false, code: { state: "off" }, content: { state: "off" } };
       return this.emit();
@@ -302,6 +343,15 @@ export class Watcher {
     }
 
     const urls = new Set([...content.rescan.keys(), ...code.rescan.keys()]);
+    const fresh: string[] = [];
+    for (const [g, add] of content.added ?? []) {
+      this.host.addPages(g.id, add);
+      if (g.active) fresh.push(...add);
+      this.host.log(`watch: added ${plural(add.length, "new page")} to ${g.name}${g.active ? "" : " (paused: scanned when it resumes)"}: ${listed(add)}`);
+    }
+    if (content.unplaced?.length) this.host.log(`watch: ${plural(content.unplaced.length, "new page")} not added, no sitemap group has pages near: ${listed(content.unplaced)}`);
+    if (content.known) this.host.store.setMeta(KNOWN_PAGES, JSON.stringify([...content.known]));
+    for (const u of fresh) urls.add(u);
     const patches = code.patches.filter((p) => !urls.has(p.url));
     if (urls.size || patches.length) {
       for (const [u, t] of content.rescan) this.handled.set(u, t);
@@ -310,6 +360,7 @@ export class Watcher {
       const why = [
         code.rescan.size ? `${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""} changed on ${code.status.branch}` : "",
         content.rescan.size ? `${plural(content.rescan.size, "page")} edited` : "",
+        fresh.length ? `${plural(fresh.length, "new page")}` : "",
         patches.length ? `${plural(patches.length, "page")} only recorded the new stylesheets` : "",
       ].filter(Boolean);
       this.host.log(`watch: ${why.join("; ")}`);
@@ -334,9 +385,11 @@ export class Watcher {
   // ------------------------------------------------------------- page edits
 
   private async contentCheck(idx: SiteIndex, origin: string, active: Set<string>): Promise<ContentResult> {
-    const entries = await this.queryIndex(origin);
+    const qi = await this.queryIndex(origin);
+    const entries = qi?.edits;
     const scanned = new Set<string>();
     for (const p of idx.pages) scanned.add(indexPath(p.url));
+    const news = qi ? this.newPages(qi.paths, scanned) : {};
 
     // Fragments (/nav.plain.html…): the site's date for the file is fresher than the query index's.
     const heads = new Map<string, Promise<number | undefined>>();
@@ -372,16 +425,61 @@ export class Watcher {
       const t = Math.max(0, ...edits.filter((x): x is number => x !== undefined));
       if (t > at && (this.handled.get(p.url) ?? 0) < t) rescan.set(p.url, t);
     }
-    if (rescan.size) return { status: { state: "updating", pages: rescan.size, message: `Rescanning ${plural(rescan.size, "page")} edited on the site` }, rescan };
+    const added = [...(news.added ?? [])].map(([g, urls]) => `${plural(urls.length, "new page")} to ${g.name}${g.active ? "" : " (paused)"}`);
+    const unplaced = news.unplaced?.length ? `${plural(news.unplaced.length, "new page")} not added, no sitemap group has pages near: ${listed(news.unplaced)}` : "";
+    const notes = [added.length ? `Added ${added.join(", ")}` : "", unplaced].filter(Boolean).join(". ");
+    const fresh = [...(news.added ?? [])].reduce((n, [g, urls]) => n + (g.active ? urls.length : 0), 0);
+    if (rescan.size || fresh) {
+      const what = [rescan.size ? `Rescanning ${plural(rescan.size, "page")} edited on the site` : "", notes].filter(Boolean).join(". ");
+      return { ...news, status: { state: "updating", pages: rescan.size + fresh, message: what }, rescan };
+    }
     if (!entries) {
       return { status: { state: "unavailable", message: "The site has no /query-index.json, so edits to pages aren't followed (fragments are)." }, rescan };
     }
-    return { status: { state: "up-to-date", message: `Following ${plural(entries.size, "page")} in /query-index.json` }, rescan };
+    const following = `Following ${plural(entries.size, "page")} in /query-index.json`;
+    return { ...news, status: { state: "up-to-date", message: notes ? `${following}. ${notes}` : following }, rescan };
   }
 
-  /** The site's query index: page path → last edit (ms); undefined when the site has none. */
-  private async queryIndex(origin: string): Promise<Map<string, number> | undefined> {
+  /**
+   * Pages in the query index for the first time, by the sitemap group they join
+   * (see nearestGroup). The first look only records what is there.
+   */
+  private newPages(paths: Map<string, string>, scanned: Set<string>): Pick<ContentResult, "added" | "unplaced" | "known"> {
+    let prev: Set<string> | undefined;
+    try {
+      const raw = this.host.store.getMeta(KNOWN_PAGES);
+      if (raw) prev = new Set(JSON.parse(raw) as string[]);
+    } catch {
+      prev = undefined;
+    }
+    if (prev && [...paths.keys()].every((k) => prev.has(k))) return {};
+    const known = new Set([...(prev ?? []), ...paths.keys()]);
+    if (!prev || !watchSettings(this.host.settings()).newPages) return { known };
+
+    const groups = this.host.groups();
+    const taken = new Set<string>();
+    for (const g of groups) for (const u of [...g.urls, ...g.excluded]) taken.add(indexPath(u));
+    const sitemaps = groups
+      .filter((g) => g.source.type === "sitemap")
+      .map((g) => ({ g, match: wildcard(g.source.type === "sitemap" ? g.source.filter : undefined), members: g.urls.map(indexPath) }));
+    const added = new Map<Group, string[]>();
+    const unplaced: string[] = [];
+    for (const [key, path] of paths) {
+      if (prev.has(key) || taken.has(key) || scanned.has(key) || FRAGMENT.test(key) || key.split("/").some((s) => s.startsWith("."))) continue;
+      const near = nearestGroup(key, sitemaps.filter((s) => s.match(path)));
+      if (!near) unplaced.push(path);
+      else added.set(near.g, [...(added.get(near.g) ?? []), path]);
+    }
+    return { added, unplaced, known };
+  }
+
+  /**
+   * The site's query index (undefined when the site has none): page path → last
+   * edit (ms), and → the path as listed.
+   */
+  private async queryIndex(origin: string): Promise<{ edits: Map<string, number>; paths: Map<string, string> } | undefined> {
     const out = new Map<string, number>();
+    const paths = new Map<string, string>();
     let offset = 0;
     for (let i = 0; i < 100; i++) {
       const res = await fetch(`${origin}/query-index.json?offset=${offset}&limit=500`, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
@@ -396,18 +494,19 @@ export class Watcher {
       }
       const sheet = Array.isArray(json?.data) ? json : (json?.default ?? json?.[json?.[":names"]?.[0]]);
       const rows: any[] | undefined = Array.isArray(sheet?.data) ? sheet.data : undefined;
-      if (!rows) return i === 0 ? undefined : out;
+      if (!rows) return i === 0 ? undefined : { edits: out, paths };
       for (const r of rows) {
         const ms = toMs(r?.lastModified);
         if (typeof r?.path !== "string" || ms === undefined) continue;
         const key = indexPath(r.path);
         out.set(key, Math.max(out.get(key) ?? 0, ms));
+        if (!paths.has(key)) paths.set(key, r.path.startsWith("/") ? r.path : `/${r.path}`);
       }
       offset += rows.length;
       const total = Number(sheet.total);
       if (!rows.length || !Number.isFinite(total) || offset >= total) break;
     }
-    return out;
+    return { edits: out, paths };
   }
 
   private async lastModified(url: string): Promise<number | undefined> {

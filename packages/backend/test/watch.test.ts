@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { startServer, type RunningServer } from "../src/server/http.js";
-import { indexPath } from "../src/server/watch.js";
+import { indexPath, nearestGroup } from "../src/server/watch.js";
 
 const PAGES = ["/index.html", "/about.html", "/cards.html"];
 const LIB = "/library.html";
@@ -38,6 +38,13 @@ const SITE_ONLY: Record<string, string> = {
   "nav.plain.html": `<nav><a href="/">Home</a> <a href="/about">About</a></nav>`,
   // The only page that loads library.css.
   "library.html": `<!doctype html><html><head><title>Library</title><link rel="stylesheet" href="/tools/library/library.css"></head><body><main><div class="library">Lib</div></main></body></html>`,
+  // Sitemap groups, and the pages authors create later.
+  "sitemap-blog.xml": `<urlset><url><loc>/blog/one</loc></url></urlset>`,
+  "sitemap-main.xml": `<urlset><url><loc>/about</loc></url></urlset>`,
+  "blog/one.html": page("One", `<p>One</p>`, false),
+  "blog/two.html": page("Two", `<p>Two</p>`, false),
+  "blog/three.html": page("Three", `<p>Three</p>`, false),
+  "careers/jobs.html": page("Jobs", `<p>Jobs</p>`, false),
 };
 
 describe("watcher: keeps the scan up to date", () => {
@@ -115,7 +122,10 @@ describe("watcher: keeps the scan up to date", () => {
     git(tmp, "clone", "-q", remote, repo);
 
     fs.mkdirSync(site);
-    for (const [rel, text] of Object.entries(SITE_ONLY)) fs.writeFileSync(path.join(site, rel), text);
+    for (const [rel, text] of Object.entries(SITE_ONLY)) {
+      fs.mkdirSync(path.dirname(path.join(site, rel)), { recursive: true });
+      fs.writeFileSync(path.join(site, rel), text);
+    }
     deploy();
     const old = Math.floor(Date.now() / 1000) - 3600;
     for (const p of ["/", "/about", "/cards", "/nav"]) edits.set(p, old);
@@ -130,7 +140,8 @@ describe("watcher: keeps the scan up to date", () => {
         return;
       }
       const rel = u.pathname === "/" ? "index.html" : decodeURIComponent(u.pathname.slice(1));
-      const file = path.join(site, rel);
+      let file = path.join(site, rel);
+      if (!fs.existsSync(file) && fs.existsSync(`${file}.html`)) file += ".html"; // /blog/one → blog/one.html
       if (!file.startsWith(site + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
         res.writeHead(404).end("not found");
         return;
@@ -259,6 +270,50 @@ describe("watcher: keeps the scan up to date", () => {
     expect(srv.app.index()!.sheets.get("/tools/library/library.css")?.hash).toBe(now);
     const again = await check();
     expect(again.watch.code).toMatchObject({ state: "up-to-date", scanCommit: sha, behind: 0 });
+  }, 60_000);
+
+  it("puts a new page in the sitemap group with the most pages in its nearest folder", () => {
+    const blog = { name: "blog", members: ["/blog/a", "/blog/2024/b"] };
+    const news = { name: "news", members: ["/blog/2025/x", "/news/a"] };
+    const site = { name: "site", members: ["/", "/about", "/blog/c"] };
+    const all = [blog, news, site];
+    expect(nearestGroup("/blog/2025/y", all)?.name).toBe("news"); // a sibling
+    expect(nearestGroup("/blog/2024/z", all)?.name).toBe("blog"); // a sibling
+    expect(nearestGroup("/blog/2026/new", all)?.name).toBe("blog"); // most pages in /blog
+    expect(nearestGroup("/careers/x", all)?.name).toBe("site"); // only "site" has top-level pages
+    expect(nearestGroup("/careers/x", [blog, news])).toBeUndefined();
+    expect(nearestGroup("/news", [blog, news])?.name).toBe("news"); // its folder's pages are its children
+  });
+
+  it("adds pages new in the query index to the nearest sitemap group and scans them", async () => {
+    const blog = await api("POST", "/groups", { name: "Blog", source: { type: "sitemap", url: "/sitemap-blog.xml" }, scan: true });
+    const main = await api("POST", "/groups", { name: "Main", source: { type: "sitemap", url: "/sitemap-main.xml" }, scan: true });
+    await srv.app.jobs.idle();
+    const urls = (id: string) => srv.app.groups.get(id).urls;
+    const status = (u: string) => srv.app.index()!.pages.find((p) => p.url === u)?.status;
+    expect((await check()).watch.content.state).toBe("up-to-date");
+
+    const old = Math.floor(Date.now() / 1000) - 600;
+    for (const p of ["/blog/two", "/careers/jobs", "/footer", "/.hidden/x"]) edits.set(p, old);
+    const { watch } = await check();
+    expect(watch.content).toMatchObject({ state: "updating", pages: 2 });
+    expect(watch.content.message).toMatch(/Added 1 new page to Blog, 1 new page to Main/);
+    expect(urls(blog.id)).toEqual(["/blog/one", "/blog/two"]);
+    expect(urls(main.id)).toEqual(["/about", "/careers/jobs"]); // no shared folder: the group with top-level pages
+    expect(status("/blog/two")).toBe("ok");
+    expect(status("/careers/jobs")).toBe("ok");
+    // Fragments, hidden paths and hand-picked lists are left alone.
+    expect(srv.app.groups.all().some((g) => g.urls.some((u) => u === "/footer" || u.startsWith("/.hidden")))).toBe(false);
+    expect((await check()).watch.content.state).toBe("up-to-date");
+
+    // Off: a page created meanwhile isn't added, not even once it's back on.
+    await api("PUT", "/watch", { newPages: false });
+    edits.set("/blog/three", old);
+    expect((await check()).watch.newPages).toBe(false);
+    expect(urls(blog.id)).toEqual(["/blog/one", "/blog/two"]);
+    await api("PUT", "/watch", { newPages: true });
+    await check();
+    expect(urls(blog.id)).toEqual(["/blog/one", "/blog/two"]);
   }, 60_000);
 
   it("can be turned off", async () => {
