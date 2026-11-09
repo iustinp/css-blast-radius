@@ -1,29 +1,25 @@
-// The local server: one per site. Serves the setup page, the diff viewer, a
-// REST API with live updates (Server-Sent Events) and the editor connection
-// (JSON-RPC over an upgraded HTTP request) on one port.
+// The local server: several sites, each scanned on its own. Serves the setup
+// page, the diff viewer, a REST API with live updates (Server-Sent Events) and
+// the editor connection (JSON-RPC over an upgraded HTTP request) on one port.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
-import type { CaptureResult } from "../capture/capture.js";
-import type { CbrConfig } from "../config.js";
 import { TABS } from "../daemon/diffBase.js";
-import { Session, type ScopeGroup, type SharedResources } from "../daemon/session.js";
-import { SiteIndex } from "../index/siteIndex.js";
-import { Store, type PageRow } from "../index/store.js";
+import type { SharedResources } from "../daemon/session.js";
+import { Store } from "../index/store.js";
 import { L1Pool } from "../l1/pool.js";
 import { Renderer } from "../l2/render.js";
 import { serveRpc, type RpcPeer } from "../rpc/connection.js";
 import { EDITS, need, SERIAL, SESSION_NOTIFICATIONS, sessionMethod } from "../rpc/methods.js";
-import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type GroupInfo, type InitializeResult } from "../rpc/protocol.js";
-import { Groups, type Group } from "./groups.js";
-import { friendlyError, Jobs } from "./jobs.js";
-import { buildConfig, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, watchSettings, type SiteSettings } from "./settings.js";
-import { readSitemap } from "./sitemap.js";
-import { Watcher } from "./watch.js";
+import { ERR, PROTOCOL_MAJOR, PROTOCOL_MINOR, RpcError, SCHEMA_VERSION, SERVICE_VERSION, type GroupInfo, type InitializeResult, type WatchStatus } from "../rpc/protocol.js";
+import { friendlyError } from "./jobs.js";
+import { Project } from "./project.js";
+import { buildConfig, DEFAULT_SETTINGS, UserError, validateSettings } from "./settings.js";
+import { folderBytes, newSiteId, Site, storedSites, type SiteProject } from "./site.js";
 
 export const DEFAULT_PORT = 4317;
 
@@ -34,26 +30,10 @@ export interface ServeOptions {
   l1Workers?: number;
   /** How long a project's session lives after its last editor disconnects. */
   idleMs?: number;
-  /** Check the site for changes on a timer (default true; false: only when asked). */
+  /** Check the sites for changes on a timer (default true; false: only when asked). */
   watch?: boolean;
   log?: (msg: string) => void;
 }
-
-interface Project {
-  id: string;
-  root: string;
-  name: string;
-  session: Session;
-  peers: Set<RpcPeer>;
-  /** Linked group ids: each editor keeps its own choice and sends it on initialize. */
-  linked: string[];
-  serial: Promise<unknown>;
-  /** editRevision:selectionRevision last announced to diff viewers. */
-  sentEdit: string;
-  idle?: NodeJS.Timeout;
-}
-
-type PageStatus = "ok" | "failed" | "new" | "capturing" | "excluded";
 
 const UI_DIR = fileURLToPath(new URL("../../ui/", import.meta.url));
 const MIME: Record<string, string> = {
@@ -74,242 +54,151 @@ export function projectId(root: string): string {
 class HttpError extends UserError {}
 
 export class App {
-  settings: SiteSettings;
-  readonly groups: Groups;
-  readonly store: Store;
+  /** Sites in the order they were added. */
+  readonly sites = new Map<string, Site>();
   readonly pool: L1Pool;
-  readonly jobs: Jobs;
-  readonly watcher: Watcher;
-  readonly shared: SharedResources;
   readonly projects = new Map<string, Project>();
   url = "";
-  private cfg: CbrConfig;
-  private renderer?: Renderer;
-  private loaded?: { rev: number; index?: SiteIndex };
+  private readonly sitesDir: string;
+  private readonly blobDir: string;
+  private blankRes?: SharedResources;
   private readonly creating = new Map<string, Promise<Project>>();
   private readonly sse = new Set<ServerResponse>();
   private readonly peers = new Set<RpcPeer>();
+  /** The project each editor connection is attached to. */
+  private readonly peerProject = new Map<RpcPeer, Project>();
   private version = 0;
   private stateTimer?: NodeJS.Timeout;
   private progressAt = 0;
   private disk = { at: 0, bytes: 0 };
-  private readonly timers: NodeJS.Timeout[] = [];
   private readonly started = Date.now();
   private readonly log: (msg: string) => void;
 
   constructor(readonly opts: ServeOptions) {
     this.log = opts.log ?? (() => {});
     mkdirSync(opts.dataDir, { recursive: true });
-    this.settings = loadSettings(opts.dataDir);
-    this.groups = new Groups(opts.dataDir);
-    this.store = new Store(opts.dataDir);
-    this.pool = new L1Pool({ blobDir: this.store.blobDir, workers: opts.l1Workers });
-    this.cfg = buildConfig(this.settings, opts.dataDir);
-    this.shared = {
-      cfg: this.cfg,
-      store: this.store,
-      pool: this.pool,
-      renderer: () => (this.renderer ??= new Renderer(this.cfg, this.store)),
-      index: () => this.index(),
-    };
-    this.jobs = new Jobs({
-      dataDir: opts.dataDir,
-      store: this.store,
-      groups: this.groups,
-      settings: () => this.settings,
-      keepRevisions: () => [...this.projects.values()].map((p) => p.session.index?.revision.id).filter((r): r is number => r !== undefined),
-      published: (res) => this.published(res),
-      groupsChanged: () => this.groupsChanged(),
-      progress: (p) => this.progress(p),
-      changed: () => this.changed(),
-      log: this.log,
-    });
-    this.watcher = new Watcher({
-      store: this.store,
-      pool: this.pool,
-      jobs: this.jobs,
-      index: () => this.index(),
-      settings: () => this.settings,
-      config: () => this.cfg,
-      projectRoots: () => [...this.projects.values()].reverse().map((p) => p.root),
-      activeUrls: () => this.groups.activeUrls(),
-      groups: () => this.groups.all(),
-      addPages: (id, urls) => {
-        this.groups.addPages(id, urls);
-        this.groupsChanged();
-      },
-      changed: (status) => {
-        for (const peer of this.peers) peer.notify("scan/watch", status);
-        this.changed();
-      },
-      log: this.log,
-    });
-    if (opts.watch !== false) this.watcher.start();
-    const purge = setInterval(() => {
-      if (this.groups.purge()) this.changed();
-    }, 30_000);
-    purge.unref();
-    this.timers.push(purge);
+    this.sitesDir = join(opts.dataDir, "sites");
+    this.blobDir = join(opts.dataDir, "blobs");
+    mkdirSync(this.blobDir, { recursive: true });
+    this.pool = new L1Pool({ blobDir: this.blobDir, workers: opts.l1Workers });
+    this.siteHost.pool = this.pool;
+    this.siteHost.blobDir = this.blobDir;
+    for (const id of storedSites(this.sitesDir)) this.openSite(id);
   }
 
-  // ---------------------------------------------------------------- index
+  // ---------------------------------------------------------------- sites
 
-  /** The current index, loaded once and shared by every project. */
-  index(): SiteIndex | undefined {
-    const rev = this.store.currentRevision();
-    if (!rev) return undefined;
-    if (this.loaded?.rev !== rev.id) this.loaded = { rev: rev.id, index: SiteIndex.load(this.store, rev.id) };
-    return this.loaded.index;
+  private openSite(id: string, settings?: Site["settings"]): Site {
+    const site = new Site(id, join(this.sitesDir, id), this.siteHost, { watch: this.opts.watch, settings });
+    this.sites.set(id, site);
+    return site;
   }
 
-  private pageRow(url: string): PageRow | undefined {
-    const idx = this.index();
-    const id = idx?.byUrl.get(url);
-    return id === undefined ? undefined : idx!.pages[id];
+  private readonly siteHost = {
+    pool: undefined as unknown as L1Pool,
+    blobDir: "",
+    projects: (site: Site): SiteProject[] =>
+      [...this.projects.values()].flatMap((p) => {
+        const session = p.sessionOn(site.id);
+        return session ? [{ name: p.name, root: p.root, linked: p.linked, session }] : [];
+      }),
+    projectRoots: () => [...this.projects.values()].reverse().map((p) => p.root),
+    groupsChanged: () => this.groupsChanged(),
+    progress: (site: Site, p: { done: number; total: number; url: string; ok: boolean }) => this.progress(site, p),
+    watchChanged: (site: Site, status: WatchStatus) => {
+      for (const peer of this.peers) {
+        const pr = this.peerProject.get(peer);
+        if (pr && this.watchSite(pr) === site) peer.notify("scan/watch", status);
+      }
+    },
+    changed: () => this.changed(),
+    log: (m: string) => this.log(m),
+    state: () => this.state(),
+  };
+
+  site(id: string): Site {
+    const s = this.sites.get(id);
+    if (!s) throw new UserError("That site doesn't exist any more.", 404);
+    return s;
   }
 
-  private pageStatus(url: string): { status: PageStatus; row?: PageRow } {
-    if (this.jobs.isCapturing(url)) return { status: "capturing", row: this.pageRow(url) };
-    const row = this.pageRow(url);
-    if (!row || row.status === "removed") return { status: "new" };
-    return { status: row.status, row };
+  /** The site a group id belongs to. */
+  private groupSite(id: string): Site | undefined {
+    for (const s of this.sites.values()) if (s.groups.find(id)) return s;
+    return undefined;
   }
 
-  private async published(res: CaptureResult): Promise<void> {
-    this.index();
-    for (const p of this.projects.values()) {
-      p.session.setScope(this.scopeFor(p.linked));
-      await p.session.indexChanged(res);
-    }
+  private blank(): SharedResources {
+    if (this.blankRes) return this.blankRes;
+    const dir = join(this.opts.dataDir, "blank");
+    const cfg = buildConfig(DEFAULT_SETTINGS, dir);
+    const store = new Store(dir, this.blobDir);
+    let renderer: Renderer | undefined;
+    return (this.blankRes = { cfg, store, pool: this.pool, renderer: () => (renderer ??= new Renderer(cfg, store)), index: () => undefined });
+  }
+
+  private readonly projectHost = {
+    sitesFor: (linked: string[]) => [...this.sites.values()].filter((s) => linked.some((id) => s.groups.find(id))),
+    fallback: () => this.sites.values().next().value as Site | undefined,
+    blank: () => this.blank(),
+  };
+
+  /** The site whose auto-rescan the editor shows: the project's first linked site. */
+  private watchSite(p: Project): Site | undefined {
+    return this.projectHost.sitesFor(p.linked)[0] ?? this.projectHost.fallback();
+  }
+
+  private async addSite(body: any): Promise<{ id: string; state: unknown }> {
+    const settings = validateSettings(body);
+    const id = newSiteId();
+    this.openSite(id, settings);
+    await this.relinkAll();
     this.changed();
+    return { id, state: this.state() };
   }
 
-  // --------------------------------------------------------------- groups
+  private async removeSite(id: string): Promise<void> {
+    const site = this.site(id);
+    this.sites.delete(id);
+    const gone = new Set(site.groups.all().map((g) => g.id));
+    for (const p of this.projects.values()) p.linked = p.linked.filter((g) => !gone.has(g));
+    await this.relinkAll();
+    await site.close(true);
+    this.groupsChanged();
+  }
 
-  private scopeFor(linked: string[]): ScopeGroup[] {
-    return linked.map((id) => this.groups.find(id)).filter((g): g is Group => !!g).map((g) => ({ id: g.id, name: g.name, active: g.active, urls: g.urls }));
+  /** Sites came or went: every project's sessions follow (in its document order). */
+  private async relinkAll(): Promise<void> {
+    await Promise.all(
+      [...this.projects.values()].map((p) => {
+        const run = () => p.relink(p.linked);
+        return (p.serial = p.serial.then(run, run));
+      }),
+    );
   }
 
   groupInfos(): GroupInfo[] {
-    return this.groups.all().map((g) => ({ id: g.id, name: g.name, active: g.active, pages: g.urls.length }));
+    return [...this.sites.values()].flatMap((s) => s.groupInfos());
   }
 
-  /** Group membership or names changed: update every project's counts. */
+  /** Group membership or names changed (the sites updated their sessions' counts). */
   private groupsChanged(): void {
-    for (const p of this.projects.values()) p.session.setScope(this.scopeFor(p.linked));
     const groups = this.groupInfos();
     for (const peer of this.peers) peer.notify("groups/changed", { groups });
     this.changed();
   }
 
-  private summary(g: Group, members?: Map<string, string[]>) {
-    let ok = 0;
-    let failed = 0;
-    let fresh = 0;
-    let capturing = 0;
-    let shared = 0;
-    for (const u of g.urls) {
-      const s = this.pageStatus(u).status;
-      if (s === "ok") ok++;
-      else if (s === "failed") failed++;
-      else if (s === "capturing") capturing++;
-      else fresh++;
-      if ((members?.get(u)?.length ?? 1) > 1) shared++;
-    }
-    return {
-      id: g.id,
-      name: g.name,
-      active: g.active,
-      source: g.source,
-      pages: g.urls.length,
-      sharedPages: shared,
-      ok,
-      failed,
-      fresh,
-      capturing,
-      excluded: g.excluded.length,
-      scannedAt: g.scannedAt,
-      job: this.jobs.groupJob(g.id),
-    };
-  }
-
-  private membership(): Map<string, string[]> {
-    const m = new Map<string, string[]>();
-    for (const g of this.groups.all()) {
-      for (const u of g.urls) {
-        const list = m.get(u);
-        if (list) list.push(g.name);
-        else m.set(u, [g.name]);
-      }
-    }
-    return m;
-  }
-
   private diskBytes(): number {
     if (Date.now() - this.disk.at < 30_000) return this.disk.bytes;
-    let bytes = 0;
-    const walk = (dir: string) => {
-      let entries;
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const e of entries) {
-        const p = join(dir, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.isFile()) {
-          try {
-            bytes += statSync(p).size;
-          } catch {
-            /* removed meanwhile */
-          }
-        }
-      }
-    };
-    walk(this.opts.dataDir);
-    this.disk = { at: Date.now(), bytes };
-    return bytes;
+    this.disk = { at: Date.now(), bytes: folderBytes(this.opts.dataDir) };
+    return this.disk.bytes;
   }
 
   state() {
-    const members = this.membership();
-    const all = this.groups.all();
-    const active = this.groups.activeUrls();
-    const paused = new Set<string>();
-    for (const g of all) if (!g.active) for (const u of g.urls) if (!active.has(u)) paused.add(u);
-    const idx = this.index();
-    const matches = new Map<string, Array<{ project: string; file: string }>>();
-    for (const p of this.projects.values()) {
-      for (const [key, files] of p.session.sheetFiles()) {
-        let list = matches.get(key);
-        if (!list) matches.set(key, (list = []));
-        for (const f of files) list.push({ project: p.name, file: relative(p.root, f).split(sep).join("/") });
-      }
-    }
-    const stylesheets = idx
-      ? [...idx.sheets]
-          .filter(([key]) => !key.startsWith("inline:"))
-          .map(([url, s]) => ({ url, pages: s.pages.count(), sameSite: url.startsWith("/"), matches: matches.get(url) ?? [] }))
-          .sort((a, b) => b.pages - a.pages || a.url.localeCompare(b.url))
-      : [];
     return {
       version: this.version,
-      server: { version: SERVICE_VERSION, url: this.url, dataDir: this.opts.dataDir },
-      site: this.settings,
-      configured: isConfigured(this.settings),
-      groups: all.map((g) => this.summary(g, members)),
-      totals: {
-        pages: active.size,
-        activeGroups: all.filter((g) => g.active).length,
-        pausedGroups: all.filter((g) => !g.active).length,
-        pausedPages: paused.size,
-        diskBytes: this.diskBytes(),
-      },
-      job: this.jobs.state(),
-      lastResult: this.jobs.lastResult,
-      watch: this.watcher.status,
-      stylesheets,
+      server: { version: SERVICE_VERSION, url: this.url, dataDir: this.opts.dataDir, diskBytes: this.diskBytes() },
+      sites: [...this.sites.values()].map((s) => s.state()),
       projects: [...this.projects.values()].map((p) => ({ id: p.id, root: p.root, name: p.name, groups: p.linked })),
     };
   }
@@ -345,18 +234,21 @@ export class App {
 
   /** The project's CSS edits or the selected edits changed: open diff viewers refresh. */
   private edited(p: Project): void {
-    const key = `${p.session.editRevision}:${p.session.selectionRevision}`;
+    const key = `${p.editRevision}:${p.selectionRevision}`;
     if (key === p.sentEdit) return;
-    const selection = p.sentEdit.startsWith(`${p.session.editRevision}:`);
+    const selection = p.sentEdit.startsWith(`${p.editRevision}:`);
     p.sentEdit = key;
-    this.broadcast("edit", { s: p.id, editRevision: p.session.editRevision, ...(selection ? { selection: true } : {}) });
+    this.broadcast("edit", { s: p.id, editRevision: p.editRevision, ...(selection ? { selection: true } : {}) });
   }
 
-  private progress(p: { done: number; total: number; url: string; ok: boolean }): void {
+  private progress(site: Site, p: { done: number; total: number; url: string; ok: boolean }): void {
     const now = Date.now();
     if (now - this.progressAt < 250 && p.done !== p.total && p.ok) return;
     this.progressAt = now;
-    for (const peer of this.peers) peer.notify("index/captureProgress", p);
+    for (const peer of this.peers) {
+      const pr = this.peerProject.get(peer);
+      if (!pr || pr.sessionOn(site.id)) peer.notify("index/captureProgress", p);
+    }
   }
 
   // ------------------------------------------------------------- projects
@@ -373,12 +265,13 @@ export class App {
     if (!pending) {
       pending = (async () => {
         if (!existsSync(root) || !statSync(root).isDirectory()) throw new RpcError(ERR.invalidParams, `folder not found: ${root}`);
-        const session = await Session.create({ workspaceRoot: root, shared: this.shared, scope: [] });
-        const p: Project = { id, root, name: basename(root), session, peers: new Set(), linked: [], serial: Promise.resolve(), sentEdit: `${session.editRevision}:${session.selectionRevision}` };
-        for (const [event, method] of SESSION_NOTIFICATIONS) session.on(event, (x) => p.peers.forEach((c) => c.notify(method, x)));
-        session.on("publish", () => this.edited(p));
-        session.on("externalChange", () => this.edited(p));
-        session.on("selection", () => this.edited(p));
+        const p = new Project(id, root, basename(root), this.projectHost);
+        await p.relink([]);
+        p.sentEdit = `${p.editRevision}:${p.selectionRevision}`;
+        for (const [event, method] of SESSION_NOTIFICATIONS) p.on(event, (x) => p.peers.forEach((c) => c.notify(method, x)));
+        p.on("publish", () => this.edited(p));
+        p.on("externalChange", () => this.edited(p));
+        p.on("selection", () => this.edited(p));
         this.projects.set(id, p);
         this.changed();
         return p;
@@ -395,11 +288,11 @@ export class App {
     p.peers.delete(peer);
     if (p.peers.size > 0 || p.idle) return;
     // No editor left to show which edits are picked: the diff viewer shows them all.
-    p.session.setSelection(undefined);
+    p.setSelection(undefined);
     p.idle = setTimeout(() => {
       if (p.peers.size > 0) return;
       this.projects.delete(p.id);
-      void p.session.dispose();
+      void p.dispose();
       this.changed();
     }, this.opts.idleMs ?? 10 * 60_000);
     p.idle.unref();
@@ -421,33 +314,37 @@ export class App {
             project = next;
             if (![...next.peers].some((x) => x !== peer)) {
               // The only window: it reopens its own files next, so files earlier windows left open are closed.
-              const run = () => next.session.closeAll();
+              const run = () => next.closeAll();
               await (next.serial = next.serial.then(run, run));
             }
             if (peer.closed) throw new RpcError(ERR.invalidRequest, "connection closed");
             project.peers.add(peer);
-            if (Array.isArray(p.groups)) project.linked = [...new Set((p.groups as unknown[]).map(String))];
-            project.session.setScope(this.scopeFor(project.linked));
+            this.peerProject.set(peer, project);
+            const linked = Array.isArray(p.groups) ? [...new Set((p.groups as unknown[]).map(String))] : project.linked;
+            const pr = project;
+            const run = () => pr.relink(linked);
+            await (pr.serial = pr.serial.then(run, run));
             this.changed();
+            const site = this.watchSite(pr);
             const r: InitializeResult = {
               protocolMajor: PROTOCOL_MAJOR,
               protocolMinor: PROTOCOL_MINOR,
               serviceVersion: SERVICE_VERSION,
               schemaVersion: SCHEMA_VERSION,
               mode: "local",
-              repository: { workspaceRoot: root, siteRoot: this.cfg.siteRoot, baseUrl: this.cfg.baseUrl },
+              repository: { workspaceRoot: root, ...(site ? { siteRoot: site.shared.cfg.siteRoot, baseUrl: site.shared.cfg.baseUrl } : {}) },
               capabilities: { levels: [0, 1, 2, 3], capture: true, tabs: TABS },
-              status: project.session.status(),
-              sessionId: project.id,
+              status: pr.status(),
+              sessionId: pr.id,
               serverUrl: this.url,
               groups: this.groupInfos(),
-              watch: this.watcher.status,
+              ...(site ? { watch: site.watcher.status } : {}),
             };
-            this.watcher.projectsChanged();
+            for (const s of this.sites.values()) s.watcher.projectsChanged();
             return r;
           }
           case "server/health":
-            return { health: project?.session.status().health ?? "READY", uptimeMs: Date.now() - this.started, pid: process.pid };
+            return { health: project?.status().health ?? "READY", uptimeMs: Date.now() - this.started, pid: process.pid };
           case "groups/list":
             return this.groupInfos();
           case "server/shutdown":
@@ -459,19 +356,27 @@ export class App {
           case "session/setGroups": {
             const ids = need(p, "groups");
             if (!Array.isArray(ids)) throw new RpcError(ERR.invalidParams, "groups must be a list of group ids");
-            pr.linked = [...new Set(ids.map(String))];
-            const total = pr.session.setScope(this.scopeFor(pr.linked));
+            const total = await pr.relink([...new Set(ids.map(String))]);
+            const site = this.watchSite(pr);
+            if (site) peer.notify("scan/watch", site.watcher.status);
             this.changed();
             return total;
           }
           case "index/capture": {
-            if (!isConfigured(this.settings)) throw new RpcError(ERR.invalidRequest, `set up the site first: ${this.url}`);
-            if (Array.isArray(p?.urls) && p.urls.length) this.jobs.enqueue({ kind: "pages", urls: this.paths(p.urls) });
-            else for (const g of this.scopeFor(pr.linked)) if (g.active) this.jobs.enqueue({ kind: "group", groupId: g.id });
+            const sites = this.projectHost.sitesFor(pr.linked);
+            if (!sites.length) throw new RpcError(ERR.invalidRequest, `link page groups first, or set up a site: ${this.url}`);
+            const urls = Array.isArray(p?.urls) && p.urls.length ? (p.urls as unknown[]) : undefined;
+            const site = typeof p?.site === "string" ? this.sites.get(p.site) : undefined;
+            for (const s of site ? [site] : sites) {
+              // A full address goes to its own site only.
+              const mine = urls?.filter((u) => !/^https?:\/\//i.test(String(u)) || s.owns(String(u)));
+              if (urls && !mine?.length) continue;
+              s.capture(pr.linked, mine);
+            }
             return { started: true };
           }
         }
-        const handled = sessionMethod(pr.session, method, p);
+        const handled = sessionMethod(pr, method, p);
         if (!handled) throw new RpcError(ERR.methodNotFound, `unknown method: ${method}`);
         const result = await handled;
         if (EDITS.has(method)) this.edited(pr);
@@ -484,6 +389,7 @@ export class App {
       },
       onClose: (x) => {
         this.peers.delete(x);
+        this.peerProject.delete(x);
         if (project) this.detach(project, x);
       },
     });
@@ -492,208 +398,38 @@ export class App {
 
   // ----------------------------------------------------------------- REST
 
-  /** Page addresses from the user → site paths (other sites' addresses are skipped). */
-  private paths(input: unknown[]): string[] {
-    const host = this.settings.siteUrl ? new URL(this.settings.siteUrl).hostname.replace(/^www\./, "") : undefined;
-    const out = new Set<string>();
-    for (const raw of input) {
-      const t = String(raw ?? "").trim();
-      if (!t) continue;
-      if (host && /^https?:\/\//i.test(t)) {
-        try {
-          if (new URL(t).hostname.replace(/^www\./, "") !== host) continue;
-        } catch {
-          continue;
-        }
-      }
-      const p = pagePath(t, this.settings);
-      if (p) out.add(p);
-    }
-    return [...out];
-  }
-
-  private requireSite(): void {
-    if (!isConfigured(this.settings)) throw new UserError("Set the site's address first.");
-  }
-
-  private reconfigure(next: SiteSettings): void {
-    this.settings = next;
-    saveSettings(this.opts.dataDir, next);
-    this.cfg = buildConfig(next, this.opts.dataDir);
-    this.shared.cfg = this.cfg;
-    const old = this.renderer;
-    this.renderer = undefined;
-    void old?.close();
-    for (const p of this.projects.values()) p.session.reconfigure(this.cfg);
-  }
-
   async api(method: string, path: string, query: URLSearchParams, body: any): Promise<unknown> {
     const parts = path.split("/").filter(Boolean).map(decodeURIComponent); // ["api", ...]
-    const route = `${method} /${parts.slice(1).map((s, i) => (parts[1] === "groups" && i === 1 ? ":id" : s)).join("/")}`;
-    const id = parts[2];
-    switch (route) {
+    if (parts[1] === "sites") {
+      if (parts.length === 2) {
+        if (method === "GET") return this.state().sites;
+        if (method === "POST") return this.addSite(body);
+      } else if (parts.length === 3 && method === "DELETE") {
+        await this.removeSite(parts[2]);
+        return { ok: true };
+      } else {
+        return this.site(parts[2]).api(method, parts.slice(3), query, body);
+      }
+      throw new UserError("Not found.", 404);
+    }
+    switch (`${method} /${parts.slice(1).join("/")}`) {
       case "GET /state":
         return this.state();
-      case "PUT /site": {
-        const next = validateSettings(body);
-        if (this.settings.watch) next.watch = this.settings.watch;
-        const otherSite = next.siteUrl !== this.settings.siteUrl || next.siteFolder !== this.settings.siteFolder;
-        // The setup page has no field for blocked requests: keep the site's ones from settings.json.
-        if (next.block === undefined && !otherSite && this.settings.block) next.block = this.settings.block;
-        const moved = siteKey(next) !== siteKey(this.settings);
-        this.reconfigure(next);
-        this.watcher.reset(otherSite);
-        this.changed();
-        return { state: this.state(), needsRescan: moved && this.groups.all().length > 0 && !!this.store.currentRevision() };
-      }
-      case "PUT /watch": {
-        const w = watchSettings(this.settings);
-        if (body?.enabled !== undefined) w.enabled = body.enabled === true;
-        if (body?.newPages !== undefined) w.newPages = body.newPages === true;
-        if (body?.intervalSec !== undefined) {
-          const n = Number(body.intervalSec);
-          if (!Number.isFinite(n)) throw new UserError("The check interval must be a number of seconds.");
-          w.intervalSec = n;
-        }
-        if (body?.repo !== undefined) {
-          const repo = String(body.repo ?? "").trim();
-          if (repo && (!isAbsolute(repo) || !existsSync(repo) || !statSync(repo).isDirectory())) throw new UserError(`Enter the repository folder's full path (${repo} isn't a folder).`);
-          if (repo) w.repo = resolve(repo);
-          else delete w.repo;
-        }
-        this.settings = { ...this.settings, watch: watchSettings({ ...this.settings, watch: w }) };
-        saveSettings(this.opts.dataDir, this.settings);
-        this.watcher.reset(false);
-        this.changed();
-        return this.state();
-      }
-      case "POST /watch/check":
-        await this.watcher.check();
-        return this.state();
-      case "POST /sitemap/preview": {
-        const res = await readSitemap(String(body?.url ?? ""), this.settings, body?.filter ? String(body.filter) : undefined);
-        return { total: res.total, urls: res.urls, otherSite: res.otherSite };
-      }
-      case "POST /groups": {
-        this.requireSite();
-        let urls: string[];
-        if (body?.source?.type === "sitemap") {
-          const filter = body.source.filter ? String(body.source.filter) : undefined;
-          const res = await readSitemap(String(body.source.url ?? ""), this.settings, filter);
-          if (res.total === 0) throw new UserError(res.otherSite ? `The sitemap only lists pages of another site (not ${this.settings.siteUrl}).` : "The sitemap doesn't list any pages.");
-          if (res.urls.length === 0) throw new UserError(`None of the sitemap's ${res.total} pages match “${filter}”.`);
-          urls = res.urls;
-        } else {
-          urls = this.paths(Array.isArray(body?.urls) ? body.urls : []);
-          if (urls.length === 0) throw new UserError(this.settings.siteUrl ? `Add at least one page address on ${this.settings.siteUrl}.` : "Add at least one page address.");
-        }
-        const g = this.groups.create(body?.name, body?.source, urls);
-        if (body?.scan) this.jobs.enqueue({ kind: "group", groupId: g.id });
-        this.groupsChanged();
-        return this.summary(g, this.membership());
-      }
-      case "PATCH /groups/:id": {
-        const before = this.groups.get(id).active;
-        const g = this.groups.update(id, body ?? {});
-        if (!before && g.active && g.scannedAt) {
-          const fresh = g.urls.filter((u) => this.pageStatus(u).status === "new");
-          if (fresh.length) this.jobs.enqueue({ kind: "pages", urls: fresh, label: `Scanning ${g.name}` });
-        }
-        this.groupsChanged();
-        return this.summary(g, this.membership());
-      }
-      case "DELETE /groups/:id":
-        this.groups.remove(id);
-        this.groupsChanged();
-        return { ok: true };
-      case "POST /groups/:id/restore": {
-        const g = this.groups.restore(id);
-        this.groupsChanged();
-        return this.summary(g, this.membership());
-      }
-      case "GET /groups/:id/pages": {
-        const g = this.groups.get(id);
-        const members = this.membership();
-        const want = query.get("status") || "all";
-        const q = (query.get("q") ?? "").trim().toLowerCase();
-        const offset = Math.max(0, Number(query.get("offset")) || 0);
-        const limit = Math.min(500, Math.max(1, Number(query.get("limit")) || 50));
-        const counts = { all: g.urls.length, ok: 0, failed: 0, new: 0, excluded: g.excluded.length };
-        const rows: Array<{ url: string; status: PageStatus; row?: PageRow }> = [];
-        for (const url of g.urls) {
-          const s = this.pageStatus(url);
-          if (s.status === "ok") counts.ok++;
-          else if (s.status === "failed") counts.failed++;
-          else if (s.status === "new") counts.new++;
-          rows.push({ url, ...s });
-        }
-        for (const url of g.excluded) rows.push({ url, status: "excluded" });
-        const hits = rows.filter((r) => (want === "all" ? r.status !== "excluded" : r.status === want) && (!q || r.url.toLowerCase().includes(q)));
-        return {
-          counts,
-          total: hits.length,
-          pages: hits.slice(offset, offset + limit).map((r) => ({
-            url: r.url,
-            status: r.status,
-            ...(r.status === "failed" && r.row?.error ? { reason: friendlyError(r.row.error) } : {}),
-            scannedAt: r.status === "excluded" ? null : (r.row?.capturedAt ?? null),
-            alsoIn: (members.get(r.url) ?? []).filter((n) => n !== g.name),
-          })),
-        };
-      }
-      case "POST /groups/:id/pages": {
-        const g = this.groups.get(id);
-        const urls = this.paths(Array.isArray(body?.urls) ? body.urls : []);
-        if (urls.length === 0) throw new UserError("Add at least one page address.");
-        const res = this.groups.addPages(g.id, urls);
-        if (body?.scan) {
-          const fresh = urls.filter((u) => this.pageStatus(u).status === "new");
-          this.jobs.enqueue({ kind: "pages", urls: fresh, label: `Scanning new pages in ${g.name}` });
-        }
-        this.groupsChanged();
-        return res;
-      }
-      case "POST /groups/:id/remove": {
-        const url = this.paths([body?.url])[0];
-        if (!url) throw new UserError("Which page?");
-        const res = this.groups.removePage(id, url);
-        this.groupsChanged();
-        return res;
-      }
-      case "POST /groups/:id/include": {
-        const url = this.paths([body?.url])[0];
-        if (!url) throw new UserError("Which page?");
-        this.groups.include(id, url);
-        this.groupsChanged();
-        return { ok: true };
-      }
-      case "POST /groups/:id/rescan":
-        this.requireSite();
-        this.groups.get(id);
-        this.jobs.enqueue({ kind: "group", groupId: id });
-        return { queued: true };
-      case "POST /rescan": {
-        this.requireSite();
-        const urls = this.paths(Array.isArray(body?.urls) ? body.urls : []);
-        if (urls.length === 0) throw new UserError("Which pages?");
-        this.jobs.enqueue({ kind: "pages", urls });
-        return { queued: true };
-      }
-      case "POST /rescan-all":
-        this.requireSite();
-        this.jobs.enqueue({ kind: "all" });
-        return { queued: true };
       case "GET /diff": {
         const p = this.projects.get(query.get("s") ?? "");
         if (!p) throw new UserError("This VS Code window isn't connected any more. Open the page again from VS Code.", 404);
-        const url = this.paths([query.get("url") ?? ""])[0];
+        const siteId = query.get("site") || undefined;
+        const site = siteId ? this.site(siteId) : this.projectHost.sitesFor(p.linked)[0];
+        if (!site) throw new UserError("Link page groups to this project first.", 409);
+        const url = site.paths([query.get("url") ?? ""])[0];
         if (!url) throw new UserError("Which page?");
-        if (!this.index()) throw new UserError("No pages have been scanned yet.", 409);
-        const row = this.pageRow(url);
+        if (!site.index()) throw new UserError("No pages have been scanned yet.", 409);
+        const row = site.pageRow(url);
         if (!row || row.status === "removed") throw new UserError(`${url} hasn't been scanned yet. Add it to a group and scan it first.`, 404);
         if (row.status === "failed") throw new UserError(`${url} couldn't be scanned (${friendlyError(row.error) ?? "unknown error"}). Rescan it from the setup page.`, 409);
+        if (!p.sessionOn(site.id)) throw new UserError(`This project isn't linked to a group of ${site.name}.`, 409);
         const device = query.get("device") || undefined;
-        return p.session.pageDiff({ url, device, live: query.get("live") === "1" });
+        return p.pageDiff({ url, device, live: query.get("live") === "1", site: site.id });
       }
       default:
         throw new UserError("Not found.", 404);
@@ -815,19 +551,20 @@ export class App {
   }
 
   async close(): Promise<void> {
-    this.watcher.stop();
-    for (const t of this.timers) clearInterval(t);
     clearTimeout(this.stateTimer);
     for (const res of this.sse) res.end();
     for (const peer of this.peers) peer.close();
     for (const p of this.projects.values()) {
       clearTimeout(p.idle);
-      await p.session.dispose();
+      await p.dispose();
     }
     this.projects.clear();
-    await this.renderer?.close();
+    for (const s of this.sites.values()) await s.close();
+    if (this.blankRes) {
+      await this.blankRes.renderer().close();
+      this.blankRes.store.close();
+    }
     await this.pool.close();
-    this.store.close();
   }
 }
 

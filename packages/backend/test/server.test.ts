@@ -121,6 +121,9 @@ describe("local server", () => {
   let allId: string;
   let homeId: string;
   let sessionId: string;
+  let siteId: string;
+  const S = () => `/api/sites/${siteId}`;
+  const theSite = () => srv.app.site(siteId);
 
   const api = async (method: string, p: string, body?: unknown, headers: Record<string, string> = {}) => {
     const res = await fetch(`${srv.url}${p}`, {
@@ -158,17 +161,16 @@ describe("local server", () => {
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toMatch(/text\/html/);
     const { json } = await api("GET", "/api/state");
-    expect(json.configured).toBe(false);
-    expect(json.groups).toEqual([]);
+    expect(json.sites).toEqual([]);
     expect((await fetch(`${srv.url}/ui/../package.json`)).status).toBe(404);
   });
 
   it("rejects requests from other sites and non-JSON writes", async () => {
-    expect((await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop"] }, { Origin: "https://evil.example" })).status).toBe(403);
+    expect((await api("POST", "/api/sites", { siteFolder: site, devices: ["desktop"] }, { Origin: "https://evil.example" })).status).toBe(403);
     expect((await api("GET", "/api/diff?s=x&url=/index.html", undefined, { "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
     expect((await api("GET", "/api/state", undefined, { Origin: "https://evil.example" })).status).toBe(403);
     expect((await api("GET", "/api/state", undefined, { "Sec-Fetch-Site": "same-origin" })).status).toBe(200);
-    const plain = await fetch(`${srv.url}/api/rescan-all`, { method: "POST", body: "x", headers: { "Content-Type": "text/plain" } });
+    const plain = await fetch(`${srv.url}/api/sites/x/rescan-all`, { method: "POST", body: "x", headers: { "Content-Type": "text/plain" } });
     expect(plain.status).toBe(415);
     const port = new URL(srv.url).port;
     const rebound = await new Promise<string>((resolve) => {
@@ -181,38 +183,41 @@ describe("local server", () => {
   });
 
   it("saves site settings, with plain-language errors", async () => {
-    const bad = await api("PUT", "/api/site", { siteFolder: path.join(tmp, "nope"), devices: ["desktop"] });
+    const bad = await api("POST", "/api/sites", { siteFolder: path.join(tmp, "nope"), devices: ["desktop"] });
     expect(bad.status).toBe(400);
     expect(bad.json.error).toMatch(/doesn't exist/);
-    const ok = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop"] });
+    const made = await api("POST", "/api/sites", { siteFolder: site, devices: ["desktop"] });
+    expect(made.status).toBe(200);
+    siteId = made.json.id;
+    expect(made.json.state.sites).toMatchObject([{ id: siteId, name: path.basename(site), configured: true }]);
+    const ok = await api("PUT", S(), { siteFolder: site, devices: ["desktop"] });
     expect(ok.status).toBe(200);
-    expect(ok.json.state.configured).toBe(true);
     expect(ok.json.needsRescan).toBe(false);
   });
 
   it("previews a sitemap and creates a scanned group from it", async () => {
-    const prev = await api("POST", "/api/sitemap/preview", { url: "sitemap.xml", filter: "/*about*" });
+    const prev = await api("POST", `${S()}/sitemap/preview`, { url: "sitemap.xml", filter: "/*about*" });
     expect(prev.json).toMatchObject({ total: 3, urls: ["/about.html"] });
-    const g = await api("POST", "/api/groups", { name: "All pages", source: { type: "sitemap", url: "sitemap.xml" }, scan: true });
+    const g = await api("POST", `${S()}/groups`, { name: "All pages", source: { type: "sitemap", url: "sitemap.xml" }, scan: true });
     expect(g.status).toBe(200);
     expect(g.json.pages).toBe(3);
     allId = g.json.id;
-    await srv.app.jobs.idle();
+    await theSite().jobs.idle();
     const { json } = await api("GET", "/api/state");
-    expect(json.groups[0]).toMatchObject({ name: "All pages", ok: 3, failed: 0, fresh: 0 });
-    expect(json.groups[0].scannedAt).toBeTruthy();
-    expect(json.lastResult.message).toMatch(/All pages rescanned: 3 pages/);
-    expect(json.totals.pages).toBe(3);
-    expect(json.stylesheets.find((s: any) => s.url === "/css/main.css")?.pages).toBe(3);
+    expect(json.sites[0].groups[0]).toMatchObject({ name: "All pages", ok: 3, failed: 0, fresh: 0 });
+    expect(json.sites[0].groups[0].scannedAt).toBeTruthy();
+    expect(json.sites[0].lastResult.message).toMatch(/All pages rescanned: 3 pages/);
+    expect(json.sites[0].totals.pages).toBe(3);
+    expect(json.sites[0].stylesheets.find((s: any) => s.url === "/css/main.css")?.pages).toBe(3);
   });
 
   it("adds a pasted group and shows shared pages", async () => {
-    const dup = await api("POST", "/api/groups", { name: "all PAGES", source: { type: "paste" }, urls: ["/index.html"], scan: false });
+    const dup = await api("POST", `${S()}/groups`, { name: "all PAGES", source: { type: "paste" }, urls: ["/index.html"], scan: false });
     expect(dup.status).toBe(400);
-    const g = await api("POST", "/api/groups", { name: "Home", source: { type: "paste" }, urls: ["index.html", "file:///nope", "/about.html"], scan: false });
+    const g = await api("POST", `${S()}/groups`, { name: "Home", source: { type: "paste" }, urls: ["index.html", "file:///nope", "/about.html"], scan: false });
     expect(g.json).toMatchObject({ pages: 2, sharedPages: 2, ok: 2 });
     homeId = g.json.id;
-    const pages = await api("GET", `/api/groups/${homeId}/pages?status=all`);
+    const pages = await api("GET", `${S()}/groups/${homeId}/pages?status=all`);
     expect(pages.json.counts).toMatchObject({ all: 2, ok: 2 });
     expect(pages.json.pages[0].alsoIn).toEqual(["All pages"]);
   });
@@ -238,11 +243,11 @@ describe("local server", () => {
     // Nothing is written into the project.
     expect(fs.existsSync(path.join(proj, ".vscode"))).toBe(false);
 
-    await api("PATCH", `/api/groups/${homeId}`, { active: false });
+    await api("PATCH", `${S()}/groups/${homeId}`, { active: false });
     await until(() => rpc.notes.some((n) => n.method === "groups/changed"));
     const paused = await rpc.call("analysis/queryImpacts", { scope: "session" });
     expect(paused.total.exact).toBe(0);
-    await api("PATCH", `/api/groups/${homeId}`, { active: true });
+    await api("PATCH", `${S()}/groups/${homeId}`, { active: true });
     const back = await rpc.call("analysis/queryImpacts", { scope: "session" });
     expect(back.total.exact).toBe(2);
 
@@ -252,7 +257,7 @@ describe("local server", () => {
 
     const { json } = await api("GET", "/api/state");
     expect(json.projects).toEqual([{ id: sessionId, root: proj, name: "proj", groups: [homeId] }]);
-    expect(json.stylesheets.find((s: any) => s.url === "/css/main.css").matches).toEqual([{ project: "proj", file: "styles/main.css" }]);
+    expect(json.sites[0].stylesheets.find((s: any) => s.url === "/css/main.css").matches).toEqual([{ project: "proj", file: "styles/main.css" }]);
   });
 
   it("renders the before/after diff of a page", async () => {
@@ -297,26 +302,26 @@ describe("local server", () => {
   });
 
   it("excludes sitemap pages so they stay out after a rescan, and undoes it", async () => {
-    const r = await api("POST", `/api/groups/${allId}/remove`, { url: "/contact.html" });
+    const r = await api("POST", `${S()}/groups/${allId}/remove`, { url: "/contact.html" });
     expect(r.json).toEqual({ excluded: true });
-    await api("POST", `/api/groups/${allId}/rescan`, {});
-    await srv.app.jobs.idle();
-    let pages = await api("GET", `/api/groups/${allId}/pages?status=excluded`);
+    await api("POST", `${S()}/groups/${allId}/rescan`, {});
+    await theSite().jobs.idle();
+    let pages = await api("GET", `${S()}/groups/${allId}/pages?status=excluded`);
     expect(pages.json.pages.map((p: any) => p.url)).toEqual(["/contact.html"]);
     expect(pages.json.counts.all).toBe(2);
-    await api("POST", `/api/groups/${allId}/include`, { url: "/contact.html" });
-    pages = await api("GET", `/api/groups/${allId}/pages`);
+    await api("POST", `${S()}/groups/${allId}/include`, { url: "/contact.html" });
+    pages = await api("GET", `${S()}/groups/${allId}/pages`);
     expect(pages.json.counts).toMatchObject({ all: 3, excluded: 0 });
   }, 30_000);
 
   it("deletes a group with undo", async () => {
-    expect((await api("DELETE", `/api/groups/${homeId}`)).json).toEqual({ ok: true });
+    expect((await api("DELETE", `${S()}/groups/${homeId}`)).json).toEqual({ ok: true });
     let { json } = await api("GET", "/api/state");
-    expect(json.groups.map((g: any) => g.name)).toEqual(["All pages"]);
-    const back = await api("POST", `/api/groups/${homeId}/restore`, {});
+    expect(json.sites[0].groups.map((g: any) => g.name)).toEqual(["All pages"]);
+    const back = await api("POST", `${S()}/groups/${homeId}/restore`, {});
     expect(back.json.name).toBe("Home");
     ({ json } = await api("GET", "/api/state"));
-    expect(json.groups).toHaveLength(2);
+    expect(json.sites[0].groups).toHaveLength(2);
   });
 
   it("reports CSS changed outside the editor", async () => {
@@ -377,19 +382,57 @@ describe("local server", () => {
     c.close();
   }, 20_000);
 
+  it("links groups from several sites: counts add up and pages name their site", async () => {
+    const site2 = path.join(tmp, "site2");
+    fs.cpSync(site, site2, { recursive: true });
+    const made = await api("POST", "/api/sites", { siteFolder: site2, devices: ["desktop"] });
+    const site2Id = made.json.id;
+    expect(made.json.state.sites.map((x: any) => x.id)).toEqual([siteId, site2Id]);
+    const g = await api("POST", `/api/sites/${site2Id}/groups`, { name: "Home", source: { type: "paste" }, urls: ["/index.html", "/about.html"], scan: true });
+    await srv.app.site(site2Id).jobs.idle();
+
+    const proj3 = path.join(tmp, "proj3");
+    fs.mkdirSync(path.join(proj3, "styles"), { recursive: true });
+    const file = path.join(proj3, "styles/main.css");
+    const original = fs.readFileSync(path.join(site, "css/main.css"), "utf8");
+    fs.writeFileSync(file, original);
+    const c = await RpcClient.connect(Number(new URL(srv.url).port));
+    const init = await c.call("initialize", { workspaceRoot: proj3, groups: [homeId, g.json.id] });
+    expect(init.groups.map((x: any) => `${x.siteName}:${x.name}`)).toContain("site2:Home");
+    const opened = await c.call("document/open", { path: file, text: original.replace("color: blue;", "color: red;"), version: 1 });
+    expect(opened.answer.total.exact).toBe(4); // home and about, on each site
+
+    const pages = await c.call("analysis/getPages", { path: file });
+    expect(pages.pages.map((x: any) => `${x.site}${x.url}`).sort()).toEqual([`${siteId}/about.html`, `${siteId}/index.html`, `${site2Id}/about.html`, `${site2Id}/index.html`].sort());
+    expect(pages.groups.map((x: any) => x.name).sort()).toEqual([`Home · ${path.basename(site)}`, "Home · site2"].sort());
+    const only = await c.call("analysis/getPages", { path: file, group: "Home · site2" });
+    expect(only.pages.map((x: any) => x.site)).toEqual([site2Id, site2Id]);
+
+    const d = await api("GET", `/api/diff?s=${init.sessionId}&site=${site2Id}&url=${encodeURIComponent("/about.html")}`);
+    expect(d.json.status).toBe("changed");
+
+    // Deleting a site unlinks its groups.
+    expect((await api("DELETE", `/api/sites/${site2Id}`)).json).toEqual({ ok: true });
+    expect(fs.existsSync(path.join(tmp, "data", "sites", site2Id))).toBe(false);
+    const { json } = await api("GET", "/api/state");
+    expect(json.projects.find((x: any) => x.root === proj3).groups).toEqual([homeId]);
+    expect((await c.call("analysis/queryImpacts", { scope: "session" })).total.exact).toBe(2);
+    c.close();
+  }, 30_000);
+
   it("asks for a rescan when the site changes", async () => {
-    const r = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"] });
+    const r = await api("PUT", S(), { siteFolder: site, devices: ["desktop", "mobile"] });
     expect(r.json.needsRescan).toBe(true);
   });
 
   it("asks for a rescan when blocked requests change, and keeps them for the same site only", async () => {
-    const blocked = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"], block: ["/altcha/"] });
+    const blocked = await api("PUT", S(), { siteFolder: site, devices: ["desktop", "mobile"], block: ["/altcha/"] });
     expect(blocked.json.needsRescan).toBe(true);
-    const same = await api("PUT", "/api/site", { siteFolder: site, devices: ["desktop", "mobile"] });
+    const same = await api("PUT", S(), { siteFolder: site, devices: ["desktop", "mobile"] });
     expect(same.json.needsRescan).toBe(false);
-    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "settings.json"), "utf8")).block).toEqual(["/altcha/"]);
+    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "sites", siteId, "settings.json"), "utf8")).block).toEqual(["/altcha/"]);
     const other = fs.mkdtempSync(path.join(os.tmpdir(), "cbr-other-site-"));
-    await api("PUT", "/api/site", { siteFolder: other, devices: ["desktop", "mobile"] });
-    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "settings.json"), "utf8")).block).toBeUndefined();
+    await api("PUT", S(), { siteFolder: other, devices: ["desktop", "mobile"] });
+    expect(JSON.parse(fs.readFileSync(path.join(tmp, "data", "sites", siteId, "settings.json"), "utf8")).block).toBeUndefined();
   });
 });

@@ -718,13 +718,13 @@ L0 depend on network latency.
 
 ### 10.5 The local server: setup page and page groups
 
-`css-blast-radius serve` runs one HTTP port per site (default 4317):
+`css-blast-radius serve` runs one HTTP port (default 4317) for any number of sites:
 
 | Path | Who uses it | What |
 |---|---|---|
-| `/` | Browser | **Setup page**: site address (live URL or local folder), devices, page groups, scan progress, stylesheet matches, connected projects |
-| `/api/…`, `/api/events` | Setup page, diff viewer | REST plus Server-Sent Events (`state`, throttled to ~4/s during scans; `edit` when a project's edits change) |
-| `/diff?s=…&url=…` | Diff tab in VS Code, or a browser | L2/L3 before/after viewer for one page |
+| `/` | Browser | **Setup page**: the sites, then per site: address (live URL or local folder), devices, page groups, scan progress, stylesheet matches, connected projects |
+| `/api/…`, `/api/events` | Setup page, diff viewer | REST (`GET/POST /api/sites`, `DELETE /api/sites/:id`, `/api/sites/:id/…` for a site's settings, groups, rescans and watcher; `GET /api/state` for everything) plus Server-Sent Events (`state`, throttled to ~4/s during scans; `edit` when a project's edits change) |
+| `/diff?s=…&site=…&url=…` | Diff tab in VS Code, or a browser | L2/L3 before/after viewer for one page |
 | `/rpc` (HTTP upgrade) | VS Code extension | JSON-RPC (§11) |
 
 **Page groups** are what a developer watches: named lists of pages from a
@@ -750,6 +750,17 @@ carried forward) unless the site or devices changed, or the user asks for
 **Rescan all**, which also drops pages no longer in any active group. Each
 scan publishes a new index revision (§9.3), and every project session
 switches to it without interrupting counts.
+
+**Sites.** Each site has its own folder (`<data>/sites/<id>/`: settings,
+groups, index), scan queue, browser renderer and auto-rescan watcher, so
+sites scan in parallel; the Chromium pool and the content-addressed blobs
+are shared. Group ids are unique across sites, so a project can link groups
+from several sites, for example two sites built from one repo. It then gets
+one analysis session per linked site and a combining layer
+(`server/project.ts`): counts add up, page lists merge and each page names
+its site (`PageItem.site`, passed back to drilldown, live and diff calls),
+and group names get ` · <site>` when the project spans several sites.
+Deleting a site unlinks its groups from every project.
 
 **Linked groups.** Each developer's editor keeps the group IDs the project
 works on in its own per-folder storage (VS Code `workspaceState`), so nothing

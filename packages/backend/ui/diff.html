@@ -430,6 +430,7 @@
 // ---------------------------------------------------------------- query params & state
 const params = new URLSearchParams(window.location.search);
 const s = params.get("s") || "";
+const site = params.get("site") || "";
 const pageUrl = params.get("url") || "";
 let device = params.get("device") || "";
 let live = params.get("live") === "1";
@@ -503,6 +504,7 @@ async function fetchDiff(keepScroll = false) {
     device,
     live: live ? "1" : "0"
   });
+  if (site) query.set("site", site);
 
   try {
     const res = await fetch(`/api/diff?${query.toString()}`, { signal: inFlight.signal });

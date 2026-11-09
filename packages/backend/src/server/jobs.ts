@@ -89,6 +89,7 @@ export class Jobs {
   private current?: Running;
   private running = false;
   private resultN = 0;
+  private readonly abort = new AbortController();
   lastResult: LastResult | null = null;
 
   constructor(private readonly host: JobHost) {}
@@ -104,11 +105,21 @@ export class Jobs {
   }
 
   enqueue(spec: JobSpec): void {
+    if (this.abort.signal.aborted) return spec.kind === "pages" ? spec.done?.() : undefined;
     if (spec.kind === "pages" && spec.urls.length === 0 && !spec.patches?.length) return spec.done?.();
     if (this.queue.some((q) => this.same(q, spec))) return;
     this.queue.push(spec);
     this.host.changed();
     void this.pump();
+  }
+
+  /** Drops the queue and cancels the running scan (the site is being removed). */
+  async stop(): Promise<void> {
+    this.abort.abort();
+    const dropped = this.queue;
+    this.queue = [];
+    for (const q of dropped) if (q.kind === "pages") q.done?.();
+    await this.idle();
   }
 
   /** Waits until the queue is empty (tests, shutdown). */
@@ -239,6 +250,7 @@ export class Jobs {
     const res = await new Capturer(cfg, store).run({
       urls: forceFull ? undefined : targets,
       keep: this.host.keepRevisions(),
+      signal: this.abort.signal,
       patches,
       sheets: spec.kind === "pages" ? spec.sheets : undefined,
       onProgress: (p) => {

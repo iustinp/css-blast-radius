@@ -139,6 +139,9 @@ export interface GroupInfo {
   name: string;
   active: boolean;
   pages: number;
+  /** The site the group belongs to: its id and name. */
+  site: string;
+  siteName: string;
 }
 
 /** The server keeping the scan equal to the live site (missing before 1.6). */
@@ -265,7 +268,8 @@ export interface PagesResult {
   groups: Array<{ name: string; exact: number; possible: number; unknown: number }>;
   total: number;
   offset: number;
-  pages: Array<{ url: string; set: PageSetName; template?: string; groups: string[]; impact?: PageImpact }>;
+  /** `site`/`siteName`: the page's site; pass `site` back when opening its diff. */
+  pages: Array<{ url: string; set: PageSetName; template?: string; groups: string[]; site?: string; siteName?: string; impact?: PageImpact }>;
   assessment?: AssessmentSummary;
 }
 

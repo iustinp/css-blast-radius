@@ -23,7 +23,7 @@ template are still counted. `0` is only shown with a reason.
 
 CSS Blast Radius has three parts:
 
-- a **local server**, one per website;
+- a **local server**, which can watch several websites;
 - a **setup page** in your browser, where you say which pages to watch;
 - the **VS Code extension**, which shows the impact while you type.
 
@@ -47,7 +47,7 @@ Options:
 
 ### 2. Set up the site (browser, once)
 
-Open <http://127.0.0.1:4317>.
+Open <http://127.0.0.1:4317>. It lists your sites; **Add site** adds one, and clicking a site opens its settings and page groups. Each site scans in parallel with the others, and **Delete site** removes it with its scans.
 
 1. **Site address**: the live site (`https://www.example.com`) or a folder on this computer with the built HTML (`/Users/me/site/dist`).
 2. **Devices**: desktop, mobile and/or tablet. Every page is scanned on each one.
@@ -73,7 +73,7 @@ Every tab compares your CSS with the pages as last scanned, so the scan should m
 - **Page edits**: it reads the site's `/query-index.json` and each fragment's date (`/nav.plain.html`, …), and rescans a page edited after its scan, or showing an edited fragment.
 - **New pages**: a page that appears in `/query-index.json` joins a sitemap group and is scanned. The group is picked by the page's address: from the page's own folder up, the first folder where a sitemap group has pages (siblings, the folder's own page, or pages deeper in it), and there the group with the most pages. With no shared folder, only a group with top-level pages (`/`, `/about`) takes it, so a `/blog/*` group doesn't collect `/careers/x`. A group's path filter is respected; hand-picked lists (pasted or CSV) and excluded pages are left alone, as are fragments (`/nav`, `/footer`, …) and hidden paths (`/.da/…`). A page joining a paused group is scanned when the group resumes. Pages already on the site when this started are never added. Turn it off with the **New pages** switch.
 
-The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/watch {enabled, intervalSec, repo, newPages}`, `POST /api/watch/check`.
+The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/sites/:id/watch {enabled, intervalSec, repo, newPages}`, `POST /api/sites/:id/watch/check`.
 
 ### 3. Link your project in VS Code (once per project)
 
@@ -177,7 +177,7 @@ node packages/backend/dist/cli.js assess  --workspace /tmp/cbr-ws --data /tmp/cb
 - `profiles`, `recipes` (click/hover/fill steps captured as extra states).
 - `stylesheets` (`{ urlPrefix, dir }` mappings).
 - `capture`, `dataDir`.
-  - `capture.block`: requests to abort during the capture, as regular expressions tested case-insensitively against each request URL. Use it for scripts that keep the CPU busy and slow every page down without changing which styles apply, such as a proof-of-work captcha: `"block": ["/altcha/", "/captcha/"]`. The page document itself is never blocked. The server reads the same list from `block` in its `settings.json`, and the setup page keeps it when you save.
+  - `capture.block`: requests to abort during the capture, as regular expressions tested case-insensitively against each request URL. Use it for scripts that keep the CPU busy and slow every page down without changing which styles apply, such as a proof-of-work captcha: `"block": ["/altcha/", "/captcha/"]`. The page document itself is never blocked. The server reads the same list from `block` in the site's `settings.json` (`<data>/sites/<id>/`), and the setup page keeps it when you save.
 
 ## Tests
 
@@ -213,4 +213,3 @@ Known limitations:
 - **Server and editor:**
   - No blob garbage collection.
   - Multi-root workspaces use the first folder.
-  - One server watches one site. Run a second server with another `--port` and `--data` for another site.

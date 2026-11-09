@@ -9,13 +9,14 @@ export class DiffTab implements vscode.Disposable {
   private readonly panel: vscode.WebviewPanel;
   private readonly onAttached: vscode.Disposable;
   private pagePath = "";
+  private site?: string;
   private life: DaemonLifecycle;
 
-  static open(life: DaemonLifecycle, pagePath: string): void {
+  static open(life: DaemonLifecycle, pagePath: string, site?: string): void {
     if (!life.init || !pagePath.startsWith("/") || pagePath.startsWith("//")) return;
     if (!DiffTab.current) DiffTab.current = new DiffTab(life);
     DiffTab.current.life = life;
-    DiffTab.current.show(pagePath);
+    DiffTab.current.show(pagePath, site);
   }
 
   static openInBrowser(): void {
@@ -37,8 +38,9 @@ export class DiffTab implements vscode.Disposable {
     });
   }
 
-  private show(pagePath: string): void {
+  private show(pagePath: string, site?: string): void {
     this.pagePath = pagePath;
+    this.site = site;
     this.panel.title = `Diff · ${pagePath}`;
     this.panel.webview.html = this.html();
     this.panel.reveal(vscode.ViewColumn.One);
@@ -49,10 +51,11 @@ export class DiffTab implements vscode.Disposable {
     const init = this.life.init;
     if (!init) return;
     try {
-      const url = requested ?? diffUrl(this.life.serverUrl, init.sessionId, this.pagePath);
+      const url = requested ?? diffUrl(this.life.serverUrl, init.sessionId, this.pagePath, false, this.site);
       const parsed = new URL(url);
       if (parsed.origin !== serverOrigin(this.life.serverUrl).origin || parsed.pathname !== "/diff"
-        || parsed.searchParams.get("s") !== init.sessionId || parsed.searchParams.get("url") !== this.pagePath) return;
+        || parsed.searchParams.get("s") !== init.sessionId || parsed.searchParams.get("url") !== this.pagePath
+        || (parsed.searchParams.get("site") ?? undefined) !== this.site) return;
       parsed.searchParams.delete("embed");
       await vscode.env.openExternal(vscode.Uri.parse(parsed.toString()));
     } catch (err: any) {
@@ -63,7 +66,7 @@ export class DiffTab implements vscode.Disposable {
   private html(): string {
     const init = this.life.init!;
     const origin = serverOrigin(this.life.serverUrl).origin;
-    const src = diffUrl(this.life.serverUrl, init.sessionId, this.pagePath, true).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    const src = diffUrl(this.life.serverUrl, init.sessionId, this.pagePath, true, this.site).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     const nonce = crypto.randomBytes(16).toString("base64");
     return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">

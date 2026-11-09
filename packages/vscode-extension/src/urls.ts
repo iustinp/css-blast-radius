@@ -11,7 +11,7 @@ export function isLocalServer(url: URL): boolean {
   return url.hostname === "127.0.0.1" || url.hostname === "localhost";
 }
 
-export function diffUrl(serverUrl: string, sessionId: string, pagePath: string, embed = false): string {
+export function diffUrl(serverUrl: string, sessionId: string, pagePath: string, embed = false, site?: string): string {
   const origin = serverOrigin(serverUrl).origin;
-  return `${origin}/diff?s=${encodeURIComponent(sessionId)}&url=${encodeURIComponent(pagePath)}${embed ? "&embed=1" : ""}`;
+  return `${origin}/diff?s=${encodeURIComponent(sessionId)}${site ? `&site=${encodeURIComponent(site)}` : ""}&url=${encodeURIComponent(pagePath)}${embed ? "&embed=1" : ""}`;
 }

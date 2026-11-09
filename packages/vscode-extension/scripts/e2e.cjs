@@ -57,6 +57,7 @@ for (const [name, text] of Object.entries({
 process.env.TMPDIR = scratch;
 let server = "";
 let homeId = "";
+let S = "";
 let backend;
 const settings = { server, autoStartServer: false, defaultTab: "", codeLens: false, cursorCount: true, warnLostPages: 10 };
 const events = {};
@@ -304,12 +305,13 @@ async function startBackend() {
   backend = await startServer({ dataDir: path.join(scratch, "data"), port: 0, l1Workers: 0, log: () => {} });
   server = settings.server = backend.url;
   const write = (method, url, body) => json(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  await write("PUT", "/api/site", { siteFolder: siteDir, devices: ["desktop"] });
-  await write("POST", "/api/groups", { name: "All pages", source: { type: "paste" }, urls: ["/index.html", "/about.html", "/contact.html"], scan: false });
-  homeId = (await write("POST", "/api/groups", { name: "Home & About", source: { type: "paste" }, urls: ["/index.html", "/about.html"], scan: false })).id;
-  await json("/api/rescan-all", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-  await backend.app.jobs.idle();
-  const scanned = (await json("/api/state")).groups.find((g) => g.id === homeId);
+  const siteId = (await write("POST", "/api/sites", { siteFolder: siteDir, devices: ["desktop"] })).id;
+  S = `/api/sites/${siteId}`;
+  await write("POST", `${S}/groups`, { name: "All pages", source: { type: "paste" }, urls: ["/index.html", "/about.html", "/contact.html"], scan: false });
+  homeId = (await write("POST", `${S}/groups`, { name: "Home & About", source: { type: "paste" }, urls: ["/index.html", "/about.html"], scan: false })).id;
+  await json(`${S}/rescan-all`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  await backend.app.site(siteId).jobs.idle();
+  const scanned = (await json("/api/state")).sites[0].groups.find((g) => g.id === homeId);
   assert(scanned?.ok === 2, `fixture scan failed: ${JSON.stringify(scanned)}`);
 }
 
@@ -483,13 +485,13 @@ async function run() {
       assert.equal((await json(`/api/diff?s=${scope}&url=%2Fabout.html`)).status, "changed");
     });
     await check("pause: groups/changed updates linked counts without an editor save", async () => {
-      const res = await json(`/api/groups/${homeId}`, {
+      const res = await json(`${S}/groups/${homeId}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: false }),
       });
       assert.equal(res.active, false);
       await waitFor(() => !statusItem.text.includes("2 pages") && statusItem.text.includes("0 pages"), "count after group pause");
       assert.deepEqual((await json("/api/state")).projects.find((p) => p.root === workspace)?.groups, [homeId], "link should remain while the group is paused");
-      await json(`/api/groups/${homeId}`, {
+      await json(`${S}/groups/${homeId}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: true }),
       });
       await waitFor(() => statusItem.text.includes("2 pages"), "count after group resumes");

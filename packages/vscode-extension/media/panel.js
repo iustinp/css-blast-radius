@@ -462,7 +462,7 @@
         row.classList.add("impact");
         row.style.setProperty("--heat", `${Math.round(h * 100)}%`);
       }
-      const open = () => vscode.postMessage({ type: "page", url: p.url });
+      const open = () => vscode.postMessage({ type: "page", url: p.url, site: p.site });
       row.addEventListener("click", open);
       row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
       row.append(el("div", "url", p.url));
@@ -470,7 +470,8 @@
         p.set === "possible" ? "may match" : p.set === "unknown" ? "not checked" : ""].filter(Boolean);
       if (details.length) row.append(el("div", "muted detail", details.join(" · ")));
       if (p.impact) row.append(el("div", `detail impact-${p.impact.status}${p.impact.status === "changed" ? "" : " muted"}`, impactText(p.impact)));
-      if (losses[p.url]) row.append(el("div", "warning detail", `⚠ loses ${losses[p.url].join(", ")}`));
+      const key = p.site ? `${p.site} ${p.url}` : p.url;
+      if (losses[key]) row.append(el("div", "warning detail", `⚠ loses ${losses[key].join(", ")}`));
       else if (filters.side === "lost") row.append(el("div", "warning detail", "⚠ loses this style"));
       list.append(row);
     }

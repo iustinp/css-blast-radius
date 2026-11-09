@@ -26,7 +26,7 @@ type FromWebview =
   | { type: "rule"; path: string; changeId: string; seq: number }
   | { type: "goto"; path: string; changeId: string }
   | { type: "copy"; text: string }
-  | { type: "page"; url: string };
+  | { type: "page"; url: string; site?: string };
 
 interface Chip {
   path: string;
@@ -336,8 +336,9 @@ export class PagesPanel implements vscode.Disposable {
       .map((ch) => ({ urls: this.lostPages.get(`${f.path}\n${ch.id}`), label: ch.label })));
     const out: Record<string, string[]> = {};
     for (const p of pages) {
-      const labels = [...new Set(lossy.filter((e) => e.urls?.has(p.url)).map((e) => e.label))];
-      if (labels.length) out[p.url] = labels;
+      const key = pageKey(p);
+      const labels = [...new Set(lossy.filter((e) => e.urls?.has(key)).map((e) => e.label))];
+      if (labels.length) out[key] = labels;
     }
     return { pages: out, missing: lossy.some((e) => !e.urls) };
   }
@@ -357,7 +358,7 @@ export class PagesPanel implements vscode.Disposable {
         } catch {
           return;
         }
-        for (const item of page.pages) urls.add(item.url);
+        for (const item of page.pages) urls.add(pageKey(item));
         offset += page.pages.length;
         if (!page.pages.length || offset >= page.total) {
           cache.set(`${f.path}\n${ch.id}`, urls);
@@ -470,7 +471,7 @@ export class PagesPanel implements vscode.Disposable {
         return this.load(0);
       }
       case "page":
-        if (m.url.startsWith("/") && !m.url.startsWith("//")) DiffTab.open(this.life, m.url);
+        if (m.url.startsWith("/") && !m.url.startsWith("//")) DiffTab.open(this.life, m.url, m.site);
         return;
       case "rule":
         return this.rule(m.path, m.changeId, m.seq);
@@ -535,4 +536,9 @@ export class PagesPanel implements vscode.Disposable {
     for (const s of this.subs) s.dispose();
     this.panel.dispose();
   }
+}
+
+/** A listed page across sites: the webview keys loss notes the same way. */
+function pageKey(p: { url: string; site?: string }): string {
+  return p.site ? `${p.site} ${p.url}` : p.url;
 }

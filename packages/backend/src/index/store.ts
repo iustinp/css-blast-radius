@@ -88,9 +88,13 @@ export class Store {
   readonly db: Database.Database;
   readonly blobDir: string;
 
-  constructor(readonly dataDir: string) {
+  /** `blobDir`: page files are content-addressed, so several stores can share one folder. */
+  constructor(
+    readonly dataDir: string,
+    blobDir = join(dataDir, "blobs"),
+  ) {
     mkdirSync(dataDir, { recursive: true });
-    this.blobDir = join(dataDir, "blobs");
+    this.blobDir = blobDir;
     mkdirSync(this.blobDir, { recursive: true });
     this.db = new Database(join(dataDir, "index.sqlite"));
     this.db.pragma("journal_mode = WAL");

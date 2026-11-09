@@ -15,8 +15,14 @@ export function need(p: any, k: string): any {
   return p[k];
 }
 
+/** What answers editor methods: a session, or the server's project spanning several sites. */
+export type Answerer = Pick<
+  Session,
+  "status" | "open" | "change" | "save" | "close" | "setTab" | "setSelection" | "sessionTotal" | "ruleCounts" | "fileAnswer" | "getPages" | "changeDetail" | "liveEdits" | "liveOriginal" | "drilldown" | "openLive" | "pageDiff" | "assess"
+>;
+
 /** undefined: not a session method. */
-export function sessionMethod(session: Session, method: string, p: any): Promise<unknown> | undefined {
+export function sessionMethod(session: Answerer, method: string, p: any): Promise<unknown> | undefined {
   const run = (fn: () => unknown) => Promise.resolve().then(fn);
   switch (method) {
     case "workspace/attach":
@@ -68,7 +74,7 @@ export function sessionMethod(session: Session, method: string, p: any): Promise
         return session.openLive(p);
       });
     case "analysis/pageDiff":
-      return run(() => session.pageDiff({ url: need(p, "url"), device: p.device, live: !!p.live }));
+      return run(() => session.pageDiff({ url: need(p, "url"), device: p.device, live: !!p.live, ...(typeof p.site === "string" ? { site: p.site } : {}) }));
     case "analysis/assess":
       return run(() => session.assess(p ?? {}));
     default:

@@ -111,6 +111,9 @@ export interface GroupInfo {
   name: string;
   active: boolean;
   pages: number;
+  /** The site the group belongs to: its id and name. */
+  site: string;
+  siteName: string;
 }
 
 export interface InitializeParams {
@@ -286,6 +289,9 @@ export interface PageItem {
   template?: string;
   /** Names of the linked page groups the page is in (server mode). */
   groups?: string[];
+  /** Server mode: the page's site (pass it back to page-level methods). */
+  site?: string;
+  siteName?: string;
   /** After an impact assessment: what the page looks like with your edits. */
   impact?: PageImpact;
 }
@@ -344,6 +350,8 @@ export interface AssessProgress {
 
 export interface DrilldownParams {
   path: string;
+  /** Server mode: the page's site (PageItem.site); absent: the project's first site. */
+  site?: string;
   changeId?: string;
   /** Without changeId: elements of the rule starting on this line. */
   line?: number;
@@ -377,6 +385,7 @@ export interface DrilldownResult {
 
 export interface OpenLiveParams {
   path: string;
+  site?: string;
   changeId?: string;
   line?: number;
   editRevision?: number;
@@ -430,6 +439,7 @@ export interface PageDiffView {
 
 export interface PageDiffParams {
   url: string;
+  site?: string;
   device?: string;
   live?: boolean;
 }

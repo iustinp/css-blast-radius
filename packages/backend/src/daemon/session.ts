@@ -422,6 +422,12 @@ export class Session extends EventEmitter {
     return this.sessionTotal();
   }
 
+  /** The open documents and the tab (a project's session for another site starts from them). */
+  editorState(): { docs: Array<{ path: string; text: string; version: number }>; tab: Tab; mainChanges: boolean } {
+    const docs = [...this.files.values()].filter((f) => f.doc).map((f) => ({ path: f.path, text: f.doc!.text, version: f.doc!.version }));
+    return { docs, tab: this.tab, mainChanges: this.mainChanges };
+  }
+
   /** A window attached alone: files earlier windows left open are closed (the editor reopens its own). */
   async closeAll(): Promise<void> {
     let closed = false;

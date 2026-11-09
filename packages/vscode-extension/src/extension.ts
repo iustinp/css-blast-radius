@@ -261,12 +261,20 @@ export function activate(ctx: vscode.ExtensionContext): void {
         const groups = await client.call<GroupInfo[]>("groups/list");
         const linked = new Set(linkedGroups());
         const setup = { label: "$(link-external) Open setup page", description: "Add or manage groups", id: "" };
-        const picks = await vscode.window.showQuickPick(
-          [...groups.map((g) => ({
+        const several = new Set(groups.map((g) => g.site)).size > 1;
+        const items: Array<vscode.QuickPickItem & { id: string }> = [];
+        let site: string | undefined;
+        for (const g of [...groups].sort((a, b) => a.siteName.localeCompare(b.siteName) || a.site.localeCompare(b.site))) {
+          if (several && g.site !== site) items.push({ label: g.siteName, kind: vscode.QuickPickItemKind.Separator, id: "" });
+          site = g.site;
+          items.push({
             label: g.name,
             description: g.active ? `${g.pages.toLocaleString("en-US")} pages` : "paused",
             picked: linked.has(g.id), id: g.id,
-          })), setup],
+          });
+        }
+        const picks = await vscode.window.showQuickPick(
+          [...items, setup],
           { title: "Link page groups to this project", placeHolder: "Choose the groups whose pages your CSS edits may affect", canPickMany: true },
         );
         if (!picks) return;

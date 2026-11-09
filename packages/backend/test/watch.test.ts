@@ -77,8 +77,11 @@ describe("watcher: keeps the scan up to date", () => {
       fs.copyFileSync(path.join(dev, rel), path.join(site, rel));
     }
   };
+  let siteId = "";
+  const app = () => srv.app.site(siteId);
+  const mine = (st: any) => st.sites.find((x: any) => x.id === siteId);
   const api = async (method: string, p: string, body?: unknown) => {
-    const res = await fetch(`${srv.url}/api${p}`, {
+    const res = await fetch(`${srv.url}/api${p === "/sites" ? p : `/sites/${siteId}${p}`}`, {
       method,
       headers: method !== "GET" ? { "Content-Type": "application/json" } : {},
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -87,18 +90,18 @@ describe("watcher: keeps the scan up to date", () => {
     if (!res.ok) throw new Error(`${method} ${p}: ${res.status} ${JSON.stringify(json)}`);
     return json;
   };
-  const captured = () => new Map(srv.app.index()!.pages.map((p) => [p.url, p.capturedAt]));
+  const captured = () => new Map(app().index()!.pages.map((p) => [p.url, p.capturedAt]));
   /** One check, then the job it queued; returns the status and the pages rescanned. */
   const check = async () => {
     const before = captured();
     const st = await api("POST", "/watch/check");
-    await srv.app.jobs.idle();
+    await app().jobs.idle();
     const after = captured();
     const rescanned = PAGES.filter((u) => after.get(u) !== before.get(u));
-    return { watch: st.watch, rescanned };
+    return { watch: mine(st).watch, rescanned };
   };
   const sheetHash = (pageUrl: string, file: string) => {
-    const row = srv.app.index()!.pages.find((p) => p.url === pageUrl)!;
+    const row = app().index()!.pages.find((p) => p.url === pageUrl)!;
     const v = row.assets[`${siteUrl}${file}`];
     return v?.slice(0, v.indexOf(" "));
   };
@@ -157,11 +160,11 @@ describe("watcher: keeps the scan up to date", () => {
     siteUrl = `http://127.0.0.1:${(siteServer.address() as AddressInfo).port}`;
 
     srv = await startServer({ dataDir: path.join(tmp, "data"), port: 0, l1Workers: 0, watch: false, log: (m) => logs.push(m) });
-    await api("PUT", "/site", { siteUrl, devices: ["desktop"] });
+    siteId = (await api("POST", "/sites", { siteUrl, devices: ["desktop"] })).id;
     await api("POST", "/groups", { name: "All pages", source: { type: "paste" }, urls: PAGES, scan: true });
-    await srv.app.jobs.idle();
-    expect(srv.app.index()!.pages.filter((p) => p.status === "ok").map((p) => p.url).sort()).toEqual([...PAGES].sort());
-    srv.app.watcher.settleMs = 60_000;
+    await app().jobs.idle();
+    expect(app().index()!.pages.filter((p) => p.status === "ok").map((p) => p.url).sort()).toEqual([...PAGES].sort());
+    app().watcher.settleMs = 60_000;
   }, 120_000);
 
   afterAll(async () => {
@@ -178,22 +181,22 @@ describe("watcher: keeps the scan up to date", () => {
   });
 
   it("records what each page loaded, nav fragment included", () => {
-    const row = srv.app.index()!.pages.find((p) => p.url === "/cards.html")!;
+    const row = app().index()!.pages.find((p) => p.url === "/cards.html")!;
     expect(Object.keys(row.loaded ?? {}).sort()).toEqual(["/blocks/cards/cards.css", "/blocks/cards/cards.js", "/nav.plain.html", "/scripts/scripts.js", "/styles/styles.css"]);
-    const about = srv.app.index()!.pages.find((p) => p.url === "/about.html")!;
+    const about = app().index()!.pages.find((p) => p.url === "/about.html")!;
     expect(Object.keys(about.loaded ?? {})).not.toContain("/nav.plain.html");
   });
 
   it("finds the repository and reports a fresh scan as up to date", async () => {
     const head = git(dev, "rev-parse", "HEAD");
     await api("PUT", "/watch", { repo });
-    srv.app.watcher.settleMs = 60_000;
+    app().watcher.settleMs = 60_000;
     const { watch, rescanned } = await check();
     expect(watch.enabled).toBe(true);
     expect(watch.code).toMatchObject({ state: "up-to-date", repo, branch: "main", scanCommit: head, mainCommit: head, behind: 0 });
     expect(watch.content.state).toBe("up-to-date");
     expect(rescanned).toEqual([]);
-    expect(srv.app.jobs.lastResult?.message ?? "").not.toMatch(/changed on the site/);
+    expect(app().jobs.lastResult?.message ?? "").not.toMatch(/changed on the site/);
   });
 
   it("rescans only the pages that loaded a changed script", async () => {
@@ -252,10 +255,10 @@ describe("watcher: keeps the scan up to date", () => {
 
   it("records the new stylesheet for a paused group's pages without rescanning them", async () => {
     const g = await api("POST", "/groups", { name: "Library", source: { type: "paste" }, urls: [LIB], scan: true });
-    await srv.app.jobs.idle();
+    await app().jobs.idle();
     await api("PATCH", `/groups/${g.id}`, { active: false });
     expect((await check()).watch.code.state).toBe("up-to-date");
-    const at = () => srv.app.index()!.pages.find((p) => p.url === LIB)!.capturedAt;
+    const at = () => app().index()!.pages.find((p) => p.url === LIB)!.capturedAt;
     const was = at();
     write("tools/library/library.css", `.library { color: green; }\n`);
     const sha = push("library color");
@@ -267,7 +270,7 @@ describe("watcher: keeps the scan up to date", () => {
     // The editor compares tools/library/library.css with this copy: it matches the deployed branch now.
     const now = await servedHash("tools/library/library.css");
     expect(sheetHash(LIB, "/tools/library/library.css")).toBe(now);
-    expect(srv.app.index()!.sheets.get("/tools/library/library.css")?.hash).toBe(now);
+    expect(app().index()!.sheets.get("/tools/library/library.css")?.hash).toBe(now);
     const again = await check();
     expect(again.watch.code).toMatchObject({ state: "up-to-date", scanCommit: sha, behind: 0 });
   }, 60_000);
@@ -288,9 +291,9 @@ describe("watcher: keeps the scan up to date", () => {
   it("adds pages new in the query index to the nearest sitemap group and scans them", async () => {
     const blog = await api("POST", "/groups", { name: "Blog", source: { type: "sitemap", url: "/sitemap-blog.xml" }, scan: true });
     const main = await api("POST", "/groups", { name: "Main", source: { type: "sitemap", url: "/sitemap-main.xml" }, scan: true });
-    await srv.app.jobs.idle();
-    const urls = (id: string) => srv.app.groups.get(id).urls;
-    const status = (u: string) => srv.app.index()!.pages.find((p) => p.url === u)?.status;
+    await app().jobs.idle();
+    const urls = (id: string) => app().groups.get(id).urls;
+    const status = (u: string) => app().index()!.pages.find((p) => p.url === u)?.status;
     expect((await check()).watch.content.state).toBe("up-to-date");
 
     const old = Math.floor(Date.now() / 1000) - 600;
@@ -303,7 +306,7 @@ describe("watcher: keeps the scan up to date", () => {
     expect(status("/blog/two")).toBe("ok");
     expect(status("/careers/jobs")).toBe("ok");
     // Fragments, hidden paths and hand-picked lists are left alone.
-    expect(srv.app.groups.all().some((g) => g.urls.some((u) => u === "/footer" || u.startsWith("/.hidden")))).toBe(false);
+    expect(app().groups.all().some((g) => g.urls.some((u) => u === "/footer" || u.startsWith("/.hidden")))).toBe(false);
     expect((await check()).watch.content.state).toBe("up-to-date");
 
     // Off: a page created meanwhile isn't added, not even once it's back on.
@@ -318,7 +321,7 @@ describe("watcher: keeps the scan up to date", () => {
 
   it("can be turned off", async () => {
     const st = await api("PUT", "/watch", { enabled: false });
-    expect(st.watch.enabled).toBe(false);
+    expect(mine(st).watch.enabled).toBe(false);
     const { watch } = await check();
     expect(watch.code.state).toBe("off");
     expect(watch.content.state).toBe("off");
