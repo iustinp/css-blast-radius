@@ -336,6 +336,8 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
       expect(ch).toMatchObject({ kind: "script", line: 4, selector: "Line 4", reasons: ["script-loaded"] });
       expect(ch.pages).toEqual({ exact: 0, possible: 2, unknown: 0, complete: true });
       expect(res.session.files.find((f) => f.file === jsPath)?.changes).toBe(1);
+      expect(res.session.byKind.js).toEqual({ exact: 0, possible: 2, unknown: 0, complete: true });
+      expect(res.session.byKind.css).toMatchObject({ exact: 0, possible: 0, unknown: 0 });
 
       const pages = await session.getPages({ path: jsPath });
       expect(pages.pages.map((p) => p.url.replace(/^.*\//, "")).sort()).toEqual(["about.html", "index.html"]);

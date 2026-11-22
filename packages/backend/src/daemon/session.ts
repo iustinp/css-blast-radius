@@ -907,15 +907,20 @@ export class Session extends EventEmitter {
       for (const x of r.answer.totalReasons) reasons.add(x);
     }
     const cssCount = total.count(pending);
+    const js = Sets.empty(size);
     for (const s of this.scripts.changed()) {
       files.push({ file: s.path, pages: s.r.answer.total, changes: s.r.hunks.length, open: s.open });
-      if (this.index) total.orInPlace(s.r.sets);
+      if (this.index) {
+        total.orInPlace(s.r.sets);
+        js.orInPlace(s.r.sets);
+      }
       for (const x of s.r.answer.totalReasons) reasons.add(x);
     }
     if (files.length === 0) reasons.add(REASON.noEffectiveChange);
     if (!this.index) reasons.add(REASON.noIndex);
     // Script pages are "possible" for good (nothing refines them yet): only CSS decides completeness.
-    const count: Count = this.index ? { ...total.count(pending), complete: cssCount.complete } : { exact: 0, possible: 0, unknown: 0, complete: false };
+    const none: Count = { exact: 0, possible: 0, unknown: 0, complete: false };
+    const count: Count = this.index ? { ...total.count(pending), complete: cssCount.complete } : none;
     const bp = this.branch;
     return {
       editRevision: this.editRevision,
@@ -924,6 +929,7 @@ export class Session extends EventEmitter {
       total: count,
       reasons: [...reasons],
       files,
+      byKind: this.index ? { css: cssCount, js: { ...js.count(false), complete: true } } : { css: none, js: none },
       branch: bp && { name: bp.branch, mainRef: bp.mainRef, behind: bp.behind, mainShown: this.mainChanges },
     };
   }

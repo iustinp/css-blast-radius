@@ -299,6 +299,7 @@ export class Project extends EventEmitter {
       total,
       reasons: reasons(all.map((t) => ({ count: t.total, reasons: t.reasons }))),
       files,
+      byKind: { css: all.reduce((s, t) => add(s, t.byKind.css), ZERO), js: all.reduce((s, t) => add(s, t.byKind.js), ZERO) },
       ...(branch ? { branch } : {}),
     };
   }

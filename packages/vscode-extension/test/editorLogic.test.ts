@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { changeAtCursor, ghostText, reasonText, shortReason } from "../src/format";
 import { ExternalNoticeBatch } from "../src/externalNotice";
 import { diffUrl, isLocalServer, serverOrigin } from "../src/urls";
-import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "../src/selection";
+import { fileState, isPicked, kindState, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toggleKind, toWire, type FileEdits, type Picked } from "../src/selection";
 import type { ChangeAnswer, Count, FileAnswer, RuleCount, SessionTotal } from "../src/protocol";
 
 const count = (exact: number, possible = 0): Count => ({ exact, possible, unknown: 0, complete: true });
@@ -149,6 +149,23 @@ describe("picking edits in the panel", () => {
     expect(states(sel)).toEqual(["some", "none"]);
     sel = toggleFile(sel, files, "/a.css");
     expect(states(sel)).toEqual(["all", "none"]);
+  });
+
+  it("picks or unpicks the CSS or the JS edits as a whole", () => {
+    const mixed: FileEdits[] = [...files, { path: "/app.js", ids: ["s1", "s2"] }];
+    let sel = toggleKind(undefined, mixed, "js");
+    expect(kindState(sel, mixed, "js")).toBe("none");
+    expect(kindState(sel, mixed, "css")).toBe("all");
+    expect(toWire(sel)).toEqual([{ path: "/a.css" }, { path: "/b.css" }]);
+    sel = toggleKind(sel, mixed, "css");
+    expect(toWire(sel)).toEqual([]);
+    // Part of a kind picked: the click picks all of it, the other kind stays.
+    sel = toggleChange(sel, mixed, "/app.js", "s1");
+    expect(kindState(sel, mixed, "js")).toBe("some");
+    sel = toggleKind(sel, mixed, "js");
+    expect(toWire(sel)).toEqual([{ path: "/app.js" }]);
+    sel = toggleKind(sel, mixed, "css");
+    expect(sel).toBeUndefined();
   });
 
   it("keeps the picks while no edits are known (reconnecting)", () => {

@@ -230,7 +230,12 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     }
     const s = this.state.session;
     const warn = st?.health === "DEGRADED" || this.state.degraded ? " $(warning)" : "";
-    item.text = `◎ ${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
+    const hasJs = !!s?.files.some((f) => /\.[mc]?js$/i.test(f.file));
+    const hasCss = !!s?.files.some((f) => !/\.[mc]?js$/i.test(f.file));
+    const split = hasJs && hasCss && s?.byKind;
+    item.text = split
+      ? `◎ CSS ${formatCount(split.css)} · JS loaded by ${formatCount(split.js)}${warn}`
+      : `◎ ${hasJs && !hasCss ? "loaded by " : ""}${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["cssBlastRadius.showAllPages", "cssBlastRadius.linkGroups"] };
     const tab = s?.tab ?? st?.tab ?? "all";
@@ -239,7 +244,9 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     if (note) md.appendMarkdown(`${note}\n\n`);
     md.appendMarkdown(`Linked groups: ${st.scope.groups.map((g) => g.name.replace(/[\\`*_~\[\]<>]/g, "\\$&") + (g.active ? "" : " (paused)")).join(", ") || "none"} (${st.scope.pages.toLocaleString("en-US")} active pages)\n\n`);
     if (s?.files.length) {
-      md.appendMarkdown(`Your edits reach ${countLine(s.total)} pages\n\n`);
+      md.appendMarkdown(split
+        ? `Your CSS edits reach ${countLine(split.css)} pages; the edited scripts are loaded by ${countLine(split.js)} pages\n\n`
+        : `Your edits reach ${countLine(s.total)} pages\n\n`);
       for (const f of s.files.slice(0, 12)) {
         md.appendMarkdown(`- \`${vscode.workspace.asRelativePath(f.file)}\`: ${formatCount(f.pages)} (${f.changes} change${f.changes === 1 ? "" : "s"})\n`);
       }

@@ -160,6 +160,8 @@ export interface SessionTotal {
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
+  /** The pages of the CSS edits and of the script edits, apart (`total` is both together). */
+  byKind: { css: Count; js: Count };
   /**
    * On a git branch: by default only the branch's own changes
    * count and the `behind` newer commits of the deployed branch (`mainRef`) are

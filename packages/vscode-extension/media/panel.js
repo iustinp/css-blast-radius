@@ -71,7 +71,9 @@
     return node;
   }
 
-  function renderChips(chips, count, all) {
+  const KIND_TITLE = { css: "CSS", js: "JS" };
+
+  function renderChips(chips, count, all, kinds) {
     const box = $("chips");
     // Rebuilding the list would drop its scroll position: keep the clicked edit in place.
     const top = box.scrollTop;
@@ -79,6 +81,12 @@
     const some = chips.some((f) => f.state !== "none");
     box.replaceChildren(toggle(`All edits · ${fmt(count.exact + count.possible + count.unknown)}`,
       all ? "all" : some ? "some" : "none", {}, all ? "Click to unpick every edit" : "Click to pick every edit"));
+    for (const k of kinds || []) {
+      const name = KIND_TITLE[k.kind];
+      const n = fmt(k.count.exact + k.count.possible + k.count.unknown);
+      box.append(toggle(`${name} · ${k.kind === "js" ? `loaded by ${n}` : n}`, k.state, { kind: k.kind },
+        k.state === "all" ? `Click to unpick the ${name} edits` : `Click to pick all the ${name} edits`));
+    }
     for (const file of chips) {
       const group = el("div", "file-chips");
       group.append(el("div", "file-name", file.label));
@@ -606,7 +614,7 @@
     }
     rows.push(...m.result.pages);
     for (const [url, labels] of Object.entries(m.losses || {})) losses[url] = [...new Set([...(losses[url] || []), ...labels])];
-    renderChips(m.chips, m.allCount || count, m.all);
+    renderChips(m.chips, m.allCount || count, m.all, m.kinds);
     if (!m.append && cardKey !== null) requestDetail(cardKey);
     renderSides();
     renderSets(count);

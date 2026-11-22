@@ -6,10 +6,10 @@ import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
 import { TABS, branchNote, editSides, effectiveTab, formatCount, mainName, scanLine, span } from "./format";
-import { ERR, type AssessProgress, type ChangeDetail, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName, type Tab } from "./protocol";
+import { ERR, type AssessProgress, type ChangeDetail, type Count, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName, type Tab } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
-import { fileState, isPicked, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toWire, type FileEdits, type Picked } from "./selection";
+import { fileState, isPicked, kindOf, kindState, normalize, pickedCount, single, toggleAll, toggleChange, toggleFile, toggleKind, toWire, type EditKind, type FileEdits, type Picked } from "./selection";
 
 const PAGE_SIZE = 100;
 type Side = "pages" | "gained" | "lost";
@@ -17,7 +17,7 @@ type Side = "pages" | "gained" | "lost";
 type FromWebview =
   | { type: "ready" }
   | { type: "load"; set: PageSetName | "all"; group?: string; side?: Side; offset: number; editRevision?: number }
-  | { type: "toggle"; path?: string; changeId?: string }
+  | { type: "toggle"; path?: string; changeId?: string; kind?: EditKind }
   | { type: "search"; query: string }
   | { type: "searchMore"; query: string; offset: number }
   | { type: "assess" }
@@ -175,6 +175,14 @@ export class PagesPanel implements vscode.Disposable {
     });
   }
 
+  /** The CSS and JS chips, when edits of both kinds exist: their pages apart, and how much of each is picked. */
+  private kinds(): Array<{ kind: EditKind; count: Count; state: "all" | "some" | "none" }> | undefined {
+    const files = this.files;
+    const by = this.state.session?.byKind;
+    if (!by || !files.some((f) => kindOf(f.path) === "js") || !files.some((f) => kindOf(f.path) === "css")) return undefined;
+    return (["css", "js"] as const).map((kind) => ({ kind, count: by[kind], state: kindState(this.picked, files, kind) }));
+  }
+
   private get files(): FileEdits[] {
     return this.lastChips.map((c) => ({ path: c.path, ids: c.changes.map((ch) => ch.id) }));
   }
@@ -271,7 +279,7 @@ export class PagesPanel implements vscode.Disposable {
         summary: formatCount(res.count), allCount: this.state.session?.total,
         scopePages: this.state.status?.scope.pages ?? 0,
         ms, lost, lostChanges, chips, target: t, filters: this.filters,
-        all: !this.picked, pickedEdits: pickedCount(this.picked, this.files),
+        all: !this.picked, pickedEdits: pickedCount(this.picked, this.files), kinds: this.kinds(),
         ruleList, sides: !ruleList && one && one.chip.sides.length > 1 ? one.chip.sides : undefined,
         single: !ruleList && one ? one.chip.label : undefined,
         branchNote: branchNote(this.state.session?.branch),
@@ -460,7 +468,9 @@ export class PagesPanel implements vscode.Disposable {
         return;
       case "toggle": {
         const files = this.files;
-        this.picked = !m.path
+        this.picked = m.kind
+          ? toggleKind(this.picked, files, m.kind)
+          : !m.path
           ? toggleAll(this.picked, files)
           : m.changeId
             ? toggleChange(this.picked, files, m.path, m.changeId)

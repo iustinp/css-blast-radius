@@ -199,6 +199,8 @@ export interface SessionTotal {
   total: Count;
   reasons: string[];
   files: Array<{ file: string; pages: Count; changes: number; open: boolean }>;
+  /** The pages of the CSS edits and of the script edits, apart (`total` is both together). */
+  byKind?: { css: Count; js: Count };
   /**
    * Live-site base on a git branch, `behind` the deployed one: its newer
    * changes count only when `mainShown` (missing before protocol 1.3).

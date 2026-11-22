@@ -30,6 +30,32 @@ export function pickedCount(sel: Picked, files: FileEdits[]): number {
   return files.reduce((n, f) => n + f.ids.filter((id) => isPicked(sel, f.path, id)).length, 0);
 }
 
+export type EditKind = "css" | "js";
+
+export function kindOf(path: string): EditKind {
+  return /\.[mc]?js$/i.test(path) ? "js" : "css";
+}
+
+/** Whether the files of one kind (CSS or JS) are all, some or none picked. */
+export function kindState(sel: Picked, files: FileEdits[], kind: EditKind): "all" | "some" | "none" {
+  const states = files.filter((f) => kindOf(f.path) === kind).map((f) => fileState(sel, f));
+  if (!states.length) return "none";
+  return states.every((s) => s === "all") ? "all" : states.every((s) => s === "none") ? "none" : "some";
+}
+
+/** All of a kind picked → unpicks its files; otherwise picks them all. The other kind stays as it is. */
+export function toggleKind(sel: Picked, files: FileEdits[], kind: EditKind): Picked {
+  const mine = files.filter((f) => kindOf(f.path) === kind);
+  if (!mine.length) return sel;
+  const on = kindState(sel, files, kind) !== "all";
+  const next = expand(sel, files);
+  for (const f of mine) {
+    if (on) next.set(f.path, "all");
+    else next.delete(f.path);
+  }
+  return normalize(next, files);
+}
+
 /** Everything picked → nothing; otherwise → everything. */
 export function toggleAll(sel: Picked, files: FileEdits[]): Picked {
   return files.length && files.every((f) => fileState(sel, f) === "all") ? new Map() : undefined;

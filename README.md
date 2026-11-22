@@ -121,7 +121,7 @@ In a git repository, only **your branch's changes** count: if `main` has moved o
   - **N** jumps to the next change;
   - **Check on the live page** loads the real page instead of the stored copy;
   - **Open in browser** opens the same view outside VS Code.
-- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, for now only by the pages that load them: each changed run of lines shows `◀ loaded by 40 pages`, compared with the version the scan saw (read from git by its blob id). Whether the edit runs on those pages isn't checked yet, and the before/after view doesn't apply script edits ([#5](https://github.com/iustinp/css-blast-radius/issues/5)).
+- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, for now only by the pages that load them: each changed run of lines shows `◀ loaded by 40 pages`, compared with the version the scan saw (read from git by its blob id). Whether the edit runs on those pages isn't checked yet, and the before/after view doesn't apply script edits ([#5](https://github.com/iustinp/css-blast-radius/issues/5)). With both kinds edited, the panel's **CSS** and **JS** chips (next to *All edits*) pick or unpick each kind like the edit chips, so you can look at CSS only, JS only or both, and the status bar shows the two counts apart.
 - If CSS files change outside the editor (a pull, a branch switch, another tool) and that moves the total, a notice says how: `now 40 pages affected (was 12 pages)`. Undoing back to the saved text isn't such a change.
 
 ### 5. See which CSS isn't on the live site yet
