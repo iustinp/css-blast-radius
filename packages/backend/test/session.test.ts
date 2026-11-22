@@ -321,8 +321,8 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
     }
   }, 20_000);
 
-  // j. scripts (#5, J0): an edited script counts the pages that load it
-  it("j. scripts: edits count the pages that load the script, open or closed", async () => {
+  // j. scripts (#5, J0–J1): exact where the edited code ran at load, possible where the script only loads
+  it("j. scripts: edits count the pages where the code ran, and those that load the script", async () => {
     const jsPath = path.join(ws, "js", "app.js");
     const original = fs.readFileSync(jsPath, "utf8");
     const edited = original.replace('"Hello "', '"Hi "');
@@ -333,10 +333,20 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
       expect(res.answer.mapping.urls).toEqual(["/js/app.js"]);
       expect(res.answer.changes).toHaveLength(1);
       const ch = res.answer.changes[0];
-      expect(ch).toMatchObject({ kind: "script", line: 4, selector: "Line 4", reasons: ["script-loaded"] });
-      expect(ch.pages).toEqual({ exact: 0, possible: 2, unknown: 0, complete: true });
+      // greet() runs on the about page only.
+      expect(ch).toMatchObject({ kind: "script", line: 4, selector: "Line 4", reasons: ["script-runs", "script-not-run"] });
+      expect(ch.pages).toEqual({ exact: 1, possible: 1, unknown: 0, complete: true });
       expect(res.session.files.find((f) => f.file === jsPath)?.changes).toBe(1);
-      expect(res.session.byKind.js).toEqual({ exact: 0, possible: 2, unknown: 0, complete: true });
+      expect(res.session.byKind.js).toEqual({ exact: 1, possible: 1, unknown: 0, complete: true });
+      const ran = await session.getPages({ path: jsPath, set: "exact" });
+      expect(ran.pages.map((p) => p.url.replace(/^.*\//, ""))).toEqual(["about.html"]);
+
+      // Top-level code runs on every page that loads the script; each edit keeps its own pages.
+      const both = await session.change(jsPath, 2, [{ text: edited.replace("ready: true", "ready: 1") }]);
+      expect(both.answer.changes.map((c) => [c.line, c.pages.exact, c.pages.possible])).toEqual([[1, 2, 0], [4, 1, 1]]);
+      const top = both.answer.changes[0];
+      expect((await session.getPages({ path: jsPath, changeId: top.id, set: "exact" })).total).toBe(2);
+      await session.change(jsPath, 3, [{ text: edited }]);
       expect(res.session.byKind.css).toMatchObject({ exact: 0, possible: 0, unknown: 0 });
 
       const pages = await session.getPages({ path: jsPath });
@@ -351,7 +361,7 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
       expect((await session.liveOriginal(jsPath)).text).toBe(original);
 
       // Back to the live text: nothing left to count.
-      await session.change(jsPath, 2, [{ text: original }]);
+      await session.change(jsPath, 4, [{ text: original }]);
       expect(session.fileAnswer(jsPath).changes).toEqual([]);
 
       // Closed and changed on disk: still counted.

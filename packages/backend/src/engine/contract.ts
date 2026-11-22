@@ -155,6 +155,12 @@ export const REASON = {
   scriptLoaded: "script-loaded",
   /** No scanned page loads this script. */
   scriptNotLoaded: "script-not-loaded",
+  /** The edited code ran while these pages loaded (scan coverage, J1). */
+  scriptRuns: "script-runs",
+  /** These pages load the script, but the edited code didn't run while they loaded (it may on a click…). */
+  scriptNotRun: "script-not-run",
+  /** These pages load the script, with no coverage of the version edited (older scan, other version). */
+  scriptNoCoverage: "script-no-coverage",
 } as const;
 
 /** Display form of a token: c:foo → .foo, i:x → #x, a:href → [href], t:li → li. */

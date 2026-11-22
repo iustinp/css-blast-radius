@@ -83,8 +83,7 @@
       all ? "all" : some ? "some" : "none", {}, all ? "Click to unpick every edit" : "Click to pick every edit"));
     for (const k of kinds || []) {
       const name = KIND_TITLE[k.kind];
-      const n = fmt(k.count.exact + k.count.possible + k.count.unknown);
-      box.append(toggle(`${name} · ${k.kind === "js" ? `loaded by ${n}` : n}`, k.state, { kind: k.kind },
+      box.append(toggle(`${name} · ${k.label}`, k.state, { kind: k.kind },
         k.state === "all" ? `Click to unpick the ${name} edits` : `Click to pick all the ${name} edits`));
     }
     for (const file of chips) {

@@ -1,9 +1,12 @@
-// JavaScript edits (#5, J0): which pages load the edited script. Scans
-// record every same-site file a page loaded with its git blob id
+// JavaScript edits (#5, J0–J1): which pages the edited script code reaches.
+// Scans record every same-site file a page loaded with its git blob id
 // (`PageRow.loaded`), so a workspace script is matched to those URL paths by
-// name, its live version is read from git by that blob id, and each changed
-// run of lines counts the pages that load the script. Whether the edit runs
-// on a page (and what it does there) isn't checked yet.
+// name and its live version is read from git by that blob id. Scans also
+// record which code ran while each page loaded (`PageRow.coverage`): a changed
+// run of lines counts as exact on the pages where the code it replaces ran,
+// and as possible on the other pages that load the script (it may run after a
+// click; or there is no coverage of the version edited). What the edit does
+// on a page isn't checked yet.
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -12,6 +15,7 @@ import fg from "fast-glob";
 import { REASON, Sets, type ChangeAnswer, type Count, type FileAnswer, type RuleCount } from "../engine/contract.js";
 import { SCRIPT_PATH, type SiteIndex } from "../index/siteIndex.js";
 import type { LiveEdit } from "../rpc/protocol.js";
+import { ranIn } from "../util/coverage.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type TextChange } from "./documents.js";
 import { blobId, readText, type BaseText, type BranchPoint, type Git, type Tab } from "./diffBase.js";
@@ -43,6 +47,8 @@ export interface Hunk {
   id: string;
   start: number;
   end: number;
+  /** Where it is in the base text: its first removed line, or the line the additions go before (1-based). */
+  baseStart: number;
   added: number;
   removed: number;
 }
@@ -63,7 +69,9 @@ interface ScriptState {
 export interface ScriptResult {
   hunks: Hunk[];
   answer: FileAnswer;
-  /** The pages each hunk counts (all the same: the script's). */
+  /** The pages of each hunk, in `hunks` order. */
+  hunkSets: Sets[];
+  /** All of them together. */
   sets: Sets;
 }
 
@@ -102,20 +110,29 @@ export class ScriptTracker {
     return this.matcher.keysFor(path);
   }
 
-  /** Pages that load the file (before the scope), and the blob ids served, most pages first. */
-  private loadedBy(path: string): { pages: PageSet; blobs: string[] } | undefined {
+  /**
+   * Pages that load the file (before the scope), the blob ids served (most
+   * pages first), and per served blob the pages grouped by coverage hash.
+   */
+  private loadedBy(path: string): { pages: PageSet; blobs: string[]; coverage: Map<string, Map<string, PageSet>> } | undefined {
     const idx = this.host.index();
     const keys = this.keysFor(path);
     if (!idx || !keys.length) return undefined;
     const pages = PageSet.empty(idx.size);
     const blobs = new Map<string, number>();
+    const coverage = new Map<string, Map<string, PageSet>>();
     for (const k of keys) {
       const e = idx.scripts.byPath.get(k);
       if (!e) continue;
       pages.orInPlace(e.pages);
       for (const [b, n] of e.blobs) blobs.set(b, (blobs.get(b) ?? 0) + n);
+      for (const [b, byCov] of e.coverage) {
+        let into = coverage.get(b);
+        if (!into) coverage.set(b, (into = new Map()));
+        for (const [h, set] of byCov) into.set(h, into.has(h) ? into.get(h)!.or(set) : set);
+      }
     }
-    return { pages, blobs: [...blobs].sort((a, b) => b[1] - a[1]).map(([b]) => b) };
+    return { pages, blobs: [...blobs].sort((a, b) => b[1] - a[1]).map(([b]) => b), coverage };
   }
 
   // ------------------------------------------------------------ documents
@@ -331,20 +348,46 @@ export class ScriptTracker {
     }
   }
 
-  /** The pages a script's edits count, and why none when empty. */
-  private pagesOf(path: string): { sets: Sets; reason: string; urls: string[]; linked: number } {
+  /** The pages (in scope) that load a script, and why none when empty. */
+  private pagesOf(path: string): { pages: PageSet; reason?: string; urls: string[]; by?: NonNullable<ReturnType<ScriptTracker["loadedBy"]>> } {
     const idx = this.host.index();
-    if (!idx) return { sets: Sets.empty(0), reason: REASON.noIndex, urls: [], linked: 0 };
+    if (!idx) return { pages: PageSet.empty(0), reason: REASON.noIndex, urls: [] };
     const by = this.loadedBy(path);
-    const sets = Sets.empty(idx.size);
     const urls = this.keysFor(path);
-    if (!by) return { sets, reason: REASON.scriptNotLoaded, urls, linked: 0 };
+    if (!by) return { pages: PageSet.empty(idx.size), reason: REASON.scriptNotLoaded, urls };
     const scope = this.host.scope();
     const pages = by.pages.and(idx.all);
     if (scope) pages.andInPlace(scope);
-    sets.possible = pages;
-    const reason = !pages.isEmpty() ? REASON.scriptLoaded : scope?.isEmpty() ? REASON.noScope : REASON.outsideScope;
-    return { sets, reason, urls, linked: pages.count() };
+    const reason = !pages.isEmpty() ? undefined : scope?.isEmpty() ? REASON.noScope : REASON.outsideScope;
+    return { pages, reason, urls, by };
+  }
+
+  /**
+   * One hunk's pages: exact where the code it replaces ran at load (the
+   * coverage of the base version), possible on the other pages loading it.
+   */
+  private hunkPages(h: Hunk, base: BaseText | undefined, lines: number[], loaders: PageSet, by: ReturnType<ScriptTracker["loadedBy"]>): { sets: Sets; reasons: string[] } {
+    const idx = this.host.index()!;
+    const sets = Sets.empty(idx.size);
+    const covered = PageSet.empty(idx.size);
+    const text = base?.text;
+    const byCov = text !== undefined && base?.kind === "production" ? by?.coverage.get(blobId(Buffer.from(text))) : undefined;
+    if (byCov && text !== undefined) {
+      const spans = baseSpans(text, lines, h);
+      for (const [hash, pages] of byCov) {
+        const segs = idx.coverage(hash);
+        if (!segs) continue;
+        const p = pages.and(loaders);
+        covered.orInPlace(p);
+        if (spans.some(([a, b]) => ranIn(segs, a, b))) sets.exact.orInPlace(p);
+      }
+    }
+    sets.possible = loaders.andNot(sets.exact);
+    const reasons: string[] = [];
+    if (!sets.exact.isEmpty()) reasons.push(REASON.scriptRuns);
+    if (!covered.andNot(sets.exact).isEmpty()) reasons.push(REASON.scriptNotRun);
+    if (!loaders.andNot(covered).isEmpty()) reasons.push(covered.isEmpty() ? REASON.scriptLoaded : REASON.scriptNoCoverage);
+    return { sets, reasons };
   }
 
   private result(s: ScriptState, tab: Tab): ScriptResult {
@@ -355,11 +398,15 @@ export class ScriptTracker {
     const text = this.tabText(s, tab) ?? "";
     // Not loaded yet (the scan or tab just changed): nothing to count until it is.
     const hunks = s.base ? diffHunks(s.base.text ?? "", text) : [];
-    const { sets, reason, urls, linked } = this.pagesOf(s.path);
-    const count: Count = idx ? { ...sets.count(false), complete: true } : { ...ZERO, complete: false };
-    const reasons = [reason];
-    const changes: ChangeAnswer[] = hunks.map((h) => ({ id: h.id, kind: "script", line: Math.max(1, Math.min(h.start, h.end)), selector: hunkLabel(h), pages: count, conditions: [], reasons }));
-    const totalReasons = [reason];
+    const { pages: loaders, reason, urls, by } = this.pagesOf(s.path);
+    const lines = lineStarts(s.base?.text ?? "");
+    const per = hunks.map((h) => (idx && !reason ? this.hunkPages(h, s.base, lines, loaders, by) : { sets: Sets.empty(idx?.size ?? 0), reasons: [reason!] }));
+    const sets = Sets.empty(idx?.size ?? 0);
+    for (const p of per) sets.orInPlace(p.sets);
+    const countOf = (x: Sets): Count => (idx ? { ...x.count(false), complete: true } : { ...ZERO, complete: false });
+    const count = countOf(sets);
+    const changes: ChangeAnswer[] = hunks.map((h, i) => ({ id: h.id, kind: "script", line: Math.max(1, Math.min(h.start, h.end)), selector: hunkLabel(h), pages: countOf(per[i].sets), conditions: [], reasons: per[i].reasons }));
+    const totalReasons = reason ? [reason] : [...new Set(per.flatMap((p) => p.reasons))];
     if (s.base?.note) totalReasons.push(`diff-base:${s.base.kind} (${s.base.note})`);
     if (!hunks.length) totalReasons.push(REASON.noEffectiveChange);
     const answer: FileAnswer = {
@@ -373,13 +420,13 @@ export class ScriptTracker {
       total: hunks.length ? count : { ...ZERO, complete: !!idx },
       totalReasons,
       changes,
-      mapping: { mapped: urls.length > 0, urls, linkedPages: linked },
+      mapping: { mapped: urls.length > 0, urls, linkedPages: loaders.count() },
       freshness: null,
       basis: "LOCAL_INDEX",
       timingMs: Math.round((performance.now() - t0) * 100) / 100,
       ...(s.doc && tab !== "all" && text !== s.doc.text ? { matchesEditor: false } : {}),
     };
-    const result = { hunks, answer, sets };
+    const result = { hunks, answer, sets, hunkSets: per.map((p) => p.sets) };
     s.cache = { stamp, result };
     return result;
   }
@@ -428,11 +475,15 @@ export class ScriptTracker {
     const s = this.require(path);
     const tab = line !== undefined && !changeId ? "all" : this.host.tab();
     const r = this.result(s, tab);
-    if (changeId && !r.hunks.some((h) => h.id === changeId)) throw new Error(`change ${changeId} no longer exists`);
-    if (line !== undefined && !changeId && !r.hunks.some((h) => line >= Math.min(h.start, h.end) && line <= Math.max(h.start, h.end))) {
-      throw new Error(`no edit on line ${line}`);
+    let i = -1;
+    if (changeId) {
+      i = r.hunks.findIndex((h) => h.id === changeId);
+      if (i < 0) throw new Error(`change ${changeId} no longer exists`);
+    } else if (line !== undefined) {
+      i = r.hunks.findIndex((h) => line >= Math.min(h.start, h.end) && line <= Math.max(h.start, h.end));
+      if (i < 0) throw new Error(`no edit on line ${line}`);
     }
-    return { sets: r.sets, editRevision: s.editRevision };
+    return { sets: i < 0 ? r.sets : r.hunkSets[i], editRevision: s.editRevision };
   }
 
   detail(path: string, changeId: string): { line: number; summary: string; editRevision: number } | undefined {
@@ -476,13 +527,14 @@ export function diffHunks(before: string, after: string): Hunk[] {
   const out: Hunk[] = [];
   const seen = new Map<string, number>();
   let line = 1;
-  let cur: { start: number; added: string[]; removed: string[] } | undefined;
+  let baseLine = 1;
+  let cur: { start: number; baseStart: number; added: string[]; removed: string[] } | undefined;
   const flush = () => {
     if (!cur) return;
     const key = sha256(`${cur.removed.join("")}\0${cur.added.join("")}`).slice(0, 12);
     const n = seen.get(key) ?? 0;
     seen.set(key, n + 1);
-    out.push({ id: `s:${key}:${n}`, start: cur.start, end: cur.start + cur.added.length - 1, added: cur.added.length, removed: cur.removed.length });
+    out.push({ id: `s:${key}:${n}`, start: cur.start, end: cur.start + cur.added.length - 1, baseStart: cur.baseStart, added: cur.added.length, removed: cur.removed.length });
     cur = undefined;
   };
   for (const part of diffLines(before, after)) {
@@ -490,15 +542,49 @@ export function diffHunks(before: string, after: string): Hunk[] {
     if (!part.added && !part.removed) {
       flush();
       line += lines.length;
+      baseLine += lines.length;
       continue;
     }
-    cur ??= { start: line, added: [], removed: [] };
+    cur ??= { start: line, baseStart: baseLine, added: [], removed: [] };
     if (part.added) {
       cur.added.push(...lines);
       line += lines.length;
-    } else cur.removed.push(...lines);
+    } else {
+      cur.removed.push(...lines);
+      baseLine += lines.length;
+    }
   }
   flush();
+  return out;
+}
+
+/** Offsets where each line starts (index 0: line 1). */
+function lineStarts(text: string): number[] {
+  const out = [0];
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) out.push(i + 1);
+  return out;
+}
+
+/**
+ * The base text a hunk replaces, as offset spans to look up in coverage:
+ * each removed line without its surrounding whitespace (a closing brace
+ * belongs to its function, not the newline after it), or for added lines
+ * only, the point they are inserted at.
+ */
+function baseSpans(text: string, starts: number[], h: Hunk): Array<[number, number]> {
+  const lineStart = (n: number) => (n - 1 < starts.length ? starts[n - 1] : text.length);
+  if (!h.removed) {
+    const at = Math.min(lineStart(h.baseStart), Math.max(0, text.length - 1));
+    return [[at, at]];
+  }
+  const out: Array<[number, number]> = [];
+  for (let n = h.baseStart; n < h.baseStart + h.removed; n++) {
+    let a = lineStart(n);
+    let b = lineStart(n + 1);
+    while (a < b && /\s/.test(text[a])) a++;
+    while (b > a && /\s/.test(text[b - 1])) b--;
+    out.push(a < b ? [a, b] : [lineStart(n), lineStart(n)]);
+  }
   return out;
 }
 

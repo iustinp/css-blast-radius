@@ -2,7 +2,7 @@
 // relaxed site selectors natively, and record what L0/L1/L2 need. Writes a new
 // index revision and publishes it atomically.
 
-import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page, type Route } from "playwright-core";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -12,7 +12,8 @@ import { fileForUrlPath, type CbrConfig, type Profile, type Recipe } from "../co
 import { blobId } from "../daemon/diffBase.js";
 import { parseStylesheet, usageKeysFor, type StylesheetModel } from "../css/model.js";
 import { analyzeComplex } from "../css/selectors.js";
-import { IndexBuilder, SiteIndex, type PagePatch } from "../index/siteIndex.js";
+import { IndexBuilder, SCRIPT_PATH, SiteIndex, type PagePatch } from "../index/siteIndex.js";
+import { executedSegments, unionSegments, type Segments, type V8Function } from "../util/coverage.js";
 import type { PageRow, Store, VariantInfo } from "../index/store.js";
 import { decodeTree, firstMatch, type CompactTree } from "../l1/tree.js";
 import { assetKey, openShell } from "../l2/shell.js";
@@ -269,10 +270,11 @@ export class Capturer {
       capturedAt: new Date().toISOString(),
     };
     const notes: string[] = [];
+    const coverage = new Map<string, Segments>();
     for (const v of this.variants) {
       if (v.recipeDef?.urls && !new RegExp(v.recipeDef.urls).test(url)) continue;
       try {
-        await this.captureVariant(url, id, v, contexts.get(v.profile)!, builder, row);
+        await this.captureVariant(url, id, v, contexts.get(v.profile)!, builder, row, coverage);
       } catch (err: any) {
         const msg = String(err?.message ?? err).split("\n")[0];
         if (v.recipe) notes.push(`${v.name}: ${msg}`);
@@ -284,6 +286,7 @@ export class Capturer {
       }
     }
     if (notes.length) row.error = notes.join("; ");
+    if (coverage.size) row.coverage = Object.fromEntries([...coverage].map(([p, segs]) => [p, this.store.putBlob(JSON.stringify(segs))]));
     builder.setPage(row);
     return row.status === "ok";
   }
@@ -295,6 +298,7 @@ export class Capturer {
     ctx: BrowserContext,
     builder: IndexBuilder,
     row: PageRow,
+    coverage: Map<string, Segments>,
   ): Promise<void> {
     const cfg = this.cfg;
     const full = new URL(url, cfg.origin).href;
@@ -302,6 +306,7 @@ export class Capturer {
     const cssTexts = new Map<string, string>();
     try {
       await page.route("**/*", (route) => this.serve(route, row, cssTexts));
+      const cdp = await startCoverage(page);
       const resp = await page.goto(full, { waitUntil: "load", timeout: cfg.capture.timeoutMs });
       if (!resp || resp.status() >= 400) throw new Error(`HTTP ${resp?.status() ?? "no response"}`);
       await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
@@ -310,6 +315,7 @@ export class Capturer {
         await runRecipe(page, v.recipeDef);
         await page.evaluate(SETTLE_SCRIPT);
       }
+      if (cdp) await this.takeCoverage(cdp, coverage);
       let c = (await page.evaluate(COLLECT_SCRIPT)) as Collected;
 
       // Stylesheets → models → the relaxed selectors this page must evaluate.
@@ -398,6 +404,29 @@ export class Capturer {
     }
   }
 
+  /** The same-site scripts' code that ran, added to the page's (other variants'). */
+  private async takeCoverage(cdp: CDPSession, into: Map<string, Segments>): Promise<void> {
+    try {
+      const { result } = (await cdp.send("Profiler.takePreciseCoverage")) as { result: Array<{ url: string; functions: V8Function[] }> };
+      for (const sc of result) {
+        let path: string;
+        try {
+          const u = new URL(sc.url);
+          if (u.origin !== this.cfg.origin) continue;
+          path = u.pathname;
+        } catch {
+          continue;
+        }
+        if (!SCRIPT_PATH.test(path)) continue;
+        into.set(path, unionSegments(into.get(path) ?? [], executedSegments(sc.functions)));
+      }
+    } catch {
+      /* not Chromium, or the page went away: no coverage, the counts fall back to "loaded by" */
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  }
+
   private sheet(key: string, text: string): SheetInfo {
     const hash = createHash("sha256").update(text).digest("hex");
     const cached = this.sheetCache.get(hash);
@@ -483,6 +512,18 @@ export class Capturer {
 }
 
 /** A browser context with the capture policy (§5.1) for one profile. */
+/** Starts V8 precise block coverage on a page, before it loads (Chromium only). */
+async function startCoverage(page: Page): Promise<CDPSession | undefined> {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Profiler.enable");
+    await cdp.send("Profiler.startPreciseCoverage", { callCount: true, detailed: true });
+    return cdp;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function newProfileContext(browser: Browser, p: Profile, opts: { initScript?: boolean } = {}): Promise<BrowserContext> {
   const ctx = await browser.newContext({
     viewport: { width: p.width, height: p.height },

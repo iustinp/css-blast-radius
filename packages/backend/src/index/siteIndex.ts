@@ -2,6 +2,7 @@
 // capture run fills and writes. Queries (L0/L1) only read SiteIndex; they
 // never see a revision that is still building.
 
+import type { Segments } from "../util/coverage.js";
 import { PageSet } from "../util/pageSet.js";
 import type { PageRow, RevisionRow, Store, VariantInfo } from "./store.js";
 
@@ -17,6 +18,13 @@ export interface SelectorEntry {
 
 /** A JavaScript file: `.js`, `.mjs` or `.cjs`. */
 export const SCRIPT_PATH = /\.[mc]?js$/i;
+
+export interface ScriptEntry {
+  pages: PageSet;
+  blobs: Map<string, number>;
+  /** Served blob id → coverage hash → the pages where that code ran. */
+  coverage: Map<string, Map<string, PageSet>>;
+}
 
 export interface MatcherCheck {
   feature: string;
@@ -49,6 +57,7 @@ export class SiteIndex {
   readonly sheets = new Map<string, { hash?: string; pages: PageSet }>();
   private sheetsLower?: Map<string, string>;
   private scriptIndex?: SiteIndex["scripts"];
+  private readonly coverageCache = new Map<string, Segments | null>();
   readonly matcherChecks: MatcherCheck[];
   readonly unsupportedFeatures = new Set<string>();
   private readonly selectorCache = new Map<string, SelectorEntry | null>();
@@ -115,9 +124,14 @@ export class SiteIndex {
    * pages and the git blob ids served, with how many pages got each.
    * `known`: some page records what it loaded (scans before that don't).
    */
-  get scripts(): { known: boolean; byPath: Map<string, { pages: PageSet; blobs: Map<string, number> }> } {
+  /**
+   * Same-site scripts by URL path: the pages that load each, the blob ids
+   * served (with how many pages got each), and per served blob the pages
+   * grouped by what ran at load (coverage blob hash; J1).
+   */
+  get scripts(): { known: boolean; byPath: Map<string, ScriptEntry> } {
     if (this.scriptIndex) return this.scriptIndex;
-    const byPath = new Map<string, { pages: PageSet; blobs: Map<string, number> }>();
+    const byPath = new Map<string, ScriptEntry>();
     let known = false;
     for (const p of this.pages) {
       if (p.status === "removed" || !p.loaded) continue;
@@ -125,12 +139,33 @@ export class SiteIndex {
       for (const [path, blob] of Object.entries(p.loaded)) {
         if (!SCRIPT_PATH.test(path)) continue;
         let e = byPath.get(path);
-        if (!e) byPath.set(path, (e = { pages: PageSet.empty(this.size), blobs: new Map() }));
+        if (!e) byPath.set(path, (e = { pages: PageSet.empty(this.size), blobs: new Map(), coverage: new Map() }));
         e.pages.add(p.id);
         e.blobs.set(blob, (e.blobs.get(blob) ?? 0) + 1);
+        const cov = p.coverage?.[path];
+        if (!cov) continue;
+        let byCov = e.coverage.get(blob);
+        if (!byCov) e.coverage.set(blob, (byCov = new Map()));
+        let set = byCov.get(cov);
+        if (!set) byCov.set(cov, (set = PageSet.empty(this.size)));
+        set.add(p.id);
       }
     }
     return (this.scriptIndex = { known, byPath });
+  }
+
+  /** A coverage blob's ran offsets (undefined: unreadable). */
+  coverage(hash: string): Segments | undefined {
+    if (!this.coverageCache.has(hash)) {
+      let segs: Segments | null = null;
+      try {
+        segs = JSON.parse(this.store.getBlob(hash).toString("utf8")) as Segments;
+      } catch {
+        /* missing blob: those pages count as not covered */
+      }
+      this.coverageCache.set(hash, segs);
+    }
+    return this.coverageCache.get(hash) ?? undefined;
   }
 
   static load(store: Store, revisionId?: number): SiteIndex | undefined {

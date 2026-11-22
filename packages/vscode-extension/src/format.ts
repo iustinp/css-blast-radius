@@ -41,13 +41,22 @@ export function externalChangeText(files: number, after: Count, before?: Count):
   return before ? `${head}: now ${count(after)} affected (was ${count(before)}).` : `${head}: ${formatCount(after)} affected.`;
 }
 
+/** A script edit's pages: where the edited code ran at load (exact), and every page that loads the script. */
+export function scriptCount(c: Count, reasons: string[] = []): string {
+  const loaded = c.exact + c.possible + c.unknown;
+  if (c.exact) return c.exact === loaded ? `runs on ${plural(c.exact)}` : `runs on ${plural(c.exact)} · loaded by ${loaded.toLocaleString("en-US")}`;
+  return reasons.includes("script-not-run") && !reasons.includes("script-no-coverage") && !reasons.includes("script-loaded")
+    ? `not run on load · loaded by ${plural(loaded)}`
+    : `loaded by ${plural(loaded)}`;
+}
+
 /** End-of-line text for one change. */
 export function formatChange(ch: ChangeAnswer): string {
   if (ch.kind === "selector" && ch.gained && ch.lost) {
     if (isZero(ch.gained) && isZero(ch.lost)) return "same pages";
     return `+${span(ch.gained)} / −${span(ch.lost)} pages`;
   }
-  if (ch.kind === "script" && !isZero(ch.pages)) return `loaded by ${plural(ch.pages.possible + ch.pages.exact)}`;
+  if (ch.kind === "script" && !isZero(ch.pages)) return scriptCount(ch.pages, ch.reasons);
   if (ch.kind === "removed") {
     const lost = ch.lost ?? ch.pages;
     return isZero(lost) ? formatCount(lost, ch.reasons) + " (rule removed)" : `rule removed · ${span(lost)} pages lose it`;
@@ -198,7 +207,13 @@ export function reasonText(r: string): string {
     case "no-effective-change":
       return "No effective change: the rules are the same as on the live site.";
     case "script-loaded":
-      return "Counts the pages that load this script; whether your edit runs there isn't checked yet.";
+      return "Counts the pages that load this script: the scan has no record of which code ran there (rescan to get it).";
+    case "script-runs":
+      return "The code you changed ran while these pages loaded (exact).";
+    case "script-not-run":
+      return "These pages load the script, but the code you changed didn't run while they loaded: it may still run after a click, scroll or typing (possible).";
+    case "script-no-coverage":
+      return "Some pages load another version of this script, or were scanned before coverage was recorded: counted as possible.";
     case "script-not-loaded":
       return "No scanned page loads this script.";
     case "selector-never-matches":

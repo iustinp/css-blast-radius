@@ -36,6 +36,11 @@ export interface PageRow {
    * images…): path → git blob id of what was served. Absent in older scans.
    */
   loaded?: Record<string, string>;
+  /**
+   * Same-site scripts' code that ran while the page loaded (all variants
+   * together): path → blob hash of the ran offsets (`Segments` JSON).
+   */
+  coverage?: Record<string, string>;
   /** Shell box agreement on the fidelity sample (0..1), when checked. */
   fidelity?: number;
   capturedAt: string;

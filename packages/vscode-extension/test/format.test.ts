@@ -34,7 +34,10 @@ describe("editSides", () => {
 
 describe("formatChange", () => {
   it("script edits: the pages that load the script, or why none", () => {
-    expect(formatChange(change({ kind: "script", pages: c(0, 2) }))).toBe("loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(0, 2), reasons: ["script-loaded"] }))).toBe("loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(1, 2), reasons: ["script-runs", "script-not-run"] }))).toBe("runs on 1 page · loaded by 3");
+    expect(formatChange(change({ kind: "script", pages: c(3), reasons: ["script-runs"] }))).toBe("runs on 3 pages");
+    expect(formatChange(change({ kind: "script", pages: c(0, 2), reasons: ["script-not-run"] }))).toBe("not run on load · loaded by 2 pages");
     expect(formatChange(change({ kind: "script", pages: c(0), reasons: ["script-not-loaded"] }))).toBe("0 pages · no scanned page loads this script");
   });
   it("shows gained and lost for selector changes", () => {

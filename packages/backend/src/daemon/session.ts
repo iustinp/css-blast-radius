@@ -24,7 +24,7 @@ import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
 import { Git, TABS, blobId, readText, type BaseText, type BranchPoint, type Tab } from "./diffBase.js";
 import { SheetMatcher } from "./sheetMatch.js";
-import { ScriptTracker, isScriptPath, type ScriptResult } from "./scripts.js";
+import { ScriptTracker, isScriptPath } from "./scripts.js";
 import {
   ERR,
   RpcError,
@@ -1133,14 +1133,6 @@ export class Session extends EventEmitter {
     return r.answer.changes.map((c) => ids.has(c.id));
   }
 
-  private scriptChosen(path: string, r: ScriptResult): boolean {
-    const sel = this.selection;
-    if (!sel) return true;
-    const e = sel.find((x) => x.path === path);
-    if (!e) return false;
-    if (!e.changeIds) return true;
-    return r.hunks.some((h) => e.changeIds!.includes(h.id));
-  }
 
   // ---------------------------------------------------------- page lists
 
@@ -1174,7 +1166,11 @@ export class Session extends EventEmitter {
           pending ||= !a.changes[i].pages.complete && a.changes[i].pages.possible > 0;
         });
       }
-      for (const s of this.scripts.changed()) if (this.scriptChosen(s.path, s.r)) total.orInPlace(s.r.sets);
+      for (const s of this.scripts.changed()) {
+        const sel = this.selection?.find((x) => x.path === s.path);
+        if (!this.selection || (sel && !sel.changeIds)) total.orInPlace(s.r.sets);
+        else if (sel) s.r.hunks.forEach((h, i) => sel.changeIds!.includes(h.id) && total.orInPlace(s.r.hunkSets[i]));
+      }
       return { sets: total, pending, editRevision: this.editRevision };
     }
     if (isScriptPath(p.path)) {

@@ -1007,8 +1007,15 @@ index or edit revisions.
 - **Scripts in L2 shells** — static by design; L3 runs scripts.
 - **What a JavaScript edit does** — an edited script counts the pages that
   load it (`PageRow.loaded` records each same-site file with its git blob id,
-  so the live version comes from git), as `possible` with `script-loaded`.
-  Which pages run the edited code, and what it changes, is epic #5 (J1–J3).
+  so the live version comes from git). Capture also records V8 precise block
+  coverage per page and script (`PageRow.coverage`: the ran offsets of the
+  served text, all variants together, content-addressed), so a changed run of
+  lines is `exact` (`script-runs`) on the pages where the base code it
+  replaces ran, and `possible` elsewhere (`script-not-run`, or
+  `script-no-coverage` / `script-loaded` when the served version or the scan
+  has none). Code run only by interactions, and what an edit changes, is epic
+  #5 (J2–J3). A syntax error breaks every loading page but counts like any
+  edit.
 - **Build pipelines without an adapter** — unavailable for their files until
   one exists.
 - **Cross-origin stylesheets and iframes, stylesheets inside shadow roots** —

@@ -5,7 +5,7 @@ import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { RpcCallError, type DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { TABS, branchNote, editSides, effectiveTab, formatCount, mainName, scanLine, span } from "./format";
+import { TABS, branchNote, editSides, effectiveTab, formatCount, mainName, scanLine, scriptCount, span } from "./format";
 import { ERR, type AssessProgress, type ChangeDetail, type Count, type FileAnswer, type PagesResult, type PagesTarget, type PageSetName, type Tab } from "./protocol";
 import type { ImpactState } from "./state";
 import { DiffTab } from "./diffTab";
@@ -176,11 +176,13 @@ export class PagesPanel implements vscode.Disposable {
   }
 
   /** The CSS and JS chips, when edits of both kinds exist: their pages apart, and how much of each is picked. */
-  private kinds(): Array<{ kind: EditKind; count: Count; state: "all" | "some" | "none" }> | undefined {
+  private kinds(): Array<{ kind: EditKind; count: Count; label: string; state: "all" | "some" | "none" }> | undefined {
     const files = this.files;
     const by = this.state.session?.byKind;
     if (!by || !files.some((f) => kindOf(f.path) === "js") || !files.some((f) => kindOf(f.path) === "css")) return undefined;
-    return (["css", "js"] as const).map((kind) => ({ kind, count: by[kind], state: kindState(this.picked, files, kind) }));
+    return (["css", "js"] as const).map((kind) => ({
+      kind, count: by[kind], label: kind === "js" ? scriptCount(by.js) : formatCount(by.css), state: kindState(this.picked, files, kind),
+    }));
   }
 
   private get files(): FileEdits[] {

@@ -21,6 +21,7 @@ import {
   KIND_LABEL,
   losesPages,
   reasonText,
+  scriptCount,
   span,
 } from "./format";
 import type { ChangeAnswer, Count, FileAnswer, PagesTarget, RuleCount, RulesResult } from "./protocol";
@@ -234,8 +235,8 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     const hasCss = !!s?.files.some((f) => !/\.[mc]?js$/i.test(f.file));
     const split = hasJs && hasCss && s?.byKind;
     item.text = split
-      ? `◎ CSS ${formatCount(split.css)} · JS loaded by ${formatCount(split.js)}${warn}`
-      : `◎ ${hasJs && !hasCss ? "loaded by " : ""}${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
+      ? `◎ CSS ${formatCount(split.css)} · JS ${scriptCount(split.js)}${warn}`
+      : hasJs && !hasCss && s ? `◎ ${scriptCount(s.total)}${warn}` : `◎ ${formatCount(s?.total ?? { exact: 0, possible: 0, unknown: 0, complete: true })}${warn}`;
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["cssBlastRadius.showAllPages", "cssBlastRadius.linkGroups"] };
     const tab = s?.tab ?? st?.tab ?? "all";
@@ -245,7 +246,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     md.appendMarkdown(`Linked groups: ${st.scope.groups.map((g) => g.name.replace(/[\\`*_~\[\]<>]/g, "\\$&") + (g.active ? "" : " (paused)")).join(", ") || "none"} (${st.scope.pages.toLocaleString("en-US")} active pages)\n\n`);
     if (s?.files.length) {
       md.appendMarkdown(split
-        ? `Your CSS edits reach ${countLine(split.css)} pages; the edited scripts are loaded by ${countLine(split.js)} pages\n\n`
+        ? `Your CSS edits reach ${countLine(split.css)} pages; your script edits: ${scriptCount(split.js)}\n\n`
         : `Your edits reach ${countLine(s.total)} pages\n\n`);
       for (const f of s.files.slice(0, 12)) {
         md.appendMarkdown(`- \`${vscode.workspace.asRelativePath(f.file)}\`: ${formatCount(f.pages)} (${f.changes} change${f.changes === 1 ? "" : "s"})\n`);
@@ -326,7 +327,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     for (const r of ch.reasons) md.appendMarkdown(`- ${reasonText(r)}\n`);
     if (ch.hint) md.appendMarkdown(`\n${ch.hint}\n`);
     if (ch.detail) md.appendMarkdown(`\n${ch.detail}\n`);
-    md.appendMarkdown(ch.kind === "script" ? `\n\n_Page diffs don't run script edits yet._\n\n` : `\n\n_Open a page to see what actually changes._\n\n`);
+    md.appendMarkdown(ch.kind === "script" ? `\n\n_"Runs on" counts the pages where the edited code ran while they loaded; page diffs don't run script edits yet._\n\n` : `\n\n_Open a page to see what actually changes._\n\n`);
     md.appendMarkdown(this.footer(a));
     const sides = editSides(ch);
     const base = { path: a.file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined };
