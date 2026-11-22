@@ -36,7 +36,9 @@ export type ChangeKind =
   | "layer-order"
   | "import"
   | "namespace"
-  | "unrecognized";
+  | "unrecognized"
+  /** A JavaScript file's changed lines (#5). */
+  | "script";
 
 export interface ChangeAnswer {
   id: string;

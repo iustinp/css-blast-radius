@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import { RpcCallError } from "./daemonClient";
 import { DaemonLifecycle } from "./daemonLifecycle";
-import { DocumentSync, isCssDocument } from "./documentSync";
+import { DocumentSync, isTrackedDocument } from "./documentSync";
 import { DiffTab } from "./diffTab";
 import { EditorSurfaces } from "./editorSurfaces";
 import { ExternalNoticeBatch } from "./externalNotice";
@@ -71,7 +71,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   }
 
   async function refreshAnswers(): Promise<void> {
-    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map(async (doc) => {
+    await Promise.all(vscode.workspace.textDocuments.filter(isTrackedDocument).map(async (doc) => {
       try {
         state.acceptAnswer(await client.call<FileAnswer>("analysis/queryImpacts", { path: doc.uri.fsPath, scope: "file" }));
       } catch (err: any) {
@@ -231,7 +231,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   const cursorTarget = (): PagesTarget => {
     const ed = vscode.window.activeTextEditor;
-    if (!ed || !isCssDocument(ed.document)) return { title: "All edits" };
+    if (!ed || !isTrackedDocument(ed.document)) return { title: "All edits" };
     const file = ed.document.uri.fsPath;
     const a = state.answers.get(file);
     const r = state.rules.get(file);

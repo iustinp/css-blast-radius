@@ -15,6 +15,9 @@ export interface SelectorEntry {
   rejected: PageSet;
 }
 
+/** A JavaScript file: `.js`, `.mjs` or `.cjs`. */
+export const SCRIPT_PATH = /\.[mc]?js$/i;
+
 export interface MatcherCheck {
   feature: string;
   agree: number;
@@ -45,6 +48,7 @@ export class SiteIndex {
   readonly varDependents = new Map<string, Set<string>>();
   readonly sheets = new Map<string, { hash?: string; pages: PageSet }>();
   private sheetsLower?: Map<string, string>;
+  private scriptIndex?: SiteIndex["scripts"];
   readonly matcherChecks: MatcherCheck[];
   readonly unsupportedFeatures = new Set<string>();
   private readonly selectorCache = new Map<string, SelectorEntry | null>();
@@ -104,6 +108,29 @@ export class SiteIndex {
       for (const k of this.sheets.keys()) if (!this.sheetsLower.has(k.toLowerCase())) this.sheetsLower.set(k.toLowerCase(), k);
     }
     return this.sheetsLower.get(url.toLowerCase());
+  }
+
+  /**
+   * Same-site scripts the pages loaded (`PageRow.loaded`), by URL path: the
+   * pages and the git blob ids served, with how many pages got each.
+   * `known`: some page records what it loaded (scans before that don't).
+   */
+  get scripts(): { known: boolean; byPath: Map<string, { pages: PageSet; blobs: Map<string, number> }> } {
+    if (this.scriptIndex) return this.scriptIndex;
+    const byPath = new Map<string, { pages: PageSet; blobs: Map<string, number> }>();
+    let known = false;
+    for (const p of this.pages) {
+      if (p.status === "removed" || !p.loaded) continue;
+      known = true;
+      for (const [path, blob] of Object.entries(p.loaded)) {
+        if (!SCRIPT_PATH.test(path)) continue;
+        let e = byPath.get(path);
+        if (!e) byPath.set(path, (e = { pages: PageSet.empty(this.size), blobs: new Map() }));
+        e.pages.add(p.id);
+        e.blobs.set(blob, (e.blobs.get(blob) ?? 0) + 1);
+      }
+    }
+    return (this.scriptIndex = { known, byPath });
   }
 
   static load(store: Store, revisionId?: number): SiteIndex | undefined {

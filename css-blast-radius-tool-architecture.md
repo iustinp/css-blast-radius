@@ -1005,6 +1005,10 @@ index or edit revisions.
 - **Interaction states in L2** — `:hover` and `:focus` are relaxed in L0/L1;
   L2 measures the captured state. Forcing states over CDP comes later.
 - **Scripts in L2 shells** — static by design; L3 runs scripts.
+- **What a JavaScript edit does** — an edited script counts the pages that
+  load it (`PageRow.loaded` records each same-site file with its git blob id,
+  so the live version comes from git), as `possible` with `script-loaded`.
+  Which pages run the edited code, and what it changes, is epic #5 (J1–J3).
 - **Build pipelines without an adapter** — unavailable for their files until
   one exists.
 - **Cross-origin stylesheets and iframes, stylesheets inside shadow roots** —

@@ -126,14 +126,14 @@ describe.skipIf(!hasGit)("Git diff base in temp repository (§7.2)", () => {
     // Working-tree edits (and non-CSS files) don't count: HEAD only.
     fs.writeFileSync(css("base.css"), "body { margin: 10px; }\n");
     fs.writeFileSync(path.join(realDir, "README.md"), "# Changed\n");
-    let head = await git.headCss(dirs);
+    let head = await git.headFiles(dirs);
     expect([...head.keys()].sort()).toEqual(["base.css", "theme.css", "todelete.css", "torename.css"].map(css));
     expect(head.get(css("base.css"))).toBe(blobId(Buffer.from("body { margin: 0; }\n")));
 
     // Committed: base.css modified, todelete.css deleted (earlier), torename.css renamed.
     execSync("git mv src/css/torename.css src/css/renamed.css", { cwd: realDir, stdio: "ignore" });
     execSync('git add -A && git commit -q -m "second"', { cwd: realDir, stdio: "ignore" });
-    head = await git.headCss(dirs);
+    head = await git.headFiles(dirs);
     expect([...head.keys()].sort()).toEqual(["base.css", "renamed.css", "theme.css"].map(css));
     expect(head.get(css("base.css"))).toBe(blobId(Buffer.from("body { margin: 10px; }\n")));
     expect((await git.changedBetween(first, "HEAD", dirs)).sort()).toEqual(["base.css", "renamed.css", "todelete.css", "torename.css"].map(css));

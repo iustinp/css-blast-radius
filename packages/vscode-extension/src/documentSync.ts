@@ -31,9 +31,17 @@ interface Tracked {
   reloadFrom?: Count;
 }
 
-/** A CSS file inside the project (the first workspace folder): files from elsewhere would be matched by name and miscounted. */
-export function isCssDocument(doc: vscode.TextDocument): boolean {
-  if (doc.uri.scheme !== "file" || !(doc.languageId === "css" || doc.uri.fsPath.toLowerCase().endsWith(".css"))) return false;
+/** A JavaScript file (#5): counted by the pages that load it. */
+export function isScriptDocument(doc: vscode.TextDocument): boolean {
+  return /\.[mc]?js$/i.test(doc.uri.fsPath) && !/[\\/]node_modules[\\/]/.test(doc.uri.fsPath);
+}
+
+/**
+ * A CSS or JavaScript file inside the project (the first workspace folder):
+ * files from elsewhere would be matched by name and miscounted.
+ */
+export function isTrackedDocument(doc: vscode.TextDocument): boolean {
+  if (doc.uri.scheme !== "file" || !(doc.languageId === "css" || doc.uri.fsPath.toLowerCase().endsWith(".css") || isScriptDocument(doc))) return false;
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) return false;
   const rel = path.relative(root, doc.uri.fsPath);
@@ -61,7 +69,7 @@ export class DocumentSync implements vscode.Disposable {
   /** (Re)open every CSS document: called after each (re)connect. */
   async openAll(): Promise<void> {
     this.docs.clear();
-    await Promise.all(vscode.workspace.textDocuments.filter(isCssDocument).map((d) => this.open(d)));
+    await Promise.all(vscode.workspace.textDocuments.filter(isTrackedDocument).map((d) => this.open(d)));
   }
 
   isTracked(path: string): boolean {
@@ -94,7 +102,7 @@ export class DocumentSync implements vscode.Disposable {
   }
 
   private open(doc: vscode.TextDocument): Promise<void> {
-    if (!isCssDocument(doc) || !this.client.connected) return Promise.resolve();
+    if (!isTrackedDocument(doc) || !this.client.connected) return Promise.resolve();
     const path = doc.uri.fsPath;
     const t: Tracked = this.docs.get(path) ?? { doc, version: 0, queue: [], inFlight: 0, idle: [], dirty: doc.isDirty };
     t.doc = doc;

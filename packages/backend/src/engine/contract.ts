@@ -151,6 +151,10 @@ export const REASON = {
   definitionUnused: "definition-unused",
   global: (kind: string) => `global-change:${kind}`,
   chromiumRejects: "chromium-rejects-selector",
+  /** A script edit: counts the pages that load the script (whether the edit runs there isn't checked). */
+  scriptLoaded: "script-loaded",
+  /** No scanned page loads this script. */
+  scriptNotLoaded: "script-not-loaded",
 } as const;
 
 /** Display form of a token: c:foo → .foo, i:x → #x, a:href → [href], t:li → li. */

@@ -2,7 +2,7 @@
 // `stylesheets` mapping wins; otherwise files are matched by name: hashes,
 // version numbers and ".min" are ignored, and a tie is broken by the longest
 // run of matching folder names. Remaining ties keep every candidate (better
-// to over-report than to miss pages).
+// to over-report than to miss pages). Scripts reuse it over their URL paths.
 
 import { sep } from "node:path";
 import { urlsForFile, type CbrConfig } from "../config.js";
@@ -60,11 +60,13 @@ export class SheetMatcher {
   private readonly byName = new Map<string, string[]>();
   private readonly cache = new Map<string, string[]>();
 
+  /** `cfg` undefined: names only, no explicit mapping (scripts, matched against `keys`). */
   constructor(
-    private readonly cfg: CbrConfig,
+    private readonly cfg: CbrConfig | undefined,
     private readonly index: SiteIndex | undefined,
+    keys: Iterable<string> = index?.sheets.keys() ?? [],
   ) {
-    for (const key of index?.sheets.keys() ?? []) {
+    for (const key of keys) {
       if (key.startsWith("inline:")) continue;
       const name = normalizeSheetName(sheetPath(key));
       let list = this.byName.get(name);
@@ -84,7 +86,7 @@ export class SheetMatcher {
   }
 
   private compute(file: string): string[] {
-    const explicit = urlsForFile(this.cfg, file);
+    const explicit = this.cfg ? urlsForFile(this.cfg, file) : [];
     if (explicit.length) return [...new Set(explicit.map((u) => this.index?.sheetKey(u) ?? u))];
     const list = this.byName.get(normalizeSheetName(file));
     if (!list?.length) return [];

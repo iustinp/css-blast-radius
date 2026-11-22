@@ -319,5 +319,56 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
       fs.writeFileSync(mainCssPath, originalCssText);
       await session.setTab("all");
     }
-  });
+  }, 20_000);
+
+  // j. scripts (#5, J0): an edited script counts the pages that load it
+  it("j. scripts: edits count the pages that load the script, open or closed", async () => {
+    const jsPath = path.join(ws, "js", "app.js");
+    const original = fs.readFileSync(jsPath, "utf8");
+    const edited = original.replace('"Hello "', '"Hi "');
+    const otherPath = path.join(ws, "js", "unused.js");
+    try {
+      const res = await session.open(jsPath, edited, 1);
+      expect(res.answer.diffBase).toBe("production");
+      expect(res.answer.mapping.urls).toEqual(["/js/app.js"]);
+      expect(res.answer.changes).toHaveLength(1);
+      const ch = res.answer.changes[0];
+      expect(ch).toMatchObject({ kind: "script", line: 4, selector: "Line 4", reasons: ["script-loaded"] });
+      expect(ch.pages).toEqual({ exact: 0, possible: 2, unknown: 0, complete: true });
+      expect(res.session.files.find((f) => f.file === jsPath)?.changes).toBe(1);
+
+      const pages = await session.getPages({ path: jsPath });
+      expect(pages.pages.map((p) => p.url.replace(/^.*\//, "")).sort()).toEqual(["about.html", "index.html"]);
+      const byLine = await session.getPages({ path: jsPath, line: 4 });
+      expect(byLine.total).toBe(2);
+      expect(session.ruleCounts(jsPath).rules).toMatchObject([{ line: 4, endLine: 4, selector: "Line 4" }]);
+      expect(session.changeDetail(jsPath, ch.id).summary).toMatch(/Line 4: 1 line added, 1 removed/);
+
+      const live = await session.liveEdits();
+      expect(live.files.find((f) => f.file === jsPath)?.edits.map((e) => e.ranges)).toEqual([[[4, 4]]]);
+      expect((await session.liveOriginal(jsPath)).text).toBe(original);
+
+      // Back to the live text: nothing left to count.
+      await session.change(jsPath, 2, [{ text: original }]);
+      expect(session.fileAnswer(jsPath).changes).toEqual([]);
+
+      // Closed and changed on disk: still counted.
+      await session.close(jsPath);
+      fs.writeFileSync(jsPath, edited);
+      const total = await session.setTab("all");
+      expect(total.files.filter((f) => f.file === jsPath).map((f) => [f.changes, f.open])).toEqual([[1, false]]);
+
+      // A script no scanned page loads: 0 pages, with why.
+      fs.writeFileSync(otherPath, "export const x = 1;\n");
+      const other = await session.open(otherPath, "export const x = 2;\n", 1);
+      expect(other.answer.changes[0].pages.possible).toBe(0);
+      expect(other.answer.changes[0].reasons).toEqual(["script-not-loaded"]);
+      await session.close(otherPath);
+    } finally {
+      fs.writeFileSync(jsPath, original);
+      fs.rmSync(otherPath, { force: true });
+      await session.setTab("all");
+    }
+    expect(session.sessionTotal().files.some((f) => f.file === jsPath)).toBe(false);
+  }, 20_000);
 });

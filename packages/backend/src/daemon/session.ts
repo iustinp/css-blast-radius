@@ -24,6 +24,7 @@ import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
 import { Git, TABS, blobId, readText, type BaseText, type BranchPoint, type Tab } from "./diffBase.js";
 import { SheetMatcher } from "./sheetMatch.js";
+import { ScriptTracker, isScriptPath, type ScriptResult } from "./scripts.js";
 import {
   ERR,
   RpcError,
@@ -210,6 +211,10 @@ export class Session extends EventEmitter {
   private queryN = 0;
   private readonly messages: string[] = [];
   private matcher: SheetMatcher;
+  /** Edited JavaScript files (#5): counted by the pages that load them. */
+  private readonly scripts: ScriptTracker;
+  /** Pages of the active linked groups (undefined: no scope). */
+  private scopeUnion?: PageSet;
   private scopeGroups?: ScopeGroup[];
   /** Active linked groups → their pages in the current index. */
   private scopeSets?: Map<string, PageSet>;
@@ -241,6 +246,20 @@ export class Session extends EventEmitter {
     this.tab = opts.tab ?? "all";
     this.scopeGroups = opts.scope;
     this.matcher = new SheetMatcher(this.cfg, undefined);
+    this.scripts = new ScriptTracker({
+      root: this.cfg.workspaceRoot,
+      dataDir: this.cfg.dataDir,
+      index: () => this.index,
+      git: () => this.git,
+      tab: () => this.tab,
+      mainChanges: () => this.mainChanges,
+      branchPoint: () => this.branchPoint(),
+      scope: () => this.scopeUnion,
+      scopeGen: () => this.scopeGen,
+      bump: () => ++this.editRevision,
+      editRevision: () => this.editRevision,
+      nextQueryId: () => `q-${++this.queryN}`,
+    });
   }
 
   static async create(opts: SessionOptions): Promise<Session> {
@@ -264,10 +283,12 @@ export class Session extends EventEmitter {
     this.index = idx;
     this.matcher = new SheetMatcher(this.cfg, idx);
     this.resetLive(true);
+    this.scripts.reset();
     if (!idx) {
       this.engine = undefined;
       this.l1 = undefined;
       this.scopeSets = undefined;
+      this.scopeUnion = undefined;
       return;
     }
     this.l1 = new L1Cache(idx.revision.id, idx.size);
@@ -285,7 +306,7 @@ export class Session extends EventEmitter {
     const idx = this.index;
     if (!this.scopeGroups || !idx) {
       this.scopeSets = undefined;
-      return undefined;
+      return (this.scopeUnion = undefined);
     }
     const sets = new Map<string, PageSet>();
     const union = PageSet.empty(idx.size);
@@ -301,7 +322,7 @@ export class Session extends EventEmitter {
       union.orInPlace(set);
     }
     this.scopeSets = sets;
-    return union;
+    return (this.scopeUnion = union);
   }
 
   /** Server mode: the page groups this project is linked to (undefined: every page). */
@@ -320,8 +341,10 @@ export class Session extends EventEmitter {
     Object.assign(this.cfg, { ...cfg, workspaceRoot: this.cfg.workspaceRoot });
     this.matcher = new SheetMatcher(this.cfg, this.index);
     this.resetLive(true);
+    this.scripts.reset();
     for (const f of this.files.values()) this.touch(f);
     this.publishOpenDocs();
+    void this.scripts.refreshClosed().then(() => this.publishOpenDocs(), (err) => this.messages.push(`scripts: ${err?.message ?? err}`));
   }
 
   scopeStatus(): ScopeStatus | undefined {
@@ -378,6 +401,7 @@ export class Session extends EventEmitter {
   }
 
   async open(path: string, text: string, version: number): Promise<DocResult> {
+    if (isScriptPath(path)) return { answer: await this.scripts.open(path, text, version), session: this.sessionTotal() };
     const f = this.state(path);
     const disk = readText(f.path);
     f.doc = new Doc(f.path, text, version, disk);
@@ -389,6 +413,11 @@ export class Session extends EventEmitter {
   }
 
   async change(path: string, version: number, changes: TextChange[]): Promise<DocResult> {
+    if (isScriptPath(path)) {
+      const answer = await this.scripts.change(path, version, changes);
+      if (!answer) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
+      return { answer, session: this.sessionTotal() };
+    }
     const f = this.files.get(resolve(path));
     if (!f?.doc) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
     f.doc.change(version, changes);
@@ -398,6 +427,11 @@ export class Session extends EventEmitter {
   }
 
   async save(path: string, text?: string): Promise<DocResult> {
+    if (isScriptPath(path)) {
+      const answer = await this.scripts.save(path, text);
+      if (!answer) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
+      return { answer, session: this.sessionTotal() };
+    }
     const f = this.files.get(resolve(path));
     if (!f?.doc) throw new RpcError(ERR.unknownDocument, `document not open: ${path}`);
     f.doc.save(text);
@@ -410,6 +444,10 @@ export class Session extends EventEmitter {
   }
 
   async close(path: string): Promise<SessionTotal> {
+    if (isScriptPath(path)) {
+      await this.scripts.close(path);
+      return this.sessionTotal();
+    }
     const f = this.files.get(resolve(path));
     this.resetLive(false);
     if (f) {
@@ -425,12 +463,13 @@ export class Session extends EventEmitter {
   /** The open documents and the tab (a project's session for another site starts from them). */
   editorState(): { docs: Array<{ path: string; text: string; version: number }>; tab: Tab; mainChanges: boolean } {
     const docs = [...this.files.values()].filter((f) => f.doc).map((f) => ({ path: f.path, text: f.doc!.text, version: f.doc!.version }));
+    docs.push(...this.scripts.docs());
     return { docs, tab: this.tab, mainChanges: this.mainChanges };
   }
 
   /** A window attached alone: files earlier windows left open are closed (the editor reopens its own). */
   async closeAll(): Promise<void> {
-    let closed = false;
+    let closed = this.scripts.closeAll();
     for (const f of [...this.files.values()]) {
       if (!f.doc) continue;
       this.files.delete(f.path);
@@ -459,6 +498,7 @@ export class Session extends EventEmitter {
   }
 
   private async rebase(): Promise<SessionTotal> {
+    this.scripts.rebase();
     for (const f of this.files.values()) {
       f.base = undefined;
       f.head = undefined;
@@ -594,6 +634,7 @@ export class Session extends EventEmitter {
       await this.ensureBase(f);
     }
     for (const f of this.files.values()) if (f.doc && this.needsBase(f)) await this.ensureBase(f);
+    await this.scripts.refreshClosed();
   }
 
   /** Closed files (on disk) that differ from the live site. */
@@ -620,7 +661,7 @@ export class Session extends EventEmitter {
     const git = this.git!;
     const bp = this.mainChanges ? undefined : point;
     const dirs = this.cssDirs();
-    const [head, ours] = await Promise.all([git.headCss(dirs), bp ? git.changedBetween(bp.mergeBase, "HEAD", dirs) : Promise.resolve([])]);
+    const [head, ours] = await Promise.all([git.headFiles(dirs), bp ? git.changedBetween(bp.mergeBase, "HEAD", dirs) : Promise.resolve([])]);
     const branchChanged = new Set(ours);
     const deleted = new Set(ours.filter((f) => !head.has(f)));
     if ([...deleted].some((f) => !this.headDeleted.has(f)) || [...this.headDeleted].some((f) => !deleted.has(f))) {
@@ -716,6 +757,7 @@ export class Session extends EventEmitter {
         const edits = r.changes.map((c, i) => ({ ...r.answer.changes[i], ranges: changeLines(c) }));
         files.push({ file: f.path, open: !!f.doc, pages: r.answer.total, edits });
       }
+      files.push(...(await this.scripts.liveEdits()));
     }
     files.sort((a, b) => a.file.localeCompare(b.file));
     return {
@@ -733,6 +775,7 @@ export class Session extends EventEmitter {
    */
   async liveOriginal(path: string): Promise<LiveOriginal> {
     const p = resolve(path);
+    if (isScriptPath(p)) return { path: p, text: this.index ? await this.scripts.liveOriginal(p) : null };
     const f = this.index ? await this.liveState(p) : undefined;
     const base = f?.base;
     if (!f || !base) return { path: p, text: null };
@@ -863,9 +906,16 @@ export class Session extends EventEmitter {
       }
       for (const x of r.answer.totalReasons) reasons.add(x);
     }
+    const cssCount = total.count(pending);
+    for (const s of this.scripts.changed()) {
+      files.push({ file: s.path, pages: s.r.answer.total, changes: s.r.hunks.length, open: s.open });
+      if (this.index) total.orInPlace(s.r.sets);
+      for (const x of s.r.answer.totalReasons) reasons.add(x);
+    }
     if (files.length === 0) reasons.add(REASON.noEffectiveChange);
     if (!this.index) reasons.add(REASON.noIndex);
-    const count: Count = this.index ? total.count(pending) : { exact: 0, possible: 0, unknown: 0, complete: false };
+    // Script pages are "possible" for good (nothing refines them yet): only CSS decides completeness.
+    const count: Count = this.index ? { ...total.count(pending), complete: cssCount.complete } : { exact: 0, possible: 0, unknown: 0, complete: false };
     const bp = this.branch;
     return {
       editRevision: this.editRevision,
@@ -879,11 +929,17 @@ export class Session extends EventEmitter {
   }
 
   fileAnswer(path: string): FileAnswer {
+    if (isScriptPath(path)) return this.scripts.answerFor(path);
     return this.resultFor(this.requireFile(path)).answer;
   }
 
   /** One edit's rule (every declaration, the edited ones marked) and where to adjust it. */
   changeDetail(path: string, changeId: string): ChangeDetail {
+    if (isScriptPath(path)) {
+      const d = this.scripts.detail(path, changeId);
+      if (!d) throw new RpcError(ERR.superseded, `change ${changeId} no longer exists`, { editRevision: this.editRevision });
+      return { editRevision: d.editRevision, path: resolve(path), id: changeId, kind: "script", line: d.line, summary: d.summary };
+    }
     const f = this.requireFile(path);
     const r = this.resultFor(f);
     const i = r.answer.changes.findIndex((c) => c.id === changeId);
@@ -897,6 +953,10 @@ export class Session extends EventEmitter {
   }
 
   ruleCounts(path: string): RulesResult {
+    if (isScriptPath(path)) {
+      const a = this.scripts.answerFor(path);
+      return { file: a.file, editRevision: a.editRevision, indexRevision: a.indexRevision, level: 0, rules: this.scripts.rules(path) };
+    }
     const f = this.requireFile(path);
     const model = this.editorModel(f);
     const idx = this.index;
@@ -953,6 +1013,7 @@ export class Session extends EventEmitter {
       const r = this.resultFor(f, level);
       this.emit("refined", { answer: { ...r.answer, level }, session, rules });
     }
+    if (!fromL1) for (const d of this.scripts.docs()) this.emit("refined", { answer: this.scripts.answerFor(d.path), session, rules: true });
     // Closed files, the diff base or the index may have moved the total too.
     this.emit("publish", { session });
   }
@@ -1066,6 +1127,15 @@ export class Session extends EventEmitter {
     return r.answer.changes.map((c) => ids.has(c.id));
   }
 
+  private scriptChosen(path: string, r: ScriptResult): boolean {
+    const sel = this.selection;
+    if (!sel) return true;
+    const e = sel.find((x) => x.path === path);
+    if (!e) return false;
+    if (!e.changeIds) return true;
+    return r.hunks.some((h) => e.changeIds!.includes(h.id));
+  }
+
   // ---------------------------------------------------------- page lists
 
   private requireIndex(): SiteIndex {
@@ -1098,7 +1168,16 @@ export class Session extends EventEmitter {
           pending ||= !a.changes[i].pages.complete && a.changes[i].pages.possible > 0;
         });
       }
+      for (const s of this.scripts.changed()) if (this.scriptChosen(s.path, s.r)) total.orInPlace(s.r.sets);
       return { sets: total, pending, editRevision: this.editRevision };
+    }
+    if (isScriptPath(p.path)) {
+      try {
+        const r = this.scripts.sets(p.path, p.changeId, p.line);
+        return { sets: r.sets, pending: false, editRevision: r.editRevision };
+      } catch (err: any) {
+        throw new RpcError(ERR.superseded, err?.message ?? String(err), { editRevision: this.editRevision });
+      }
     }
     const f = this.requireFile(p.path);
     if (p.line !== undefined && !p.changeId) {
@@ -1778,7 +1857,8 @@ export class Session extends EventEmitter {
   // ------------------------------------------------------------- watching
 
   private startWatching(): void {
-    const roots = new Set<string>(this.cssDirs());
+    // The whole workspace: scripts can be anywhere in it.
+    const roots = new Set<string>([...this.cssDirs(), this.cfg.workspaceRoot]);
     if (this.cfg.siteRoot) roots.add(this.cfg.siteRoot);
     // HEAD/index: commits, checkouts, merges; FETCH_HEAD: the deployed branch moved.
     const gitFiles = this.git ? ["HEAD", "index", "FETCH_HEAD"].map((n) => join(this.git!.top, ".git", n)).filter(existsSync) : [];
@@ -1793,7 +1873,7 @@ export class Session extends EventEmitter {
       if (gitFiles.includes(p)) {
         this.gitMoved = true;
         this.scheduleRefresh();
-      } else if (/\.css$/i.test(p)) {
+      } else if (/\.(css|[mc]?js)$/i.test(p)) {
         // Open files too: the editor owns their text (§12), but Uncommitted counts what's saved.
         this.scheduleRefresh();
       } else if (/\.html?$/i.test(p) && this.index && !this.markupChanged) {
@@ -1822,6 +1902,7 @@ export class Session extends EventEmitter {
           const old = this.branch?.mergeBase;
           this.branchLoad = undefined;
           const moved = (await this.branchPoint())?.mergeBase !== old;
+          this.scripts.diskChanged(true, moved);
           for (const f of this.files.values()) {
             if (moved) f.base = undefined;
             // HEAD moved: the Committed tab's versions may have changed.
@@ -1829,6 +1910,7 @@ export class Session extends EventEmitter {
             this.touch(f);
           }
         }
+        this.scripts.diskChanged(false, false);
         for (const f of this.files.values()) {
           if (!f.doc) continue;
           const disk = readText(f.path);

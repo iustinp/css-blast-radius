@@ -47,6 +47,7 @@ export function formatChange(ch: ChangeAnswer): string {
     if (isZero(ch.gained) && isZero(ch.lost)) return "same pages";
     return `+${span(ch.gained)} / −${span(ch.lost)} pages`;
   }
+  if (ch.kind === "script" && !isZero(ch.pages)) return `loaded by ${plural(ch.pages.possible + ch.pages.exact)}`;
   if (ch.kind === "removed") {
     const lost = ch.lost ?? ch.pages;
     return isZero(lost) ? formatCount(lost, ch.reasons) + " (rule removed)" : `rule removed · ${span(lost)} pages lose it`;
@@ -66,6 +67,7 @@ export const KIND_LABEL: Record<string, string> = {
   import: "@import changed",
   namespace: "@namespace changed",
   unrecognized: "At-rule changed",
+  script: "Script changed",
 };
 
 /** What an edit is called in lists: its selector, else the definition or kind. */
@@ -115,10 +117,10 @@ export function ghostText(answer: FileAnswer, change: ChangeAnswer): string {
   const lowerUpTo = (s: string) => s.replace(/^Up to /, "up to ");
   let text = lostN && change.kind === "selector" && isZero(change.pages)
     ? "matches no page now"
-    : lowerUpTo(formatCount(change.pages, change.reasons));
+    : change.kind === "script" ? formatChange(change) : lowerUpTo(formatCount(change.pages, change.reasons));
   if (answer.changes.length > 1) {
     // All edits at 0 means this one is too: nothing to add but the edit count.
-    if (!isZero(answer.total)) text += `, ${lowerUpTo(formatCount(answer.total).replace(/\bpages?\b/, "total"))}`;
+    if (!isZero(answer.total) && change.kind !== "script") text += `, ${lowerUpTo(formatCount(answer.total).replace(/\bpages?\b/, "total"))}`;
     text += ` (${answer.changes.length} edits)`;
   }
   if (lostN) text += ` · ${lostN.toLocaleString("en-US")} lose this style ⚠`;
@@ -177,6 +179,8 @@ export function shortReason(r: string): string {
       return "not used";
     case "capture-failed":
       return `${arg} failed`;
+    case "script-not-loaded":
+      return "no scanned page loads this script";
     default:
       return code.replace(/-/g, " ");
   }
@@ -193,6 +197,10 @@ export function reasonText(r: string): string {
   switch (code) {
     case "no-effective-change":
       return "No effective change: the rules are the same as on the live site.";
+    case "script-loaded":
+      return "Counts the pages that load this script; whether your edit runs there isn't checked yet.";
+    case "script-not-loaded":
+      return "No scanned page loads this script.";
     case "selector-never-matches":
       return "The selector matches no element on any scanned page.";
     case "stylesheet-not-linked":

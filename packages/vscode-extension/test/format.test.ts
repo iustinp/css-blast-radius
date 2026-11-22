@@ -33,6 +33,10 @@ describe("editSides", () => {
 });
 
 describe("formatChange", () => {
+  it("script edits: the pages that load the script, or why none", () => {
+    expect(formatChange(change({ kind: "script", pages: c(0, 2) }))).toBe("loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(0), reasons: ["script-not-loaded"] }))).toBe("0 pages · no scanned page loads this script");
+  });
   it("shows gained and lost for selector changes", () => {
     expect(formatChange(change({ kind: "selector", pages: c(10), gained: c(3, 2), lost: c(7) }))).toBe("+3–5 / −7 pages");
     expect(formatChange(change({ kind: "selector", pages: c(10), gained: c(0), lost: c(0) }))).toBe("same pages");

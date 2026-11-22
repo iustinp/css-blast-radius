@@ -48,12 +48,17 @@ export function blobId(content: Buffer): string {
   return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 
+/** Stylesheets, or scripts (`.js`, `.mjs`, `.cjs`). */
+export type FileKind = "css" | "js";
+const KIND_SPECS: Record<FileKind, string[]> = { css: ["*.css"], js: ["*.js", "*.mjs", "*.cjs"] };
+const KIND_TEST: Record<FileKind, RegExp> = { css: /\.css$/, js: /\.[mc]?js$/ };
+
 export class Git {
   /**
    * `top` is the repository root as the workspace spells it; git reports the
    * real path (macOS: /tmp → /private/tmp), so both are kept for mapping.
    */
-  private versions?: { head: string; load: Promise<Set<string>> };
+  private readonly versions = new Map<FileKind, { head: string; load: Promise<Set<string>> }>();
 
   private constructor(
     readonly top: string,
@@ -130,16 +135,28 @@ export class Git {
   }
 
   /** Whether `content` was ever committed as `file` in `head`'s history (merges included). */
-  async committed(head: string, file: string, content: Buffer): Promise<boolean> {
+  async committed(head: string, file: string, content: Buffer | string, kind: FileKind = "css"): Promise<boolean> {
     const r = this.rel(file);
     if (!r) return false;
-    if (this.versions?.head !== head) this.versions = { head, load: this.cssVersions(head) };
-    return (await this.versions.load).has(`${r}\0${blobId(content)}`);
+    let v = this.versions.get(kind);
+    if (v?.head !== head) this.versions.set(kind, (v = { head, load: this.fileVersions(head, kind) }));
+    return (await v.load).has(`${r}\0${typeof content === "string" ? content : blobId(content)}`);
   }
 
-  /** Every version of every CSS file in `head`'s history, as `path\0blob id`. */
-  private async cssVersions(head: string): Promise<Set<string>> {
-    const out = await this.git(["log", "--raw", "--no-abbrev", "--no-renames", "--root", "-m", "-z", "--format=", head, "--", "*.css"]);
+  /** A blob's text by its id (undefined: not in this repository). */
+  async blob(id: string): Promise<string | undefined> {
+    if (!/^[0-9a-f]{40,64}$/.test(id)) return undefined;
+    try {
+      const { stdout } = await run("git", ["cat-file", "blob", id], { cwd: this.top, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
+      return stdout;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Every version of every file of `kind` in `head`'s history, as `path\0blob id`. */
+  private async fileVersions(head: string, kind: FileKind): Promise<Set<string>> {
+    const out = await this.git(["log", "--raw", "--no-abbrev", "--no-renames", "--root", "-m", "-z", "--format=", head, "--", ...KIND_SPECS[kind]]);
     const seen = new Set<string>();
     const parts = (out ?? "").split("\0");
     for (let i = 0; i < parts.length - 1; i++) {
@@ -173,8 +190,8 @@ export class Git {
     return dirs.map((d) => this.rel(d)).filter((d): d is string => d !== undefined).map((d) => d || ".");
   }
 
-  /** CSS files under `dirs` whose working-tree content differs from `rev` (including untracked). */
-  async changedSince(rev: string, dirs: string[]): Promise<string[]> {
+  /** Files of `kind` under `dirs` whose working-tree content differs from `rev` (including untracked). */
+  async changedSince(rev: string, dirs: string[], kind: FileKind = "css"): Promise<string[]> {
     const specs = this.specs(dirs);
     if (specs.length === 0) return [];
     const [diff, untracked] = await Promise.all([
@@ -183,20 +200,20 @@ export class Git {
     ]);
     if (diff === undefined) return [];
     const out = new Set<string>();
-    for (const r of [...diff.split("\0"), ...(untracked ?? "").split("\0")]) if (r.endsWith(".css")) out.add(resolve(this.top, r));
+    for (const r of [...diff.split("\0"), ...(untracked ?? "").split("\0")]) if (r && KIND_TEST[kind].test(r)) out.add(resolve(this.top, r));
     return [...out];
   }
 
-  /** CSS files under `dirs` that differ between two commits (deleted ones included). */
-  async changedBetween(from: string, to: string, dirs: string[]): Promise<string[]> {
+  /** Files of `kind` under `dirs` that differ between two commits (deleted ones included). */
+  async changedBetween(from: string, to: string, dirs: string[], kind: FileKind = "css"): Promise<string[]> {
     const specs = this.specs(dirs);
     if (specs.length === 0) return [];
     const diff = await this.git(["diff", "--name-only", "-z", "--no-renames", from, to, "--", ...specs]);
-    return [...new Set((diff ?? "").split("\0").filter((r) => r.endsWith(".css")).map((r) => resolve(this.top, r)))];
+    return [...new Set((diff ?? "").split("\0").filter((r) => KIND_TEST[kind].test(r)).map((r) => resolve(this.top, r)))];
   }
 
-  /** CSS files under `dirs` in HEAD, with their blob ids. */
-  async headCss(dirs: string[]): Promise<Map<string, string>> {
+  /** Files of `kind` under `dirs` in HEAD, with their blob ids. */
+  async headFiles(dirs: string[], kind: FileKind = "css"): Promise<Map<string, string>> {
     const out = new Map<string, string>();
     const specs = this.specs(dirs);
     if (specs.length === 0) return out;
@@ -206,7 +223,7 @@ export class Git {
       if (tab < 0) continue;
       const [, type, id] = e.slice(0, tab).split(" ");
       const r = e.slice(tab + 1);
-      if (type === "blob" && r.endsWith(".css")) out.set(resolve(this.top, r), id);
+      if (type === "blob" && KIND_TEST[kind].test(r)) out.set(resolve(this.top, r), id);
     }
     return out;
   }

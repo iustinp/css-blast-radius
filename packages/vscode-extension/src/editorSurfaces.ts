@@ -5,7 +5,7 @@
 import * as vscode from "vscode";
 import type { DaemonClient } from "./daemonClient";
 import type { DaemonLifecycle } from "./daemonLifecycle";
-import { isCssDocument, type DocumentSync } from "./documentSync";
+import { isTrackedDocument, type DocumentSync } from "./documentSync";
 import {
   BASE_LABEL,
   noChangesText,
@@ -13,6 +13,7 @@ import {
   branchNote,
   changeAtCursor,
   editSides,
+  formatChange,
   formatCount,
   formatAge,
   ghostText,
@@ -35,6 +36,9 @@ function countLine(c: Count): string {
   if (c.unknown) parts.push(`${c.unknown.toLocaleString("en-US")} unknown`);
   return parts.join(" · ") + (c.complete ? "" : " _(resolving…)_");
 }
+
+/** CSS and JavaScript files (scripts count the pages that load them). */
+const SELECTOR: vscode.DocumentSelector = [{ language: "css", scheme: "file" }, { language: "javascript", scheme: "file" }];
 
 export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvider, vscode.HoverProvider {
   private readonly normal = vscode.window.createTextEditorDecorationType({
@@ -89,8 +93,8 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
           }
         }
       }),
-      vscode.languages.registerCodeLensProvider({ language: "css", scheme: "file" }, this),
-      vscode.languages.registerHoverProvider({ language: "css", scheme: "file" }, this),
+      vscode.languages.registerCodeLensProvider(SELECTOR, this),
+      vscode.languages.registerHoverProvider(SELECTOR, this),
     );
     this.updateStatus();
   }
@@ -254,7 +258,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   // -------------------------------------------------------------- CodeLens
 
   async provideCodeLenses(doc: vscode.TextDocument, token: vscode.CancellationToken): Promise<vscode.CodeLens[]> {
-    if (!isCssDocument(doc) || !this.client.connected || !this.sync.isTracked(doc.uri.fsPath)) return [];
+    if (!isTrackedDocument(doc) || !this.client.connected || !this.sync.isTracked(doc.uri.fsPath)) return [];
     if (vscode.workspace.getConfiguration("cssBlastRadius").get<boolean>("codeLens") !== true) return [];
     const path = doc.uri.fsPath;
     await this.sync.whenSynced(path);
@@ -308,14 +312,14 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     if (ch.oldSelector && ch.oldSelector !== ch.selector) md.appendMarkdown(`was \`${ch.oldSelector}\`\n\n`);
     if (ch.definition) md.appendMarkdown(`${ch.definition.kind} \`${ch.definition.name}\` ${ch.definition.change}\n\n`);
     if (ch.changedProps?.length) md.appendMarkdown(`Properties: ${ch.changedProps.map((p) => `\`${p}\``).join(", ")}\n\n`);
-    md.appendMarkdown(`**${formatCount(ch.pages, ch.reasons)}** affected\n\n`);
+    md.appendMarkdown(ch.kind === "script" ? `**${formatChange(ch)}**\n\n` : `**${formatCount(ch.pages, ch.reasons)}** affected\n\n`);
     if (ch.gained && ch.lost) md.appendMarkdown(`Pages that gain the rule: ${countLine(ch.gained)}  \nPages that lose it: ${countLine(ch.lost)}\n\n`);
     else if (ch.kind === "removed" && ch.lost) md.appendMarkdown(`Pages that lose the rule: ${countLine(ch.lost)}\n\n`);
     if (ch.conditions.length) md.appendMarkdown(`Conditions: ${ch.conditions.map((c) => `\`${c}\``).join(", ")}\n\n`);
     for (const r of ch.reasons) md.appendMarkdown(`- ${reasonText(r)}\n`);
     if (ch.hint) md.appendMarkdown(`\n${ch.hint}\n`);
     if (ch.detail) md.appendMarkdown(`\n${ch.detail}\n`);
-    md.appendMarkdown(`\n\n_Open a page to see what actually changes._\n\n`);
+    md.appendMarkdown(ch.kind === "script" ? `\n\n_Page diffs don't run script edits yet._\n\n` : `\n\n_Open a page to see what actually changes._\n\n`);
     md.appendMarkdown(this.footer(a));
     const sides = editSides(ch);
     const base = { path: a.file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined };
@@ -329,7 +333,7 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
   private footer(a: FileAnswer): string {
     const parts = [`compared with ${BASE_LABEL[a.diffBase] ?? "the live site"}`];
     if (a.freshness) parts.push(`scanned ${formatAge(a.freshness.ageMs)}`);
-    if (!a.mapping.mapped) parts.push("file not matched to a stylesheet on the live site");
+    if (!a.mapping.mapped) parts.push(a.changes.some((c) => c.kind === "script") || /\.[mc]?js$/i.test(a.file) ? "no scanned page loads this script" : "file not matched to a stylesheet on the live site");
     if (a.editing) parts.push("finish typing to update");
     return `_${parts.join(" · ")}_`;
   }
