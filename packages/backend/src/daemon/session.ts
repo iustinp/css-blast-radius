@@ -18,7 +18,7 @@ import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0
 import { SiteIndex } from "../index/siteIndex.js";
 import { Store, type PageRow, type VariantInfo } from "../index/store.js";
 import { L1Pool } from "../l1/pool.js";
-import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type SheetEdit } from "../l2/render.js";
+import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type ScriptEdit, type SheetEdit } from "../l2/render.js";
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
@@ -137,6 +137,7 @@ interface FileState {
 /** The selected edits as the visual diff applies them. */
 interface RenderEdits {
   edits: SheetEdit[];
+  scripts: ScriptEdit[];
   list: PageDiffView["edits"];
   /** Edits in every changed file, selected or not. */
   total: number;
@@ -1311,7 +1312,7 @@ export class Session extends EventEmitter {
     }
     if (!job && s.assessed) {
       const rank = (it: PageItem) => (!it.impact ? 1 : it.impact.status === "changed" ? 0 : it.impact.status === "inconclusive" ? 2 : 3);
-      items.sort((a, b) => rank(a) - rank(b) || (b.impact?.changed ?? 0) - (a.impact?.changed ?? 0) || (b.impact?.moved ?? 0) - (a.impact?.moved ?? 0));
+      items.sort((a, b) => rank(a) - rank(b) || (b.impact?.changed ?? 0) - (a.impact?.changed ?? 0) || (b.impact?.errors ?? 0) - (a.impact?.errors ?? 0) || (b.impact?.moved ?? 0) - (a.impact?.moved ?? 0));
     }
     return s;
   }
@@ -1401,22 +1402,34 @@ export class Session extends EventEmitter {
 
   private async pageImpact(url: string, prep: RenderEdits, job: AssessJob): Promise<PageImpact> {
     if (prep.list.length === 0) return { status: "unchanged", changed: 0, moved: 0, devices: [] };
-    if (prep.edits.length === 0) return inconclusiveImpact("Your changed files don't match any stylesheet on the site.");
+    if (prep.edits.length === 0 && prep.scripts.length === 0) return inconclusiveImpact("Your changed files don't match any stylesheet or script on the site.");
     const page = this.pageRow(url);
     const variants = this.pageVariants(page);
     if (page.status !== "ok" || !variants.length) return inconclusiveImpact(`The page's scan failed: ${page.error ?? "no stored copy"}`);
+    const runs = loadsAny(page, prep.scripts);
+    if (prep.edits.length === 0 && !runs) return inconclusiveImpact("The page doesn't load the scripts you edited.");
     const { props, unresolved } = this.propsFor(prep.changes, prep.models, page);
     const devices: PageImpact["devices"] = [];
     for (const variant of variants) {
       if (job.cancelled || job.key !== this.assessKey()) break;
-      const d = await this.getRenderer().measure({ page, variant, mode: "shell", edits: prep.edits, props, maxElements: 0, background: true });
+      const d = await this.getRenderer().measure({
+        page,
+        variant,
+        mode: runs ? "live" : "shell",
+        edits: prep.edits,
+        scripts: runs ? prep.scripts : undefined,
+        props,
+        maxElements: 0,
+        background: true,
+      });
       let status = d.status;
       let reason = d.reason;
       if (status === "unchanged" && unresolved.length) {
         status = "inconclusive";
         reason = `No stylesheet on this page uses ${unresolved.join(", ")}: what it feeds (inline styles, scripts) wasn't compared.`;
       }
-      devices.push({ name: variant.name, status, changed: d.changedElements, moved: d.movedElements, ...(reason ? { reason } : {}) });
+      const errors = d.errors?.added.length;
+      devices.push({ name: variant.name, status, changed: d.changedElements, moved: d.movedElements, ...(errors ? { errors } : {}), ...(reason ? { reason } : {}) });
     }
     const status = devices.some((d) => d.status === "changed") ? "changed" : devices.every((d) => d.status === "unchanged") ? "unchanged" : "inconclusive";
     const reason = status === "inconclusive" ? devices.find((d) => d.reason)?.reason : undefined;
@@ -1424,6 +1437,7 @@ export class Session extends EventEmitter {
       status,
       changed: devices.reduce((n, d) => n + d.changed, 0),
       moved: devices.reduce((n, d) => n + d.moved, 0),
+      ...(devices.some((d) => d.errors) ? { errors: devices.reduce((n, d) => n + (d.errors ?? 0), 0) } : {}),
       devices,
       ...(reason ? { reason } : {}),
     };
@@ -1663,7 +1677,7 @@ export class Session extends EventEmitter {
     const page = this.pageRow(p.url);
     const t0 = performance.now();
     const editRevision = this.editRevision;
-    const { edits, list, total, changes, models, warnings } = await this.renderEdits();
+    const { edits, scripts, list, total, changes, models, warnings } = await this.renderEdits();
     const variants = this.pageVariants(page);
     const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
     const view: PageDiffView = {
@@ -1696,22 +1710,30 @@ export class Session extends EventEmitter {
         : this.noChangesText();
       return finish();
     }
-    if (edits.length === 0) {
+    const runs = loadsAny(page, scripts);
+    if (edits.length === 0 && !runs) {
       view.status = "inconclusive";
-      view.reason = "Your changed files don't match any stylesheet on the site, so they can't be applied to this page.";
+      view.reason = scripts.length
+        ? "This page doesn't load the scripts you edited."
+        : "Your changed files don't match any stylesheet or script on the site, so they can't be applied to this page.";
       return finish();
     }
+    // Script edits run only on the live page, loaded with and without them.
+    view.live = runs || !!p.live;
+    if (runs) view.scripts = true;
     const { props, unresolved } = this.propsFor(changes, models, page);
     const diff = await this.getRenderer().measure({
       page,
       variant,
-      mode: p.live ? "live" : "shell",
+      mode: view.live ? "live" : "shell",
       edits,
+      scripts: runs ? scripts : undefined,
       props,
       screenshots: true,
       maxElements: 500,
       targets: targetsFor(changes),
     });
+    if (diff.errors) view.errors = diff.errors;
     view.status = diff.status;
     view.reason = diff.reason;
     view.warnings = [...warnings, ...diff.warnings];
@@ -1738,7 +1760,7 @@ export class Session extends EventEmitter {
 
   /** The diff viewer's empty page: per tab, and on a branch only its own changes count. */
   private noChangesText(): string {
-    const what = this.tab === "committed" ? "committed CSS changes" : this.tab === "uncommitted" ? "saved CSS changes" : "CSS changes";
+    const what = this.tab === "committed" ? "committed changes" : this.tab === "uncommitted" ? "saved changes" : "changes";
     return this.branch && !this.mainChanges ? `Your branch has no ${what} right now.` : `You have no ${what} compared with the live site right now.`;
   }
 
@@ -1809,7 +1831,23 @@ export class Session extends EventEmitter {
       if (texts.conflict) warnings.push(conflictWarning(e.file, this.branch));
       edits.push({ sheetKeys: e.keys, baseText: texts.baseText, editedText: texts.editedText });
     }
-    return { edits, list, total, changes, models, warnings };
+    const scripts: ScriptEdit[] = [];
+    await this.scripts.prepare();
+    for (const s of this.scripts.changed()) total += s.r.hunks.length;
+    const sel = this.selection;
+    const keep = (path: string, id: string) => {
+      const e = sel?.find((x) => x.path === path);
+      return !sel || (!!e && (!e.changeIds || e.changeIds.includes(id)));
+    };
+    for (const s of this.scripts.renderable(keep)) {
+      const file = this.relPath(s.path);
+      list.push({ file, changes: s.applied, of: s.of });
+      if (!s.keys.length) continue;
+      const texts = await this.renderTexts(s.base, s.text);
+      if (texts.conflict) warnings.push(conflictWarning(file, this.branch));
+      scripts.push({ paths: s.keys, baseText: texts.baseText, editedText: texts.editedText });
+    }
+    return { edits, scripts, list, total, changes, models, warnings };
   }
 
   // -------------------------------------------------------------- capture
@@ -1999,6 +2037,11 @@ function toEditor(d: ChangeDetail, rule: StyleRule, editor: StylesheetModel): vo
 
 function inconclusiveImpact(reason: string): PageImpact {
   return { status: "inconclusive", changed: 0, moved: 0, devices: [], reason };
+}
+
+/** The page loaded one of the edited scripts when it was scanned. */
+function loadsAny(page: PageRow, scripts: ScriptEdit[]): boolean {
+  return scripts.some((s) => s.paths.some((k) => page.loaded?.[k] !== undefined));
 }
 
 function conflictWarning(file: string, bp: BranchPoint | undefined): string {

@@ -6,7 +6,8 @@
 // run of lines counts as exact on the pages where the code it replaces ran,
 // and as possible on the other pages that load the script (it may run after a
 // click; or there is no coverage of the version edited). What the edit does
-// on a page isn't checked yet.
+// at load is shown by loading a page with and without it (l2/render.ts,
+// measureLoads); what it does after clicks isn't checked yet.
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -460,6 +461,24 @@ export class ScriptTracker {
     return out;
   }
 
+  /**
+   * Changed scripts as the page diffs apply them, with only the edits `keep`
+   * picks: the URL paths each is served at, its base, and its text then.
+   */
+  renderable(keep: (path: string, id: string) => boolean): Array<{ path: string; keys: string[]; base?: BaseText; text: string; applied: number; of: number }> {
+    const tab = this.host.tab();
+    const out: Array<{ path: string; keys: string[]; base?: BaseText; text: string; applied: number; of: number }> = [];
+    for (const { path, r } of this.changed()) {
+      const s = this.files.get(path)!;
+      const ids = new Set(r.hunks.filter((h) => keep(path, h.id)).map((h) => h.id));
+      if (!ids.size) continue;
+      const full = this.tabText(s, tab) ?? "";
+      const text = ids.size === r.hunks.length ? full : applyHunks(s.base?.text ?? "", full, (h) => ids.has(h.id));
+      out.push({ path, keys: this.keysFor(path), base: s.base, text, applied: ids.size, of: r.hunks.length });
+    }
+    return out;
+  }
+
   /** The editor's per-line counts: each changed run of lines is a "rule". */
   rules(path: string): RuleCount[] {
     // The editor's lines: the open text, or the file on disk.
@@ -524,7 +543,19 @@ export class ScriptTracker {
 
 /** Changed runs of lines from `before` to `after`, with ids stable while the run's content is. */
 export function diffHunks(before: string, after: string): Hunk[] {
+  return diffPieces(before, after).hunks;
+}
+
+/** `before` with only the changed runs `keep` picks from `after`. */
+export function applyHunks(before: string, after: string, keep: (h: Hunk) => boolean): string {
+  const { hunks, pieces } = diffPieces(before, after);
+  return pieces.map((p) => (typeof p === "string" ? p : keep(hunks[p.hunk]) ? p.added : p.removed)).join("");
+}
+
+/** The diff's hunks, and its text as unchanged runs and the hunks' removed and added text, in order. */
+function diffPieces(before: string, after: string): { hunks: Hunk[]; pieces: Array<string | { hunk: number; removed: string; added: string }> } {
   const out: Hunk[] = [];
+  const pieces: Array<string | { hunk: number; removed: string; added: string }> = [];
   const seen = new Map<string, number>();
   let line = 1;
   let baseLine = 1;
@@ -534,6 +565,7 @@ export function diffHunks(before: string, after: string): Hunk[] {
     const key = sha256(`${cur.removed.join("")}\0${cur.added.join("")}`).slice(0, 12);
     const n = seen.get(key) ?? 0;
     seen.set(key, n + 1);
+    pieces.push({ hunk: out.length, removed: cur.removed.join(""), added: cur.added.join("") });
     out.push({ id: `s:${key}:${n}`, start: cur.start, end: cur.start + cur.added.length - 1, baseStart: cur.baseStart, added: cur.added.length, removed: cur.removed.length });
     cur = undefined;
   };
@@ -541,6 +573,7 @@ export function diffHunks(before: string, after: string): Hunk[] {
     const lines = splitLines(part.value);
     if (!part.added && !part.removed) {
       flush();
+      pieces.push(part.value);
       line += lines.length;
       baseLine += lines.length;
       continue;
@@ -555,7 +588,7 @@ export function diffHunks(before: string, after: string): Hunk[] {
     }
   }
   flush();
-  return out;
+  return { hunks: out, pieces };
 }
 
 /** Offsets where each line starts (index 0: line 1). */

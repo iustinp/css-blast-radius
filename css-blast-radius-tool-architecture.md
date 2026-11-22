@@ -1013,9 +1013,22 @@ index or edit revisions.
   lines is `exact` (`script-runs`) on the pages where the base code it
   replaces ran, and `possible` elsewhere (`script-not-run`, or
   `script-no-coverage` / `script-loaded` when the served version or the scan
-  has none). Code run only by interactions, and what an edit changes, is epic
-  #5 (J2–J3). A syntax error breaks every loading page but counts like any
-  edit.
+  has none). A page diff with script edits (J3a) always runs live: the page
+  loads in a fresh context without the picked script hunks, then with them
+  (each edited file is served as base or edited text, every other response is
+  recorded on the first load and replayed after), with `Date`, `Math.random`
+  and `crypto` seeded so both loads see the same values. After the load
+  settles and the DOM stays quiet for 300 ms (2 s at most), the two snapshots
+  are matched structurally (sibling LCS on tag and id, since node ids differ
+  per tab) and compared on the usual properties plus text and attributes.
+  When anything differs, the base is loaded a second time: elements that
+  differ between the two base loads (timers, live content) are left out with a
+  warning, and only errors (`pageerror` and `console.error`) that the second
+  base load doesn't throw count as new. That is 2–3 loads per page and device,
+  so an assessment with script edits costs about that much more. Pages that
+  don't load an edited script take the normal stylesheet path. Code run only
+  by interactions is epic #5 (J2–J3b). A syntax error breaks every loading
+  page but counts like any edit.
 - **Build pipelines without an adapter** — unavailable for their files until
   one exists.
 - **Cross-origin stylesheets and iframes, stylesheets inside shadow roots** —

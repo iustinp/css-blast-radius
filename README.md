@@ -121,7 +121,7 @@ In a git repository, only **your branch's changes** count: if `main` has moved o
   - **N** jumps to the next change;
   - **Check on the live page** loads the real page instead of the stored copy;
   - **Open in browser** opens the same view outside VS Code.
-- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, compared with the version the scan saw (read from git by its blob id). The scan records which code ran while each page loaded (V8 block coverage), so each changed run of lines shows `◀ runs on 12 pages · loaded by 40`: **exact** where the code it replaces ran at load, **possible** on the other pages that load the script (it may run after a click, or the scan predates coverage: rescan). Code that runs only on interaction, and what the edit changes on a page, aren't checked yet; the before/after view doesn't apply script edits ([#5](https://github.com/iustinp/css-blast-radius/issues/5)). With both kinds edited, the panel's **CSS** and **JS** chips (next to *All edits*) pick or unpick each kind like the edit chips, so you can look at CSS only, JS only or both, and the status bar shows the two counts apart.
+- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, compared with the version the scan saw (read from git by its blob id). The scan records which code ran while each page loaded (V8 block coverage), so each changed run of lines shows `◀ runs on 12 pages · loaded by 40`: **exact** where the code it replaces ran at load, **possible** on the other pages that load the script (it may run after a click, or the scan predates coverage: rescan). A page's before/after view with script edits loads the live page twice, without and with the edits you picked (the rest of the site's responses are replayed, and dates and random numbers are fixed, so both loads see the same thing), and shows the elements whose styles, text or attributes change, plus errors the edit adds (`✖ New error`) or fixes. Elements that change by themselves between two loads of the unedited page are left out with a warning. *Assess impact* does the same for every page, so it takes 2–3 loads per page. Code that runs only on interaction isn't checked yet ([#5](https://github.com/iustinp/css-blast-radius/issues/5)). With both kinds edited, the panel's **CSS** and **JS** chips (next to *All edits*) pick or unpick each kind like the edit chips, so you can look at CSS only, JS only or both, and the status bar shows the two counts apart.
 - If CSS files change outside the editor (a pull, a branch switch, another tool) and that moves the total, a notice says how: `now 40 pages affected (was 12 pages)`. Undoing back to the saved text isn't such a change.
 
 ### 5. See which CSS isn't on the live site yet
@@ -202,7 +202,7 @@ Not yet implemented:
 - Login, for hosting the server for a team.
 - Shared team index.
 - Source maps and build adapters (Sass, PostCSS, CSS-in-JS).
-- JavaScript beyond page load ([#5](https://github.com/iustinp/css-blast-radius/issues/5)): code that runs only after interactions, and what an edit changes on a page.
+- JavaScript beyond page load ([#5](https://github.com/iustinp/css-blast-radius/issues/5)): code that runs only after clicks and other interactions.
 
 Known limitations:
 - **Not captured:** Shadow DOM and iframes, and new pages missing from `/query-index.json` or not near a sitemap group (rescan the group).

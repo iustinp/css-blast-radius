@@ -110,6 +110,7 @@
     gap: 4px;
   }
   .dbtn:hover { background: #383838; }
+  .dbtn:disabled { opacity: .55; cursor: default; background: #2b2b2b; }
   .dbar select {
     background: #2b2b2b;
     border: 1px solid #3c3c3c;
@@ -147,6 +148,9 @@
   }
   .dmeta .bright { color: #ddd; }
   .dmeta .dwarn { color: #e0c27a; flex-basis: 100%; }
+  .dmeta .derr { flex-basis: 100%; white-space: pre-line; }
+  .dmeta .derr .added { color: #ff7b72; }
+  .dmeta .derr .fixed { color: var(--ok); }
   .dmeta .updated-flash {
     display: inline-block;
     color: var(--ok);
@@ -404,6 +408,7 @@
   <span id="dTime"></span>
   <span class="updated-flash hidden" id="dUpdated">● Updated</span>
   <span class="dwarn hidden" id="dWarn"></span>
+  <span class="derr hidden" id="dErr"></span>
 </div>
 
 <div class="dview" id="dview">
@@ -557,7 +562,11 @@ function applyDiffData(data, keepScroll, prevScroll) {
 
   // Live button label
   const liveBtn = $("#dLive");
-  if (data.live) {
+  liveBtn.disabled = !!data.scripts;
+  if (data.scripts) {
+    liveBtn.textContent = "Live page";
+    liveBtn.title = "Script edits are always checked on the live page: it's loaded with and without them";
+  } else if (data.live) {
     liveBtn.textContent = "Use stored copy";
     liveBtn.title = "Switch back to the stored copy of this page";
   } else {
@@ -579,13 +588,22 @@ function applyDiffData(data, keepScroll, prevScroll) {
     $("#dEdits").textContent = total ? "No edits picked in your editor" : "Showing current edits";
   }
 
-  const timeText = data.live
+  const timeText = data.scripts
+    ? `Live page, loaded with and without your script edits (just now${data.timingMs ? `, ${data.timingMs}ms` : ""})`
+    : data.live
     ? `Live page (checked just now${data.timingMs ? `, ${data.timingMs}ms` : ""})`
     : `Stored copy · scanned ${timeAgo(data.scannedAt)}${data.timingMs ? ` (${data.timingMs}ms)` : ""}`;
   $("#dTime").textContent = timeText;
   const warn = $("#dWarn");
   warn.textContent = (data.warnings || []).map((w) => `⚠ ${w}`).join("  ");
   warn.classList.toggle("hidden", !(data.warnings || []).length);
+  const errs = data.errors || { added: [], fixed: [] };
+  const errEl = $("#dErr");
+  errEl.innerHTML = [
+    ...errs.added.map((e) => `<span class="added">✖ New error: ${esc(e)}</span>`),
+    ...errs.fixed.map((e) => `<span class="fixed">✓ No longer errors: ${esc(e)}</span>`),
+  ].join("\n");
+  errEl.classList.toggle("hidden", !errs.added.length && !errs.fixed.length);
 
   // Width and images
   const stage = $("#dstage");
@@ -635,7 +653,11 @@ function applyDiffData(data, keepScroll, prevScroll) {
     emptyBanner.textContent = `Can't compare this page: ${data.reason || "unknown reason"}`;
     emptyBanner.classList.remove("hidden");
   } else if (data.status === "unchanged" || zones.length === 0) {
-    emptyBanner.textContent = data.reason || "This page uses the rule, but nothing visible changed.";
+    const added = data.errors?.added.length || 0;
+    emptyBanner.textContent = data.reason
+      || (added ? `Nothing visible changed, but the page throws ${added === 1 ? "a new error" : `${added} new errors`} with your edits.`
+      : data.scripts ? "This page loads your script, but nothing visible changed."
+      : "This page uses the rule, but nothing visible changed.");
     emptyBanner.classList.remove("hidden");
   } else {
     emptyBanner.classList.add("hidden");
@@ -894,6 +916,7 @@ document.addEventListener("click", (e) => {
     D.zi = +t.dataset.zi - 1;
     jump(1);
   } else if (t.id === "dLive") {
+    if (t.disabled) return;
     live = !live;
     fetchDiff(false);
   } else if (t.id === "dBrowser") {

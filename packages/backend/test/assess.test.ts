@@ -99,6 +99,25 @@ describe.skipIf(!!process.env.CBR_NO_BROWSER)("Session: assess impact", () => {
     expect(after.assessment).toMatchObject({ assessed: 2, changed: 1, maxChanged: 1 });
   });
 
+  it("loads each page with and without a script edit, counting the errors it adds", async () => {
+    await edit(original);
+    const jsPath = path.join(path.dirname(cssPath), "..", "js", "app.js");
+    const js = fs.readFileSync(jsPath, "utf8");
+    const onReady = 'document.addEventListener("DOMContentLoaded", () => { if (location.pathname.endsWith("/about.html")) document.querySelector(".title").textContent = "Edited"; else null.boom; });';
+    await session.open(jsPath, `${js}\n${onReady}\n`, 1);
+    try {
+      const done = finished();
+      if ((await session.assess({ path: jsPath })).running) await done;
+      const list = await session.getPages({ path: jsPath });
+      expect(list.pages.map((x) => [path.basename(x.url), x.impact?.status, x.impact?.changed, x.impact?.errors])).toEqual([
+        ["about.html", "changed", 1, undefined],
+        ["index.html", "changed", 0, 1],
+      ]);
+    } finally {
+      await session.close(jsPath);
+    }
+  }, 60_000);
+
   it("stops when an edit makes it out of date", async () => {
     await edit(original.replace("color: darkred;", "color: blue;"));
     const done = finished();

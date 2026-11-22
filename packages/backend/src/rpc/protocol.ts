@@ -313,15 +313,17 @@ export interface PagesResult {
 /** analysis/assess: the same list as analysis/getPages, checked visually in the background. */
 export type AssessParams = Omit<GetPagesParams, "offset" | "limit" | "editRevision">;
 
-/** One page checked visually with every current edit, on each device (L2, no screenshots). */
+/** One page checked visually with every current edit, on each device (L2, no screenshots; L3 with script edits). */
 export interface PageImpact {
-  /** changed: some device looks different; inconclusive: none does, but one couldn't be checked. */
+  /** changed: some device looks different (or throws new errors); inconclusive: none does, but one couldn't be checked. */
   status: "changed" | "unchanged" | "inconclusive";
-  /** Elements whose own styles change, summed over devices. */
+  /** Elements whose own styles (or, with script edits, text and attributes) change, summed over devices. */
   changed: number;
   /** Elements that only move or resize, summed over devices. */
   moved: number;
-  devices: Array<{ name: string; status: "changed" | "unchanged" | "inconclusive"; changed: number; moved: number; reason?: string }>;
+  /** Script edits: errors the page throws or logs only with the edits, summed over devices. */
+  errors?: number;
+  devices: Array<{ name: string; status: "changed" | "unchanged" | "inconclusive"; changed: number; moved: number; errors?: number; reason?: string }>;
   reason?: string;
 }
 
@@ -436,6 +438,10 @@ export interface PageDiffView {
   anchorLeaves?: number;
   changedElements: number;
   movedElements: number;
+  /** Script edits ran: the live page was loaded fresh with and without the edits. */
+  scripts?: boolean;
+  /** Script edits: errors the page throws or logs only with the edits (`added`), and the ones they fix. */
+  errors?: { added: string[]; fixed: string[] };
   timingMs: number;
 }
 

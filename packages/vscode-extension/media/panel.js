@@ -408,15 +408,15 @@
   function impactText(im) {
     if (im.status === "unchanged") return "No visual change";
     if (im.status === "inconclusive") return `Couldn't tell: ${im.reason || "the page couldn't be compared"}`;
-    const part = (d) => [d.changed ? plural(d.changed, "element changes", "elements change") : "", d.moved ? `${fmt(d.moved)} move` : ""]
+    const part = (d) => [d.changed ? plural(d.changed, "element changes", "elements change") : "", d.moved ? `${fmt(d.moved)} move` : "", d.errors ? plural(d.errors, "new error", "new errors") : ""]
       .filter(Boolean).join(", ") || (d.status === "inconclusive" ? "couldn't tell" : "no change");
     return `Looks different · ${im.devices.length > 1 ? im.devices.map((d) => `${d.name}: ${part(d)}`).join(" · ") : part(im)}`;
   }
 
-  // Deeper blue for more changed elements (log scale); a faint tint when things only move.
+  // Deeper blue for more changed elements (log scale); a faint tint when things only move or only throw.
   function heat(im) {
     if (!im || im.status !== "changed") return 0;
-    if (!im.changed) return 0.08;
+    if (!im.changed) return im.errors ? 0.14 : 0.08;
     const max = (assessment && assessment.maxChanged) || im.changed;
     return Math.min(0.6, 0.14 + 0.46 * Math.log1p(im.changed) / Math.log1p(max));
   }

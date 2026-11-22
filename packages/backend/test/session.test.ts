@@ -301,7 +301,7 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
       expect(selectors()).toEqual([]);
       expect(total.files).toEqual([]);
       const view = await session.pageDiff({ url: session.index!.pages[0].url });
-      expect(view.reason).toMatch(/no committed CSS changes/);
+      expect(view.reason).toMatch(/no committed changes/);
 
       execSync("git add . && git commit -q -m tab-saved", { cwd: ws, stdio: "ignore" });
       await session.setTab("committed");
@@ -383,4 +383,34 @@ describe.skipIf(skipBrowser)("Session integration on fixture site", () => {
     }
     expect(session.sessionTotal().files.some((f) => f.file === jsPath)).toBe(false);
   }, 20_000);
+
+  // k. script page diffs (#5, J3a): the live page loaded with and without the picked script edits
+  it("k. script page diffs: the page loaded with and without the picked edits", async () => {
+    const jsPath = path.join(ws, "js", "app.js");
+    const original = fs.readFileSync(jsPath, "utf8");
+    const retitle = '\ndocument.addEventListener("DOMContentLoaded", () => { document.querySelector(".title").textContent = "Edited"; });\n';
+    const edited = original.replace("ready: true", "ready: 1") + retitle;
+    const about = session.index!.pages.find((p) => p.url.endsWith("/about.html"))!.url;
+    try {
+      const res = await session.open(jsPath, edited, 1);
+      const [top, added] = res.answer.changes;
+      const view = await session.pageDiff({ url: about });
+      expect(view).toMatchObject({ status: "changed", live: true, scripts: true, edits: [{ file: "js/app.js", changes: 2, of: 2 }] });
+      expect(view.zones.map((z) => z.label)).toEqual(["body > div.card > span.title"]);
+      expect(view.zones[0].props).toContainEqual({ prop: "text", before: "Another card", after: "Edited" });
+      expect(view.before).toMatch(/^data:image\/jpeg/);
+
+      // Only the picked edits are applied.
+      session.setSelection([{ path: jsPath, changeIds: [top.id] }]);
+      const topOnly = await session.pageDiff({ url: about });
+      expect(topOnly).toMatchObject({ status: "unchanged", edits: [{ file: "js/app.js", changes: 1, of: 2 }] });
+      session.setSelection([{ path: jsPath, changeIds: [added.id] }]);
+      expect((await session.pageDiff({ url: about })).status).toBe("changed");
+      session.setSelection([]);
+      expect((await session.pageDiff({ url: about })).reason).toMatch(/None of your edits are picked/);
+    } finally {
+      session.setSelection(null);
+      await session.close(jsPath);
+    }
+  }, 60_000);
 });

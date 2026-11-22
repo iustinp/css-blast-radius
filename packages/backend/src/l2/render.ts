@@ -2,7 +2,9 @@
 // once (L2: the stored shell, scripts off, assets from the store; L3: the
 // live page with scripts and its recipe), the mapped stylesheet is set to the
 // base text and then the edited text through CDP, and both states are
-// measured with DOMSnapshot in the same tab.
+// measured with DOMSnapshot in the same tab. Script edits (§17, J3a) can't be
+// swapped in a loaded page: it is loaded fresh for each side instead (see
+// measureLoads).
 
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import type { CbrConfig, Profile } from "../config.js";
@@ -20,12 +22,21 @@ export interface SheetEdit {
   editedText: string;
 }
 
+export interface ScriptEdit {
+  /** URL paths the edited file is served at (e.g. "/js/app.js"). */
+  paths: string[];
+  baseText: string;
+  editedText: string;
+}
+
 export interface MeasureRequest extends Partial<SheetEdit> {
   page: PageRow;
   variant: VariantInfo;
   mode: RenderMode;
   /** Several edited files at once (the diff viewer); overrides sheetKeys/baseText/editedText. */
   edits?: SheetEdit[];
+  /** Edited scripts: the page is loaded fresh with its scripts for each side (live mode only). */
+  scripts?: ScriptEdit[];
   /** Properties to compare; shorthands are expanded in the page. */
   props: string[];
   screenshots?: boolean;
@@ -91,6 +102,8 @@ export interface PageDiff {
    */
   anchors?: number[];
   anchorLeaves?: number;
+  /** Script edits: errors the edited page throws or logs that the base page doesn't, and the reverse. */
+  errors?: { added: string[]; fixed: string[] };
   timingMs: number;
 }
 
@@ -127,7 +140,70 @@ interface Snapshot {
   nodes: { parent: number[]; type: number[]; name: string[]; attrs: string[][]; keys: string[] };
   /** node key → node index */
   index: Map<string, number>;
+  /** Script edits: each element's own text (its text children), by node key. */
+  text?: Map<string, string>;
 }
+
+/** One load of a page for a script edit. */
+interface Load {
+  snap: Snapshot;
+  shot?: string;
+  width?: number;
+  errors: string[];
+  /** Requests for the edited files. */
+  hits: number;
+}
+
+/**
+ * Every load of a page for a script edit starts at the same time and draws the
+ * same random numbers (times still pass), so they agree on what depends on them.
+ */
+const determinismScript = (start: number) => `(() => {
+  const RealDate = Date;
+  const t0 = performance.now();
+  const now = () => ${start} + Math.floor(performance.now() - t0);
+  function FakeDate(...args) {
+    if (!new.target) return new RealDate(now()).toString();
+    return args.length ? new RealDate(...args) : new RealDate(now());
+  }
+  FakeDate.prototype = RealDate.prototype;
+  FakeDate.now = now;
+  FakeDate.parse = RealDate.parse;
+  FakeDate.UTC = RealDate.UTC;
+  Object.defineProperty(FakeDate, 'name', { value: 'Date' });
+  window.Date = FakeDate;
+  let seed = 0x2545f491;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  Math.random = rand;
+  try {
+    crypto.getRandomValues = function (arr) {
+      const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(rand() * 256);
+      return arr;
+    };
+    crypto.randomUUID = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = Math.floor(rand() * 16);
+      return (c === 'x' ? r : (r & 3) | 8).toString(16);
+    });
+  } catch {}
+})();`;
+
+/** Waits until the page stops changing (300 ms without DOM mutations, at most 2 s). */
+const QUIET_SCRIPT = `new Promise((resolve) => {
+  let timer;
+  const done = () => { mo.disconnect(); clearTimeout(cap); resolve(true); };
+  const mo = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(done, 300); });
+  mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  timer = setTimeout(done, 300);
+  const cap = setTimeout(done, 2000);
+})`;
+
+const MAX_ERRORS = 20;
 
 /** A free slot goes to interactive work first, then to background work. */
 class Semaphore {
@@ -165,11 +241,14 @@ export class Renderer {
     return this.cfg.profiles.find((p) => p.name === name) ?? this.cfg.profiles[0];
   }
 
+  private launch(): Promise<Browser> {
+    return (this.browser ??= chromium.launch({ headless: true }));
+  }
+
   private context(profile: string): Promise<BrowserContext> {
     let c = this.contexts.get(profile);
     if (!c) {
-      this.browser ??= chromium.launch({ headless: true });
-      c = this.browser.then((b) => newProfileContext(b, this.profile(profile), { initScript: false }));
+      c = this.launch().then((b) => newProfileContext(b, this.profile(profile), { initScript: false }));
       this.contexts.set(profile, c);
     }
     return c;
@@ -220,6 +299,7 @@ export class Renderer {
       return out;
     };
     if (req.page.status !== "ok") return done("inconclusive", `page capture failed: ${req.page.error ?? "unknown"}`);
+    if (req.scripts?.length) return this.measureLoads(req, edits, out, done);
     if (edits.length === 0) return done("inconclusive", "stylesheet-not-mapped: no page stylesheet to replace");
     if (req.mode === "shell" && req.page.fidelity !== undefined && req.page.fidelity < 0.98) {
       out.warnings.push(`shell replay fidelity ${(req.page.fidelity * 100).toFixed(1)}% (boxes within 1px of the live page)`);
@@ -272,10 +352,7 @@ export class Renderer {
 
       if (sheets.size === 0) return done("inconclusive", "the edited stylesheet is not loaded on this page");
 
-      const requested = [...new Set([...BASE_PROPS, ...(req.props.length ? req.props : DEFAULT_PROPS)])];
-      const props = ((await page.evaluate(`(${EXPAND_SCRIPT})(${JSON.stringify(requested)})`)) as string[]).slice(0, MAX_PROPS);
-      if (requested.length + 10 < props.length) out.warnings.push(`compared the first ${MAX_PROPS} longhands only`);
-      out.comparedProps = props;
+      const props = await comparedProps(page, req, out);
 
       const apply = async (side: "baseText" | "editedText") => {
         for (const [id, edit] of sheets) await cdp.send("CSS.setStyleSheetText", { styleSheetId: id, text: edit[side] });
@@ -297,7 +374,7 @@ export class Renderer {
       }
 
       const targets = req.targets?.length ? await matchTargets(page, cdp, req.targets, props).catch(() => undefined) : undefined;
-      diffSnapshots(before, after, props, req.maxElements ?? 200, out, targets);
+      diffSnapshots(before, after, props, req.maxElements ?? 200, out, { targets });
       if (out.screenshots) {
         const { anchors, leaves } = anchorsOf(before, after);
         out.anchors = anchors;
@@ -311,6 +388,129 @@ export class Renderer {
     }
   }
 
+  /**
+   * Script edits: the page is loaded fresh for each side with its scripts
+   * running and the edited files (scripts, and stylesheets too) served as
+   * their base or edited text; everything else the first load fetched is
+   * served the same again, and times and random numbers start the same.
+   * Elements are matched across loads by their place in the tree. When the
+   * sides differ, the base side is loaded once more: what differs between
+   * those two loads changes by itself (timers, live content) and is left out.
+   */
+  private async measureLoads(req: MeasureRequest, edits: SheetEdit[], out: PageDiff, done: (status: PageDiff["status"], reason?: string) => PageDiff): Promise<PageDiff> {
+    out.mode = "live";
+    let browser: Browser;
+    try {
+      browser = await this.launch();
+    } catch (err: any) {
+      await this.dropBroken(req.variant.profile);
+      return done("inconclusive", `browser unavailable: ${String(err?.message ?? err).split("\n")[0]}`);
+    }
+    const served = new Map<string, { type: string; base: string; edited: string }>();
+    for (const s of req.scripts ?? []) for (const p of s.paths) if (!served.has(p)) served.set(p, { type: "text/javascript", base: s.baseText, edited: s.editedText });
+    for (const e of edits) for (const k of e.sheetKeys) if (!served.has(k)) served.set(k, { type: "text/css", base: e.baseText, edited: e.editedText });
+    const replay = new Map<string, { status: number; headers: Record<string, string>; body: Buffer }>();
+    const profile = this.profile(req.variant.profile);
+    const recipe = req.variant.recipe ? this.cfg.recipes.find((r) => r.name === req.variant.recipe) : undefined;
+    const full = new URL(req.page.url, this.cfg.origin).href;
+    const timeout = this.cfg.capture.timeoutMs;
+    const init = determinismScript(Date.now());
+    let props: string[] = [];
+    let targets: Map<string, Set<string>> | undefined;
+
+    const load = async (side: "base" | "edited", first = false): Promise<Load> => {
+      const ctx = await newProfileContext(browser, profile, { initScript: false });
+      try {
+        await ctx.addInitScript({ content: init });
+        const page = await ctx.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (e) => errors.push(`${e.name || "Error"}: ${e.message}`));
+        page.on("console", (m) => {
+          if (m.type() === "error") errors.push(m.text());
+        });
+        let hits = 0;
+        await page.route("**/*", async (route) => {
+          const r = route.request();
+          const edit = served.get(sheetKey(this.cfg, r.url()));
+          if (edit) {
+            hits++;
+            await route.fulfill({ status: 200, headers: { "content-type": edit.type }, body: side === "base" ? edit.base : edit.edited }).catch(() => {});
+            return;
+          }
+          const id = `${r.method()} ${r.url()}\n${r.postData() ?? ""}`;
+          const saved = replay.get(id);
+          if (saved) {
+            await route.fulfill(saved).catch(() => {});
+            return;
+          }
+          const res = await serveSite(this.cfg, route);
+          if (res && !replay.has(id)) replay.set(id, { status: res.status, headers: replayHeaders(res.headers), body: res.body });
+        });
+        const resp = await page.goto(full, { waitUntil: "load", timeout });
+        if (!resp || resp.status() >= 400) throw new Error(`live load failed: HTTP ${resp?.status() ?? "no response"}`);
+        await page.waitForLoadState("networkidle", { timeout: 3_000 }).catch(() => {});
+        await page.evaluate(SETTLE_SCRIPT);
+        if (recipe) {
+          await runRecipe(page, recipe);
+          await page.evaluate(SETTLE_SCRIPT);
+        }
+        await page.evaluate(QUIET_SCRIPT).catch(() => {});
+        await page.evaluate(SETTLE_SCRIPT);
+        const cdp = await ctx.newCDPSession(page);
+        if (first) props = await comparedProps(page, req, out);
+        const snap = await snapshot(cdp, props, true);
+        if (first && req.targets?.length) {
+          await cdp.send("DOM.enable");
+          targets = await matchTargets(page, cdp, req.targets, props).catch(() => undefined);
+        }
+        const load: Load = { snap, errors: [...new Set(errors)].slice(0, MAX_ERRORS).map((e) => clip(e, 300)), hits };
+        if (req.screenshots && (first || side === "edited")) {
+          load.shot = (await page.screenshot({ type: "jpeg", quality: 70, fullPage: true, animations: "disabled", timeout })).toString("base64");
+          load.width = (await page.evaluate("Math.max(document.documentElement.scrollWidth, innerWidth)")) as number;
+        }
+        return load;
+      } finally {
+        await ctx.close().catch(() => {});
+      }
+    };
+
+    try {
+      const before = await load("base", true);
+      const edited = await load("edited");
+      if (!before.hits && !edited.hits) return done("inconclusive", "this page didn't load the edited files");
+      const after = alignTo(before.snap, edited.snap);
+      const first = compareElements(before.snap, after, props, true);
+      let added = edited.errors.filter((e) => !before.errors.includes(e));
+      let fixed = before.errors.filter((e) => !edited.errors.includes(e));
+      let ignore: Set<string> | undefined;
+      if (first.changed.length + first.moved.length + added.length + fixed.length > 0) {
+        const again = await load("base");
+        const noise = compareElements(before.snap, alignTo(before.snap, again.snap), props, true);
+        ignore = new Set([...noise.changed, ...noise.moved].map(([id]) => id));
+        const left = [...first.changed, ...first.moved].filter(([id]) => ignore!.has(id)).length;
+        if (left) {
+          out.warnings.push(`${left} element${left === 1 ? "" : "s"} change${left === 1 ? "s" : ""} by ${left === 1 ? "itself" : "themselves"} between loads of this page (timers, live content), so ${left === 1 ? "it's" : "they're"} left out.`);
+        }
+        added = added.filter((e) => !again.errors.includes(e));
+        fixed = fixed.filter((e) => again.errors.includes(e));
+      }
+      diffSnapshots(before.snap, after, props, req.maxElements ?? 200, out, { targets, ignore, content: true });
+      if (added.length || fixed.length) out.errors = { added, fixed };
+      if (before.shot && edited.shot) {
+        out.screenshots = { before: before.shot, after: edited.shot };
+        out.pageWidth = Math.max(before.width ?? 0, edited.width ?? 0);
+        out.scale = profile.deviceScaleFactor ?? 1;
+        const { anchors, leaves } = anchorsOf(before.snap, after);
+        out.anchors = anchors;
+        out.anchorLeaves = leaves;
+      }
+      return done(out.changedElements + out.movedElements + added.length > 0 ? "changed" : "unchanged");
+    } catch (err: any) {
+      if (!browser.isConnected()) await this.dropBroken(req.variant.profile);
+      return done("inconclusive", String(err?.message ?? err).split("\n")[0]);
+    }
+  }
+
   async close(): Promise<void> {
     const b = this.browser;
     this.browser = undefined;
@@ -319,7 +519,28 @@ export class Renderer {
   }
 }
 
-async function snapshot(cdp: CDPSession, props: string[]): Promise<Snapshot> {
+/** The longhands to compare (shorthands expanded in the page). */
+async function comparedProps(page: Page, req: MeasureRequest, out: PageDiff): Promise<string[]> {
+  const requested = [...new Set([...BASE_PROPS, ...(req.props.length ? req.props : DEFAULT_PROPS)])];
+  const props = ((await page.evaluate(`(${EXPAND_SCRIPT})(${JSON.stringify(requested)})`)) as string[]).slice(0, MAX_PROPS);
+  if (requested.length + 10 < props.length) out.warnings.push(`compared the first ${MAX_PROPS} longhands only`);
+  out.comparedProps = props;
+  return props;
+}
+
+/** Recorded response headers that still fit the decoded body when served again. */
+function replayHeaders(h: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(h)) if (!/^(content-encoding|content-length|transfer-encoding)$/i.test(k)) out[k] = v;
+  return out;
+}
+
+function clip(v: string, max = 120): string {
+  return v.length > max ? `${v.slice(0, max - 1)}…` : v;
+}
+
+/** `content`: also each element's own text (script edits change what pages say, not just how they look). */
+async function snapshot(cdp: CDPSession, props: string[], content = false): Promise<Snapshot> {
   const r: any = await cdp.send("DOMSnapshot.captureSnapshot", { computedStyles: props });
   const s: string[] = r.strings;
   const doc = r.documents[0];
@@ -344,7 +565,120 @@ async function snapshot(cdp: CDPSession, props: string[]): Promise<Snapshot> {
     styles.set(id, (layout.styles[i] as number[]).map(str));
     boxes.set(id, layout.bounds[i] as number[]);
   }
-  return { styles, boxes, nodes, index };
+  if (!content) return { styles, boxes, nodes, index };
+  const value = (doc.nodes.nodeValue ?? []) as number[];
+  const own = new Map<number, string>();
+  for (let i = 0; i < parent.length; i++) if (nodes.type[i] === 3 && parent[i] >= 0) own.set(parent[i], (own.get(parent[i]) ?? "") + str(value[i] ?? -1));
+  const text = new Map<string, string>();
+  for (const [i, t] of own) {
+    const v = t.replace(/\s+/g, " ").trim();
+    if (v) text.set(nodes.keys[i], v);
+  }
+  return { styles, boxes, nodes, index, text };
+}
+
+/** Above this many sibling pairs, siblings are matched by kind and order instead of aligned. */
+const MAX_ALIGN = 1_000_000;
+
+/**
+ * `b`, a snapshot of another load of the page, keyed like `a`: nodes in the
+ * same place in the tree (siblings aligned in order by tag and id) get a's
+ * keys, the others new ones.
+ */
+function alignTo(a: Snapshot, b: Snapshot): Snapshot {
+  const sa = signatures(a.nodes);
+  const sb = signatures(b.nodes);
+  const ka = childLists(a.nodes.parent);
+  const kb = childLists(b.nodes.parent);
+  const keys = b.nodes.keys.map((_, i) => `+${i}`);
+  const stack: Array<[number, number]> = [[a.nodes.parent.length, b.nodes.parent.length]];
+  while (stack.length) {
+    const [x, y] = stack.pop()!;
+    for (const [cx, cy] of alignSiblings(ka[x], kb[y], sa, sb)) {
+      keys[cy] = a.nodes.keys[cx];
+      stack.push([cx, cy]);
+    }
+  }
+  const styles = new Map<string, string[]>();
+  const boxes = new Map<string, number[]>();
+  const text = new Map<string, string>();
+  const index = new Map<string, number>();
+  keys.forEach((k, i) => {
+    index.set(k, i);
+    const old = b.nodes.keys[i];
+    const st = b.styles.get(old);
+    if (st) styles.set(k, st);
+    const box = b.boxes.get(old);
+    if (box) boxes.set(k, box);
+    const t = b.text?.get(old);
+    if (t !== undefined) text.set(k, t);
+  });
+  return { styles, boxes, nodes: { ...b.nodes, keys }, index, text };
+}
+
+function signatures(nodes: Snapshot["nodes"]): string[] {
+  return nodes.name.map((name, i) => {
+    const attrs = nodes.attrs[i] ?? [];
+    for (let k = 0; k < attrs.length; k += 2) if (attrs[k] === "id") return `${name}#${attrs[k + 1]}`;
+    return name;
+  });
+}
+
+/** Each node's children in order; the last list holds the roots. */
+function childLists(parent: number[]): number[][] {
+  const out: number[][] = Array.from({ length: parent.length + 1 }, () => []);
+  parent.forEach((p, i) => out[p >= 0 ? p : parent.length].push(i));
+  return out;
+}
+
+/** Matching pairs of two sibling lists: the longest common run of signatures. */
+function alignSiblings(xs: number[], ys: number[], sa: string[], sb: string[]): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let lo = 0;
+  let hx = xs.length;
+  let hy = ys.length;
+  while (lo < hx && lo < hy && sa[xs[lo]] === sb[ys[lo]]) {
+    out.push([xs[lo], ys[lo]]);
+    lo++;
+  }
+  while (hx > lo && hy > lo && sa[xs[hx - 1]] === sb[ys[hy - 1]]) {
+    hx--;
+    hy--;
+    out.push([xs[hx], ys[hy]]);
+  }
+  const n = hx - lo;
+  const m = hy - lo;
+  if (!n || !m) return out;
+  if (n * m > MAX_ALIGN) {
+    // The k-th node of a kind on one side goes with the k-th on the other.
+    const left = new Map<string, number[]>();
+    for (let i = hx - 1; i >= lo; i--) {
+      let l = left.get(sa[xs[i]]);
+      if (!l) left.set(sa[xs[i]], (l = []));
+      l.push(xs[i]);
+    }
+    for (let j = lo; j < hy; j++) {
+      const x = left.get(sb[ys[j]])?.pop();
+      if (x !== undefined) out.push([x, ys[j]]);
+    }
+    return out;
+  }
+  const w = m + 1;
+  const len = new Uint32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      len[i * w + j] = sa[xs[lo + i]] === sb[ys[lo + j]] ? len[(i + 1) * w + j + 1] + 1 : Math.max(len[(i + 1) * w + j], len[i * w + j + 1]);
+    }
+  }
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (sa[xs[lo + i]] === sb[ys[lo + j]]) {
+      out.push([xs[lo + i], ys[lo + j]]);
+      i++;
+      j++;
+    } else if (len[(i + 1) * w + j] >= len[i * w + j + 1]) i++;
+    else j++;
+  }
+  return out;
 }
 
 /**
@@ -477,7 +811,17 @@ const ROOT = /^(html|body)$/i;
 const DERIVED = /^(width|height|inline-size|block-size|(margin|padding|inset)(-.+)?|top|right|bottom|left|transform|transform-origin|perspective-origin|grid-template-(rows|columns))$/;
 const SIZE = /^(width|height|inline-size|block-size)$/;
 
-function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff, targets?: Map<string, Set<string>>): void {
+interface DiffOptions {
+  /** See matchTargets. */
+  targets?: Map<string, Set<string>>;
+  /** Node keys left out. */
+  ignore?: Set<string>;
+  /** Compare each element's own text and attributes too. */
+  content?: boolean;
+}
+
+/** Looks up node keys in whichever snapshot has them (a first). */
+function pairOf(a: Snapshot, b: Snapshot) {
   const snap = (id: string) => (a.index.has(id) ? a : b);
   const at = (id: string) => snap(id).index.get(id) ?? -1;
   const parentOf = (id: string): string | undefined => {
@@ -486,12 +830,18 @@ function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, o
     return p >= 0 ? s.nodes.keys[p] : undefined;
   };
   const label = (id: string) => nodePath(snap(id).nodes, at(id));
+  return { snap, at, parentOf, label };
+}
+
+/** Elements whose compared values change, and those that only move or resize. */
+function compareElements(a: Snapshot, b: Snapshot, props: string[], content = false, ignore?: Set<string>) {
+  const { snap, at, label } = pairOf(a, b);
   const ids = [...new Set<string>([...a.styles.keys(), ...b.styles.keys()])].sort((x, y) => at(x) - at(y));
   const changed: Array<[string, ElementDiff]> = [];
   const moved: Array<[string, ElementDiff]> = [];
   for (const id of ids) {
     // Elements and pseudo-elements; text runs are covered by their parent box.
-    if (snap(id).nodes.type[at(id)] !== 1) continue;
+    if (ignore?.has(id) || snap(id).nodes.type[at(id)] !== 1) continue;
     const sa = a.styles.get(id);
     const sb = b.styles.get(id);
     const ba = a.boxes.get(id) ?? null;
@@ -502,6 +852,7 @@ function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, o
     }
     const diffs: ElementDiff["props"] = [];
     for (let k = 0; k < props.length; k++) if (sa[k] !== sb[k]) diffs.push({ prop: props[k], before: sa[k], after: sb[k] });
+    if (content) diffs.push(...contentDiffs(a, b, id));
     const boxMoved = !!ba && !!bb && ba.some((v, k) => Math.abs(v - bb[k]) > TOLERANCE);
     if (diffs.length) changed.push([id, { path: label(id), kind: "changed", props: diffs, box: { before: ba, after: bb } }]);
     else if (boxMoved) {
@@ -509,6 +860,35 @@ function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, o
       moved.push([id, { path: label(id), kind: resized ? "resized" : "moved", props: [], box: { before: ba, after: bb } }]);
     }
   }
+  return { changed, moved };
+}
+
+/** An element's own text and attributes, before and after. */
+function contentDiffs(a: Snapshot, b: Snapshot, id: string): ElementDiff["props"] {
+  const out: ElementDiff["props"] = [];
+  const ta = a.text?.get(id) ?? "";
+  const tb = b.text?.get(id) ?? "";
+  if (ta !== tb) out.push({ prop: "text", before: clip(ta), after: clip(tb) });
+  const attrs = (s: Snapshot) => {
+    const m = new Map<string, string>();
+    const list = s.nodes.attrs[s.index.get(id)!] ?? [];
+    for (let k = 0; k < list.length; k += 2) m.set(list[k], list[k + 1]);
+    return m;
+  };
+  const ma = attrs(a);
+  const mb = attrs(b);
+  for (const name of new Set([...ma.keys(), ...mb.keys()])) {
+    const va = ma.get(name);
+    const vb = mb.get(name);
+    if (va !== vb) out.push({ prop: `[${name}]`, before: va === undefined ? "(none)" : clip(va), after: vb === undefined ? "(none)" : clip(vb) });
+  }
+  return out;
+}
+
+function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff, opts: DiffOptions = {}): void {
+  const { snap, at, parentOf } = pairOf(a, b);
+  const { targets } = opts;
+  const { changed, moved } = compareElements(a, b, props, opts.content, opts.ignore);
   out.changedElements = changed.length;
   out.movedElements = moved.length;
 

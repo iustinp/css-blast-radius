@@ -557,7 +557,7 @@ export function isBlocked(cfg: CbrConfig, url: string): boolean {
  * (other origins aborted), the network in live mode. Returns what was served.
  * Requests matching `capture.block` are aborted, except the page document.
  */
-export async function serveSite(cfg: CbrConfig, route: Route): Promise<{ body: Buffer; ct: string; status: number } | undefined> {
+export async function serveSite(cfg: CbrConfig, route: Route): Promise<{ body: Buffer; ct: string; status: number; headers: Record<string, string> } | undefined> {
   const url = assetKey(route.request().url());
   if (route.request().resourceType() !== "document" && isBlocked(cfg, url)) {
     await route.abort();
@@ -584,12 +584,12 @@ export async function serveSite(cfg: CbrConfig, route: Route): Promise<{ body: B
       const body = await readFile(file);
       const ct = CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
       await route.fulfill({ status: 200, headers: { "content-type": ct }, body });
-      return { body, ct, status: 200 };
+      return { body, ct, status: 200, headers: { "content-type": ct } };
     }
     const resp = await route.fetch();
     const body = await resp.body();
     await route.fulfill({ response: resp, body });
-    return { body, ct: resp.headers()["content-type"] ?? "", status: resp.status() };
+    return { body, ct: resp.headers()["content-type"] ?? "", status: resp.status(), headers: resp.headers() };
   } catch {
     await route.abort().catch(() => {});
     return undefined;

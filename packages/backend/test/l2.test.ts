@@ -214,4 +214,67 @@ describe.skipIf(skipBrowser)("L2 renderer on fixture site (§6.6, §16)", () => 
     expect(result.status).toBe("inconclusive");
     expect(result.reason).toContain("not loaded");
   }, 60_000);
+
+  describe("script edits (§17, J3a): each side loaded fresh", () => {
+    const onReady = (body: string) => `\ndocument.addEventListener("DOMContentLoaded", () => { ${body} });\n`;
+    const app = () => fs.readFileSync(path.join(ws, "js", "app.js"), "utf8");
+    const run = (url: string, baseText: string, editedText: string, extra: { screenshots?: boolean; paths?: string[] } = {}) =>
+      renderer.measure({
+        page: idx.pages[idx.byUrl.get(url)!],
+        variant: idx.variants[0],
+        mode: "live",
+        props: [],
+        scripts: [{ paths: extra.paths ?? ["/js/app.js"], baseText, editedText }],
+        screenshots: extra.screenshots,
+      });
+
+    it("shows the text and attributes an edited script changes, and nothing where its code doesn't run", async () => {
+      const base = app();
+      const edited = base + onReady('if (location.pathname.endsWith("/about.html")) { const t = document.querySelector(".title"); t.textContent = "Edited"; t.dataset.state = "on"; }');
+      const about = await run("/about.html", base, edited, { screenshots: true });
+      expect(about.status).toBe("changed");
+      expect(about.mode).toBe("live");
+      expect(about.zones.map((z) => z.label)).toEqual(["body > div.card > span.title"]);
+      expect(about.zones[0].props).toEqual(
+        expect.arrayContaining([
+          { prop: "text", before: "Another card", after: "Edited" },
+          { prop: "[data-state]", before: "(none)", after: "on" },
+        ]),
+      );
+      expect(about.screenshots?.before).toBeTruthy();
+      expect(about.anchors?.length).toBeGreaterThan(0);
+      expect(about.errors).toBeUndefined();
+
+      const index = await run("/index.html", base, edited);
+      expect(index.status).toBe("unchanged");
+      expect(index.changedElements + index.movedElements).toBe(0);
+    }, 60_000);
+
+    it("lists the errors an edit adds, and leaves out what changes by itself between loads", async () => {
+      const base = app() + onReady('document.querySelector(".btn").textContent = String(performance.now());');
+      const edited = base + onReady('document.querySelector(".title").textContent = "Edited"; null.boom;');
+      const r = await run("/about.html", base, edited);
+      expect(r.status).toBe("changed");
+      expect(r.errors?.added).toEqual([expect.stringContaining("Cannot read properties of null")]);
+      expect(r.errors?.fixed).toEqual([]);
+      expect(r.zones.map((z) => z.label)).toEqual(["body > div.card > span.title"]);
+      expect(r.warnings.some((w) => /by itself between loads/.test(w))).toBe(true);
+
+      const fixedBack = await run("/about.html", edited, base);
+      expect(fixedBack.errors?.fixed).toEqual([expect.stringContaining("Cannot read properties of null")]);
+    }, 90_000);
+
+    it("starts every load at the same time with the same random numbers", async () => {
+      const base = app() + onReady('document.querySelector(".title").textContent = [Math.random(), crypto.randomUUID(), new Date().getFullYear()].join(" ");');
+      const r = await run("/about.html", base, base + "\n// no-op\n");
+      expect(r.status).toBe("unchanged");
+      expect(r.warnings).toEqual([]);
+    }, 60_000);
+
+    it("reports 'inconclusive' when the page doesn't load the edited script", async () => {
+      const r = await run("/about.html", "x = 1;", "x = 2;", { paths: ["/js/not-loaded.js"] });
+      expect(r.status).toBe("inconclusive");
+      expect(r.reason).toMatch(/didn't load the edited files/);
+    }, 60_000);
+  });
 });
