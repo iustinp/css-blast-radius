@@ -50,6 +50,24 @@ button {
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 button.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 button.partial { border: 1px dashed var(--vscode-button-background); }
+/* CSS edits blue, JS edits purple: full color when picked, a light tint when not. */
+.kind-css { --kind: #3794ff; }
+.kind-js { --kind: #a371f7; }
+button.chip.kind-css, button.chip.kind-js, .kind-css button.chip, .kind-js button.chip {
+  color: var(--vscode-foreground); background: color-mix(in srgb, var(--kind) 22%, transparent);
+  border-color: color-mix(in srgb, var(--kind) 45%, transparent);
+}
+button.chip.kind-css:hover, button.chip.kind-js:hover, .kind-css button.chip:hover, .kind-js button.chip:hover {
+  background: color-mix(in srgb, var(--kind) 28%, transparent);
+}
+button.chip.active.kind-css, button.chip.active.kind-js, .kind-css button.chip.active, .kind-js button.chip.active {
+  color: #fff; background: var(--kind);
+}
+button.chip.active.kind-css:hover, button.chip.active.kind-js:hover, .kind-css button.chip.active:hover, .kind-js button.chip.active:hover {
+  background: color-mix(in srgb, var(--kind) 85%, #000);
+}
+button.chip.partial.kind-css, button.chip.partial.kind-js, .kind-css button.chip.partial, .kind-js button.chip.partial { border-color: var(--kind); }
+.file-chips.kind-css .file-name, .file-chips.kind-js .file-name { color: color-mix(in srgb, var(--kind) 70%, var(--vscode-descriptionForeground)); }
 .edit { display: inline-flex; align-items: stretch; max-width: 100%; }
 .edit > button:first-child { border-radius: 10px 0 0 10px; min-width: 0; }
 button.go {

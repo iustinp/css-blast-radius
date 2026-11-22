@@ -39,6 +39,7 @@
   // A picked edit is highlighted; a file with only some of its edits picked gets a dashed outline.
   function toggle(text, state, msg, title) {
     const node = button(text, state === "all", () => vscode.postMessage({ type: "toggle", ...msg }));
+    node.classList.add("chip");
     if (state === "some") node.classList.add("partial");
     node.setAttribute("aria-pressed", state === "all" ? "true" : state === "some" ? "mixed" : "false");
     node.title = title;
@@ -83,11 +84,13 @@
       all ? "all" : some ? "some" : "none", {}, all ? "Click to unpick every edit" : "Click to pick every edit"));
     for (const k of kinds || []) {
       const name = KIND_TITLE[k.kind];
-      box.append(toggle(`${name} · ${k.label}`, k.state, { kind: k.kind },
-        k.state === "all" ? `Click to unpick the ${name} edits` : `Click to pick all the ${name} edits`));
+      const chip = toggle(`${name} · ${k.label}`, k.state, { kind: k.kind },
+        k.state === "all" ? `Click to unpick the ${name} edits` : `Click to pick all the ${name} edits`);
+      chip.classList.add(`kind-${k.kind}`);
+      box.append(chip);
     }
     for (const file of chips) {
-      const group = el("div", "file-chips");
+      const group = el("div", `file-chips kind-${/\.[mc]?js$/i.test(file.path) ? "js" : "css"}`);
       group.append(el("div", "file-name", file.label));
       group.append(toggle(`${file.changed} edit${file.changed === 1 ? "" : "s"} · ${file.count}`, file.state, { path: file.path },
         file.state === "all" ? "Click to unpick this file's edits" : "Click to pick all of this file's edits"));
