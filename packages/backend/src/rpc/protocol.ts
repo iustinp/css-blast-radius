@@ -442,7 +442,23 @@ export interface PageDiffView {
   scripts?: boolean;
   /** Script edits: errors the page throws or logs only with the edits (`added`), and the ones they fix. */
   errors?: { added: string[]; fixed: string[] };
+  /**
+   * Script edits: the page after each step of the interactions the scan
+   * recorded that run the edited code, done again with and without the
+   * edits (the fields above are the page as loaded).
+   */
+  steps?: PageDiffStep[];
   timingMs: number;
+}
+
+/** The page after one step of an interaction (`before`/`after` are "" when it couldn't be done). */
+export interface PageDiffStep
+  extends Pick<PageDiffView, "status" | "reason" | "warnings" | "width" | "before" | "after" | "zones" | "anchors" | "anchorLeaves" | "changedElements" | "movedElements" | "errors"> {
+  /** The interaction (from 0) and the step's place in it (from 1). */
+  path: number;
+  step: number;
+  /** "click “Menu”" */
+  label: string;
 }
 
 export interface PageDiffParams {

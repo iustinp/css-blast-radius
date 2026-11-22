@@ -180,31 +180,8 @@ export async function explore(env: ExploreEnv): Promise<{ actions: ExploredActio
       return false;
     }
   };
-  const act = async (c: Pick<Candidate, "kind" | "target">): Promise<boolean> => {
-    const loc = page.locator(c.target).first();
-    try {
-      switch (c.kind) {
-        case "click":
-          await loc.click({ timeout: ACT_MS });
-          break;
-        case "hover":
-          await loc.hover({ timeout: ACT_MS });
-          break;
-        case "type":
-          await loc.click({ timeout: ACT_MS });
-          await loc.pressSequentially("test", { timeout: ACT_MS });
-          break;
-        case "select": {
-          // A Function, not source text: Playwright evaluates a string as an expression without calling it.
-          const index = await loc.evaluate(PICK as (el: Element) => number);
-          if (index < 0) return false;
-          await loc.selectOption({ index }, { timeout: ACT_MS });
-          break;
-        }
-      }
-    } catch {
-      return false;
-    }
+  const act = async (c: ReplayStep): Promise<boolean> => {
+    if (!(await doAction(page, c))) return false;
     await env.settle();
     return true;
   };
@@ -332,6 +309,41 @@ export async function explore(env: ExploreEnv): Promise<{ actions: ExploredActio
   await level(-1, root, new Set(root.map((c) => c.key)), 1);
   stats.ms = Date.now() - t0;
   return { actions, stats };
+}
+
+/** What a recorded action needs to be done again. */
+export type ReplayStep = Pick<ExploredAction, "kind" | "target" | "label"> & {
+  /** Inherited, and no page found with the steps after it: the edited code may run only after one of them. */
+  more?: true;
+};
+
+/** Does one action on the page as the explorer does (false: it couldn't be done). */
+export async function doAction(page: Page, c: Pick<ExploredAction, "kind" | "target">): Promise<boolean> {
+  const loc = page.locator(c.target).first();
+  try {
+    switch (c.kind) {
+      case "click":
+        await loc.click({ timeout: ACT_MS });
+        break;
+      case "hover":
+        await loc.hover({ timeout: ACT_MS });
+        break;
+      case "type":
+        await loc.click({ timeout: ACT_MS });
+        await loc.pressSequentially("test", { timeout: ACT_MS });
+        break;
+      case "select": {
+        // A Function, not source text: Playwright evaluates a string as an expression without calling it.
+        const index = await loc.evaluate(PICK as (el: Element) => number);
+        if (index < 0) return false;
+        await loc.selectOption({ index }, { timeout: ACT_MS });
+        break;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A select's first enabled option other than the selected one (-1: none). */

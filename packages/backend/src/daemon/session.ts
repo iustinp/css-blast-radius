@@ -18,7 +18,7 @@ import { L0Engine, L1Cache, type Analysis, type PendingWork } from "../engine/l0
 import { SiteIndex } from "../index/siteIndex.js";
 import { Store, type PageRow, type VariantInfo } from "../index/store.js";
 import { L1Pool } from "../l1/pool.js";
-import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type ScriptEdit, type SheetEdit } from "../l2/render.js";
+import { DEFAULT_PROPS, Renderer, type PageDiff, type RenderTarget, type ScriptEdit, type SheetEdit, type Zone } from "../l2/render.js";
 import { Capturer } from "../capture/capture.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type CurrentModel, type TextChange } from "./documents.js";
@@ -144,6 +144,8 @@ interface RenderEdits {
   changes: CssChange[];
   models: StylesheetModel[];
   warnings: string[];
+  /** Whether an edit of a changed script is picked. */
+  keep: (path: string, id: string) => boolean;
 }
 
 /** Assessment results kept for this many (index, edits, selection) states, so toggling edits back is instant. */
@@ -1418,18 +1420,33 @@ export class Session extends EventEmitter {
         mode: runs ? "live" : "shell",
         edits: prep.edits,
         scripts: runs ? prep.scripts : undefined,
+        paths: runs ? this.scripts.paths(page, variant.id, prep.keep, 1) : undefined,
         props,
         maxElements: 0,
         background: true,
       });
       let status = d.status;
       let reason = d.reason;
+      let changed = d.changedElements;
+      let moved = d.movedElements;
+      const added = new Set(d.errors?.added);
+      // After an interaction counts as on load: the most elements at any one point.
+      for (const s of d.steps ?? []) {
+        changed = Math.max(changed, s.changedElements);
+        moved = Math.max(moved, s.movedElements);
+        for (const e of s.errors?.added ?? []) added.add(e);
+      }
+      const step = d.steps?.find((s) => s.status === "changed") ?? d.steps?.find((s) => s.status === "inconclusive");
+      if (status === "unchanged" && step) {
+        status = step.status;
+        reason = step.reason;
+      }
       if (status === "unchanged" && unresolved.length) {
         status = "inconclusive";
         reason = `No stylesheet on this page uses ${unresolved.join(", ")}: what it feeds (inline styles, scripts) wasn't compared.`;
       }
-      const errors = d.errors?.added.length;
-      devices.push({ name: variant.name, status, changed: d.changedElements, moved: d.movedElements, ...(errors ? { errors } : {}), ...(reason ? { reason } : {}) });
+      const errors = added.size;
+      devices.push({ name: variant.name, status, changed, moved, ...(errors ? { errors } : {}), ...(reason ? { reason } : {}) });
     }
     const status = devices.some((d) => d.status === "changed") ? "changed" : devices.every((d) => d.status === "unchanged") ? "unchanged" : "inconclusive";
     const reason = status === "inconclusive" ? devices.find((d) => d.reason)?.reason : undefined;
@@ -1677,7 +1694,7 @@ export class Session extends EventEmitter {
     const page = this.pageRow(p.url);
     const t0 = performance.now();
     const editRevision = this.editRevision;
-    const { edits, scripts, list, total, changes, models, warnings } = await this.renderEdits();
+    const { edits, scripts, list, total, changes, models, warnings, keep } = await this.renderEdits();
     const variants = this.pageVariants(page);
     const variant = variants.find((v) => v.name === p.device) ?? variants[0] ?? idx.variants[0];
     const view: PageDiffView = {
@@ -1728,6 +1745,7 @@ export class Session extends EventEmitter {
       mode: view.live ? "live" : "shell",
       edits,
       scripts: runs ? scripts : undefined,
+      paths: runs && variant ? this.scripts.paths(page, variant.id, keep, 3) : undefined,
       props,
       screenshots: true,
       maxElements: 500,
@@ -1750,10 +1768,30 @@ export class Session extends EventEmitter {
       view.after = `data:image/jpeg;base64,${diff.screenshots.after}`;
     }
     const box = (b: number[] | null) => (b ? ([b[0], b[1], b[2], b[3]] as [number, number, number, number]) : null);
-    view.zones = diff.zones.map((z) => ({ before: box(z.before), after: box(z.after), label: z.label, props: z.props }));
+    const zones = (z: Zone[]) => z.map((x) => ({ before: box(x.before), after: box(x.after), label: x.label, props: x.props }));
+    const url = (shot?: string) => (shot ? `data:image/jpeg;base64,${shot}` : "");
+    view.zones = zones(diff.zones);
     if (diff.anchors?.length) {
       view.anchors = diff.anchors;
       view.anchorLeaves = diff.anchorLeaves ?? 0;
+    }
+    if (diff.steps?.length) {
+      view.steps = diff.steps.map((s) => ({
+        path: s.path,
+        step: s.step,
+        label: s.label,
+        status: s.status,
+        ...(s.reason ? { reason: s.reason } : {}),
+        warnings: [...warnings, ...s.warnings],
+        width: s.pageWidth ?? 0,
+        before: url(s.screenshots?.before),
+        after: url(s.screenshots?.after),
+        zones: zones(s.zones),
+        ...(s.anchors?.length ? { anchors: s.anchors, anchorLeaves: s.anchorLeaves ?? 0 } : {}),
+        changedElements: s.changedElements,
+        movedElements: s.movedElements,
+        ...(s.errors ? { errors: s.errors } : {}),
+      }));
     }
     return finish();
   }
@@ -1847,7 +1885,7 @@ export class Session extends EventEmitter {
       if (texts.conflict) warnings.push(conflictWarning(file, this.branch));
       scripts.push({ paths: s.keys, baseText: texts.baseText, editedText: texts.editedText });
     }
-    return { edits, scripts, list, total, changes, models, warnings };
+    return { edits, scripts, list, total, changes, models, warnings, keep };
   }
 
   // -------------------------------------------------------------- capture

@@ -2,13 +2,14 @@
 // once (L2: the stored shell, scripts off, assets from the store; L3: the
 // live page with scripts and its recipe), the mapped stylesheet is set to the
 // base text and then the edited text through CDP, and both states are
-// measured with DOMSnapshot in the same tab. Script edits (§17, J3a) can't be
-// swapped in a loaded page: it is loaded fresh for each side instead (see
-// measureLoads).
+// measured with DOMSnapshot in the same tab. Script edits (§17, J3) can't be
+// swapped in a loaded page: it is loaded fresh for each side instead, and the
+// interactions the scan recorded (J2) are done again on both (see measureLoads).
 
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import type { CbrConfig, Profile } from "../config.js";
-import { newProfileContext, runRecipe, serveSite, sheetKey } from "../capture/capture.js";
+import { SAFE_METHODS, newProfileContext, runRecipe, serveSite, settleAction, sheetKey, trackRequests, waitIdle } from "../capture/capture.js";
+import { doAction, stepText, type ReplayStep } from "../capture/explore.js";
 import { SETTLE_SCRIPT } from "../capture/inPage.js";
 import type { PageRow, Store, VariantInfo } from "../index/store.js";
 import { openShell } from "./shell.js";
@@ -37,6 +38,11 @@ export interface MeasureRequest extends Partial<SheetEdit> {
   edits?: SheetEdit[];
   /** Edited scripts: the page is loaded fresh with its scripts for each side (live mode only). */
   scripts?: ScriptEdit[];
+  /**
+   * With `scripts`: interactions the scan recorded (J2), each a path of steps
+   * from the loaded page. Both sides do them, and are compared after each step.
+   */
+  paths?: ReplayStep[][];
   /** Properties to compare; shorthands are expanded in the page. */
   props: string[];
   screenshots?: boolean;
@@ -104,7 +110,31 @@ export interface PageDiff {
   anchorLeaves?: number;
   /** Script edits: errors the edited page throws or logs that the base page doesn't, and the reverse. */
   errors?: { added: string[]; fixed: string[] };
+  /** Script edits with `paths`: the page after each step, path by path (the fields above are the page as loaded). */
+  steps?: StepDiff[];
   timingMs: number;
+}
+
+/** The page after one step of a replayed interaction path, compared as the load is. */
+export interface StepDiff {
+  /** The path (its index in `MeasureRequest.paths`) and the step's place in it (from 1). */
+  path: number;
+  step: number;
+  /** "click “Menu”" */
+  label: string;
+  status: PageDiff["status"];
+  reason?: string;
+  warnings: string[];
+  changedElements: number;
+  movedElements: number;
+  elements: ElementDiff[];
+  truncated: boolean;
+  zones: Zone[];
+  screenshots?: { before: string; after: string };
+  pageWidth?: number;
+  anchors?: number[];
+  anchorLeaves?: number;
+  errors?: { added: string[]; fixed: string[] };
 }
 
 /** Always compared: rendering on/off. */
@@ -144,15 +174,26 @@ interface Snapshot {
   text?: Map<string, string>;
 }
 
-/** One load of a page for a script edit. */
-interface Load {
+/** The page at one point of a load: as loaded, or after a step. */
+interface State {
   snap: Snapshot;
   shot?: string;
   width?: number;
+  /** Errors since the point before. */
   errors: string[];
+}
+
+/** One load of a page for a script edit. */
+interface Load extends State {
   /** Requests for the edited files. */
   hits: number;
+  /** After each step of the path, up to the first that couldn't be done (no snapshot), or failed (`fail`). */
+  steps: Array<Partial<State> & { errors: string[]; fail?: string }>;
 }
+
+/** Interaction paths replayed per page diff, and the time after which no further path starts. */
+const MAX_PATHS = 3;
+const PATHS_MS = 45_000;
 
 /**
  * Every load of a page for a script edit starts at the same time and draws the
@@ -396,9 +437,13 @@ export class Renderer {
    * Elements are matched across loads by their place in the tree. When the
    * sides differ, the base side is loaded once more: what differs between
    * those two loads changes by itself (timers, live content) and is left out.
+   * With `paths`, each side then does a path's steps as the scan did (never
+   * leaving the page or sending anything but reads), compared after each; a
+   * path is loads of its own, and only the first path's load is compared.
    */
   private async measureLoads(req: MeasureRequest, edits: SheetEdit[], out: PageDiff, done: (status: PageDiff["status"], reason?: string) => PageDiff): Promise<PageDiff> {
     out.mode = "live";
+    const t0 = performance.now();
     let browser: Browser;
     try {
       browser = await this.launch();
@@ -415,22 +460,46 @@ export class Renderer {
     const full = new URL(req.page.url, this.cfg.origin).href;
     const timeout = this.cfg.capture.timeoutMs;
     const init = determinismScript(Date.now());
+    const paths = (req.paths ?? []).filter((p) => p.length).slice(0, MAX_PATHS);
+    const max = req.maxElements ?? 200;
+    const shots = !!req.screenshots;
     let props: string[] = [];
     let targets: Map<string, Set<string>> | undefined;
+    let hits = 0;
 
-    const load = async (side: "base" | "edited", first = false): Promise<Load> => {
-      const ctx = await newProfileContext(browser, profile, { initScript: false });
+    const load = async (side: "base" | "edited", path: ReplayStep[] = [], first = false, shoot = false): Promise<Load> => {
+      const ctx = await newProfileContext(browser, profile, { initScript: false, listeners: path.length > 0 });
       try {
         await ctx.addInitScript({ content: init });
         const page = await ctx.newPage();
-        const errors: string[] = [];
+        let errors: string[] = [];
+        const take = () => {
+          const e = [...new Set(errors)].slice(0, MAX_ERRORS).map((x) => clip(x, 300));
+          errors = [];
+          return e;
+        };
         page.on("pageerror", (e) => errors.push(`${e.name || "Error"}: ${e.message}`));
         page.on("console", (m) => {
           if (m.type() === "error") errors.push(m.text());
         });
-        let hits = 0;
-        await page.route("**/*", async (route) => {
+        page.on("popup", (p) => void p.close().catch(() => {}));
+        const inflight = trackRequests(page);
+        let acting = false;
+        // On the context, so a popup's requests never go out.
+        await ctx.route("**/*", async (route) => {
           const r = route.request();
+          let mine = true;
+          let main = false;
+          try {
+            mine = r.frame().page() === page;
+            main = r.isNavigationRequest() && r.frame().parentFrame() === null;
+          } catch {
+            /* no frame */
+          }
+          if (!mine) return void (await route.abort().catch(() => {}));
+          // Steps neither leave the page nor change anything on the site, as when the scan recorded them.
+          if (acting && main) return void (await route.fulfill({ status: 204, body: "" }).catch(() => {}));
+          if (acting && !SAFE_METHODS.has(r.method())) return void (await route.abort().catch(() => {}));
           const edit = served.get(sheetKey(this.cfg, r.url()));
           if (edit) {
             hits++;
@@ -455,18 +524,37 @@ export class Renderer {
           await page.evaluate(SETTLE_SCRIPT);
         }
         await page.evaluate(QUIET_SCRIPT).catch(() => {});
+        // Steps start where the scan's did: once the timers that fire soon after load have.
+        if (path.length) await waitIdle(page, inflight);
         await page.evaluate(SETTLE_SCRIPT);
         const cdp = await ctx.newCDPSession(page);
         if (first) props = await comparedProps(page, req, out);
+        const picture = async () => ({
+          shot: (await page.screenshot({ type: "jpeg", quality: 70, fullPage: true, animations: "disabled", timeout })).toString("base64"),
+          width: (await page.evaluate("Math.max(document.documentElement.scrollWidth, innerWidth)")) as number,
+        });
         const snap = await snapshot(cdp, props, true);
         if (first && req.targets?.length) {
           await cdp.send("DOM.enable");
           targets = await matchTargets(page, cdp, req.targets, props).catch(() => undefined);
         }
-        const load: Load = { snap, errors: [...new Set(errors)].slice(0, MAX_ERRORS).map((e) => clip(e, 300)), hits };
-        if (req.screenshots && (first || side === "edited")) {
-          load.shot = (await page.screenshot({ type: "jpeg", quality: 70, fullPage: true, animations: "disabled", timeout })).toString("base64");
-          load.width = (await page.evaluate("Math.max(document.documentElement.scrollWidth, innerWidth)")) as number;
+        const load: Load = { snap, errors: take(), hits: 0, steps: [] };
+        if (shoot) Object.assign(load, await picture());
+        acting = true;
+        try {
+          for (const step of path) {
+            if (!(await doAction(page, step))) {
+              load.steps.push({ errors: take() });
+              break;
+            }
+            await settleAction(page, inflight);
+            const at: Load["steps"][number] = { snap: await snapshot(cdp, props, true), errors: take() };
+            if (shoot) Object.assign(at, await picture());
+            load.steps.push(at);
+          }
+        } catch (err: any) {
+          // The load is compared all the same.
+          load.steps.push({ errors: take(), fail: String(err?.message ?? err).split("\n")[0] });
         }
         return load;
       } finally {
@@ -474,37 +562,117 @@ export class Renderer {
       }
     };
 
-    try {
-      const before = await load("base", true);
-      const edited = await load("edited");
-      if (!before.hits && !edited.hits) return done("inconclusive", "this page didn't load the edited files while it loaded (it may after an interaction, which page diffs don't try yet)");
-      const after = alignTo(before.snap, edited.snap);
-      const first = compareElements(before.snap, after, props, true);
-      let added = edited.errors.filter((e) => !before.errors.includes(e));
-      let fixed = before.errors.filter((e) => !edited.errors.includes(e));
-      let ignore: Set<string> | undefined;
-      if (first.changed.length + first.moved.length + added.length + fixed.length > 0) {
-        const again = await load("base");
-        const noise = compareElements(before.snap, alignTo(before.snap, again.snap), props, true);
-        ignore = new Set([...noise.changed, ...noise.moved].map(([id]) => id));
-        const left = [...first.changed, ...first.moved].filter(([id]) => ignore!.has(id)).length;
-        if (left) {
-          out.warnings.push(`${left} element${left === 1 ? "" : "s"} change${left === 1 ? "s" : ""} by ${left === 1 ? "itself" : "themselves"} between loads of this page (timers, live content), so ${left === 1 ? "it's" : "they're"} left out.`);
+    /** The two sides of a path differ after some step (or one couldn't do it). */
+    const stepsDiffer = (b: Load, e: Load): boolean =>
+      b.steps.length !== e.steps.length ||
+      b.steps.some((x, k) => {
+        const y = e.steps[k];
+        if (!x.snap || !y.snap) return !x.snap !== !y.snap;
+        return compareStates(x as State, y as State, props).any;
+      });
+    const steps: StepDiff[] = [];
+    const stepDiffs = (pi: number, path: ReplayStep[], b: Load, e: Load, again?: Load): void => {
+      for (let k = 0; k < path.length; k++) {
+        const d: StepDiff = { path: pi, step: k + 1, label: stepText(path[k]), status: "inconclusive", warnings: [], changedElements: 0, movedElements: 0, elements: [], truncated: false, zones: [] };
+        steps.push(d);
+        const x = b.steps[k];
+        const y = e.steps[k];
+        const z = again?.steps[k];
+        const fail = x?.fail ?? y?.fail;
+        if (fail) {
+          d.reason = `“${path[k].label}” failed: ${fail}`;
+          return;
         }
-        added = added.filter((e) => !again.errors.includes(e));
-        fixed = fixed.filter((e) => again.errors.includes(e));
+        if (!x?.snap) {
+          d.reason = `“${path[k].label}” couldn't be done on this page now.`;
+          return;
+        }
+        if (!y?.snap) {
+          if (again && !z?.snap) {
+            d.reason = `“${path[k].label}” doesn't always work on this page, so it can't tell whether your edits stop it.`;
+            return;
+          }
+          d.status = "changed";
+          d.reason = `With your edits, “${path[k].label}” can't be done: it's gone, hidden or covered.`;
+          const added = (y?.errors ?? []).filter((v) => !x.errors.includes(v) && !z?.errors.includes(v));
+          if (added.length) d.errors = { added, fixed: [] };
+          // The edited page stays as it was before the step.
+          const stuck = k ? e.steps[k - 1] : e;
+          if (x.shot && stuck.shot) {
+            d.screenshots = { before: x.shot, after: stuck.shot };
+            d.pageWidth = Math.max(x.width ?? 0, stuck.width ?? 0);
+          }
+          return;
+        }
+        const c = compareStates(x as State, y as State, props, z?.snap ? (z as State) : undefined);
+        const w = noiseWarning(c.left);
+        if (w) d.warnings.push(w);
+        // Node keys are the first load's: the edited rules' elements are known in its tab only.
+        diffSnapshots(x.snap, c.after, props, max, d, { targets: pi === 0 ? targets : undefined, ignore: c.ignore, content: true });
+        if (c.added.length || c.fixed.length) d.errors = { added: c.added, fixed: c.fixed };
+        if (x.shot && y.shot) {
+          d.screenshots = { before: x.shot, after: y.shot };
+          d.pageWidth = Math.max(x.width ?? 0, y.width ?? 0);
+          const { anchors, leaves } = anchorsOf(x.snap, c.after);
+          d.anchors = anchors;
+          d.anchorLeaves = leaves;
+        }
+        d.status = d.changedElements + d.movedElements + c.added.length > 0 ? "changed" : "unchanged";
+        if (d.status === "unchanged" && path[k].more) {
+          d.status = "inconclusive";
+          d.reason = `your edited code ran after “${path[k].label}” on other pages like this one, maybe only after a further step that wasn't recorded here.`;
+        }
       }
-      diffSnapshots(before.snap, after, props, req.maxElements ?? 200, out, { targets, ignore, content: true });
-      if (added.length || fixed.length) out.errors = { added, fixed };
+    };
+    const notLoaded = paths.length
+      ? "this page didn't load the edited files, on load or after the interactions done again"
+      : "this page didn't load the edited files while it loaded, and no interaction the scan tried on it runs your edits";
+
+    try {
+      const p0 = paths[0];
+      const before = await load("base", p0, true, shots);
+      const edited = await load("edited", p0, false, shots);
+      if (!hits && paths.length <= 1) return done("inconclusive", notLoaded);
+      const quick = compareStates(before, edited, props);
+      // The second base load matches the first: screenshots between steps too.
+      const again = quick.any || (p0 && stepsDiffer(before, edited)) ? await load("base", p0, false, shots && !!p0) : undefined;
+      const c = again ? compareStates(before, edited, props, again) : quick;
+      const w = noiseWarning(c.left);
+      if (w) out.warnings.push(w);
+      diffSnapshots(before.snap, c.after, props, max, out, { targets, ignore: c.ignore, content: true });
+      if (c.added.length || c.fixed.length) out.errors = { added: c.added, fixed: c.fixed };
       if (before.shot && edited.shot) {
         out.screenshots = { before: before.shot, after: edited.shot };
         out.pageWidth = Math.max(before.width ?? 0, edited.width ?? 0);
         out.scale = profile.deviceScaleFactor ?? 1;
-        const { anchors, leaves } = anchorsOf(before.snap, after);
+        const { anchors, leaves } = anchorsOf(before.snap, c.after);
         out.anchors = anchors;
         out.anchorLeaves = leaves;
       }
-      return done(out.changedElements + out.movedElements + added.length > 0 ? "changed" : "unchanged");
+      if (p0) stepDiffs(0, p0, before, edited, again);
+      for (let pi = 1; pi < paths.length; pi++) {
+        if (performance.now() - t0 > PATHS_MS) {
+          const n = paths.length - pi;
+          out.warnings.push(`${n} more interaction${n === 1 ? "" : "s"} that run${n === 1 ? "s" : ""} your edits ${n === 1 ? "wasn't" : "weren't"} tried: this page takes long to load.`);
+          break;
+        }
+        try {
+          const b = await load("base", paths[pi], false, shots);
+          const e = await load("edited", paths[pi], false, shots);
+          stepDiffs(pi, paths[pi], b, e, stepsDiffer(b, e) ? await load("base", paths[pi], false, shots) : undefined);
+        } catch (err: any) {
+          // What's compared so far stands.
+          steps.splice(steps.findIndex((x) => x.path === pi) >>> 0);
+          out.warnings.push(`The interaction “${paths[pi].map((x) => x.label).join(" → ")}” couldn't be done again: ${String(err?.message ?? err).split("\n")[0]}`);
+          if (!browser.isConnected()) {
+            await this.dropBroken(req.variant.profile);
+            break;
+          }
+        }
+      }
+      if (!hits) return done("inconclusive", notLoaded);
+      if (steps.length) out.steps = steps;
+      return done(out.changedElements + out.movedElements + c.added.length > 0 ? "changed" : "unchanged");
     } catch (err: any) {
       if (!browser.isConnected()) await this.dropBroken(req.variant.profile);
       return done("inconclusive", String(err?.message ?? err).split("\n")[0]);
@@ -517,6 +685,35 @@ export class Renderer {
     this.contexts.clear();
     if (b) await (await b).close().catch(() => {});
   }
+}
+
+/**
+ * Two loads at the same point, the base side's (`b`) and the edited one's:
+ * `after` is `e` keyed as `b`; `any` whether anything differs. With `again`
+ * (the base side loaded once more), what differs between it and `b` changes
+ * by itself and is left out (`ignore`; `left` of the differences).
+ */
+function compareStates(b: State, e: State, props: string[], again?: State) {
+  const after = alignTo(b.snap, e.snap);
+  const first = compareElements(b.snap, after, props, true);
+  let added = e.errors.filter((x) => !b.errors.includes(x));
+  let fixed = b.errors.filter((x) => !e.errors.includes(x));
+  const any = first.changed.length + first.moved.length + added.length + fixed.length > 0;
+  let ignore: Set<string> | undefined;
+  let left = 0;
+  if (again) {
+    const noise = compareElements(b.snap, alignTo(b.snap, again.snap), props, true);
+    ignore = new Set([...noise.changed, ...noise.moved].map(([id]) => id));
+    left = [...first.changed, ...first.moved].filter(([id]) => ignore!.has(id)).length;
+    added = added.filter((x) => !again.errors.includes(x));
+    fixed = fixed.filter((x) => again.errors.includes(x));
+  }
+  return { after, any, ignore, left, added, fixed };
+}
+
+function noiseWarning(n: number): string | undefined {
+  if (!n) return undefined;
+  return `${n} element${n === 1 ? "" : "s"} change${n === 1 ? "s" : ""} by ${n === 1 ? "itself" : "themselves"} between loads of this page (timers, live content), so ${n === 1 ? "it's" : "they're"} left out.`;
 }
 
 /** The longhands to compare (shorthands expanded in the page). */
@@ -885,7 +1082,14 @@ function contentDiffs(a: Snapshot, b: Snapshot, id: string): ElementDiff["props"
   return out;
 }
 
-function diffSnapshots(a: Snapshot, b: Snapshot, props: string[], max: number, out: PageDiff, opts: DiffOptions = {}): void {
+function diffSnapshots(
+  a: Snapshot,
+  b: Snapshot,
+  props: string[],
+  max: number,
+  out: Pick<PageDiff, "changedElements" | "movedElements" | "zones" | "truncated" | "elements">,
+  opts: DiffOptions = {},
+): void {
   const { snap, at, parentOf } = pairOf(a, b);
   const { targets } = opts;
   const { changed, moved } = compareElements(a, b, props, opts.content, opts.ignore);

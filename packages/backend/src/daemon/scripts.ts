@@ -8,16 +8,17 @@
 // pages where the code it replaces ran, at load or after an interaction, and
 // as possible on the other pages that load the script (an interaction not
 // tried may run it; or there is no coverage of the version edited). What the
-// edit does at load is shown by loading a page with and without it
-// (l2/render.ts, measureLoads); what it does after interactions isn't yet.
+// edit does is shown by loading a page with and without it, then doing again
+// the recorded interactions that run it (`paths`; l2/render.ts, measureLoads).
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { diffLines } from "diff";
 import fg from "fast-glob";
-import { stepText } from "../capture/explore.js";
+import { stepText, type ExploredAction, type ReplayStep } from "../capture/explore.js";
 import { REASON, Sets, type ChangeAnswer, type Count, type FileAnswer, type RuleCount } from "../engine/contract.js";
 import { SCRIPT_PATH, type SiteIndex } from "../index/siteIndex.js";
+import type { PageRow } from "../index/store.js";
 import type { LiveEdit } from "../rpc/protocol.js";
 import { ranIn, type Segments } from "../util/coverage.js";
 import { PageSet } from "../util/pageSet.js";
@@ -531,6 +532,81 @@ export class ScriptTracker {
     return out;
   }
 
+  /**
+   * The interactions the scan recorded on a page (one variant) that ran the
+   * code the picked edits replace, each a path of steps from the loaded page:
+   * ones tried on this page before ones inherited from its template, then
+   * the shortest; none the start of another (it is done on the way).
+   */
+  paths(row: PageRow, variant: number, keep: (path: string, id: string) => boolean, max: number): ReplayStep[][] {
+    const idx = this.host.index();
+    const actions = idx?.actions(row) ?? [];
+    if (!idx || !actions.length || max <= 0) return [];
+    const found: Array<{ steps: ReplayStep[]; inherited: boolean; order: number }> = [];
+    for (const { path, r } of this.changed()) {
+      const text = this.files.get(path)?.base;
+      if (text?.text === undefined || text.kind !== "production") continue;
+      const blob = blobId(Buffer.from(text.text));
+      const keys = this.keysFor(path);
+      const own = keys.filter((k) => row.loaded?.[k] === blob);
+      if (!own.length) continue;
+      const lines = lineStarts(text.text);
+      const spans = r.hunks.filter((h) => keep(path, h.id)).flatMap((h) => baseSpans(text.text!, lines, h));
+      if (!spans.length) continue;
+      const hits = (a: ExploredAction, on: string[]) => a.v === variant && on.some((k) => a.ran[k] && spans.some(([x, y]) => ranIn(a.ran[k], x, y)));
+      actions.forEach((a, i) => {
+        if (!hits(a, own)) return;
+        if (!a.inherited) return void found.push({ steps: chainOf(actions, i), inherited: false, order: i });
+        // Its outcome is what its whole subtree ran on the template's pages: the steps come from one of those.
+        const key = `${idx.revision.id}|${variant}|${a.kind}|${a.target}|${a.label}|${path}|${blob}|${JSON.stringify(spans)}`;
+        let steps = this.templateChains.get(key);
+        if (steps === undefined) {
+          steps = this.templateChain(a, blob, keys, hits) ?? null;
+          if (this.templateChains.size > 500) this.templateChains.clear();
+          this.templateChains.set(key, steps);
+        }
+        found.push({ steps: steps ?? [{ kind: a.kind, target: a.target, label: a.label, more: true }], inherited: true, order: i });
+      });
+    }
+    const sig = (s: ReplayStep[]) => s.map((x) => `${x.kind} ${x.target}`);
+    const starts = (c: string[], d: string[]) => d.length > c.length && c.every((x, j) => d[j] === x);
+    const sigs = found.map((f) => sig(f.steps));
+    const seen = new Set<string>();
+    return found
+      .map((f, i) => ({ ...f, sig: sigs[i] }))
+      .filter((f) => !sigs.some((d) => starts(f.sig, d)))
+      .filter((f) => !seen.has(f.sig.join("\n")) && !!seen.add(f.sig.join("\n")))
+      .sort((a, b) => +a.inherited - +b.inherited || a.steps.length - b.steps.length || a.order - b.order)
+      .slice(0, max)
+      .map((f) => f.steps);
+  }
+
+  /** Inherited actions' full paths, by (index, action, edited code). */
+  private readonly templateChains = new Map<string, ReplayStep[] | null>();
+
+  /**
+   * The shortest path, from an inherited action, to the code it ran: as on a
+   * page (loading the same version) that tried that action itself.
+   */
+  private templateChain(a: ExploredAction, blob: string, keys: string[], hits: (a: ExploredAction, on: string[]) => boolean): ReplayStep[] | undefined {
+    const idx = this.host.index()!;
+    let looked = 0;
+    for (const row of idx.pages) {
+      const own = keys.filter((k) => row.loaded?.[k] === blob);
+      if (!own.length || !row.explored?.actions) continue;
+      if (++looked > 200) return undefined;
+      const acts = idx.actions(row);
+      const root = acts.findIndex((x) => !x.inherited && x.parent < 0 && x.v === a.v && x.kind === a.kind && x.target === a.target && x.label === a.label);
+      if (root < 0) continue;
+      for (let i = root; i < acts.length; i++) {
+        let x = i;
+        while (x > root) x = acts[x].parent;
+        if (x === root && hits(acts[i], own)) return chainOf(acts, i);
+      }
+    }
+    return undefined;
+  }
+
   /** The editor's per-line counts: each changed run of lines is a "rule". */
   rules(path: string): RuleCount[] {
     // The editor's lines: the open text, or the file on disk.
@@ -641,6 +717,13 @@ function diffPieces(before: string, after: string): { hunks: Hunk[]; pieces: Arr
   }
   flush();
   return { hunks: out, pieces };
+}
+
+/** The steps from the loaded page to action `i` (through `parent`). */
+function chainOf(actions: ExploredAction[], i: number): ReplayStep[] {
+  const out: ReplayStep[] = [];
+  for (let x = i; x >= 0 && x < actions.length && out.length < 10; x = actions[x].parent) out.unshift({ kind: actions[x].kind, target: actions[x].target, label: actions[x].label });
+  return out;
 }
 
 /** Offsets where each line starts (index 0: line 1). */

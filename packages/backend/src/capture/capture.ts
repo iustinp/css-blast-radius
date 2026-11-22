@@ -96,7 +96,7 @@ const CONTENT_TYPES: Record<string, string> = {
 
 const RECORDED_TYPES = new Set(["stylesheet", "image", "font"]);
 /** Requests a page may still send while it's explored (others are aborted). */
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+export const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const CODE_REQUESTS = new Set(["document", "script", "fetch", "xhr", "eventsource", "websocket", "other"]);
 /** After load, how long timers and requests get before what runs counts as after an interaction (at least, at most). */
 const IDLE_MS = 500;
@@ -342,11 +342,7 @@ export class Capturer {
     let cdp: CDPSession | undefined;
     try {
       const page = await ctx.newPage();
-      // Requests code may wait on (images and fonts run none).
-      const inflight = new Set<Request>();
-      page.on("request", (r) => void (CODE_REQUESTS.has(r.resourceType()) && inflight.add(r)));
-      page.on("requestfinished", (r) => inflight.delete(r));
-      page.on("requestfailed", (r) => inflight.delete(r));
+      const inflight = trackRequests(page);
       page.on("popup", (p) => void p.close().catch(() => {}));
       // On the context, so popups an interaction opens are guarded too: their requests never go out.
       await ctx.route("**/*", (route) => {
@@ -456,17 +452,7 @@ export class Capturer {
       if (!limits || !cdp) return false;
       const session = cdp;
       // Timers that fire soon after load (and what they fetch) count as load.
-      const idle = async () => {
-        const end = Date.now() + IDLE_MAX_MS;
-        await page.waitForTimeout(IDLE_MS);
-        while (Date.now() < end) {
-          const timers = await page.evaluate("window.__cbrT ? window.__cbrT.size : 0").catch(() => 0);
-          if (!timers && !inflight.size) break;
-          await page.waitForTimeout(100);
-        }
-        await page.evaluate(quietScript(200, Math.max(40, Math.min(1_000, end - Date.now())))).catch(() => {});
-      };
-      await idle();
+      await waitIdle(page, inflight);
       const idleRan = await this.readCoverage(session);
       mergeCoverage(coverage, idleRan);
       mergeCoverage(load, idleRan);
@@ -480,15 +466,7 @@ export class Capturer {
         loaded: row.loaded!,
         memo: this.memo,
         delta: () => this.readCoverage(session),
-        settle: async () => {
-          const end = Date.now() + SETTLE_MAX_MS;
-          for (let round = 0; round < 3 && Date.now() < end; round++) {
-            await page.evaluate(quietScript(200, Math.max(40, end - Date.now()))).catch(() => {});
-            if (!inflight.size) break;
-            while (inflight.size && Date.now() < end) await new Promise((r) => setTimeout(r, 40));
-          }
-          await page.evaluate(SETTLE_SCRIPT).catch(() => {});
-        },
+        settle: () => settleAction(page, inflight),
         reload: async () => {
           guard.reload = true;
           try {
@@ -652,6 +630,41 @@ async function startCoverage(page: Page): Promise<CDPSession | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** The page's requests code may wait on, while in flight (images and fonts run none). */
+export function trackRequests(page: Page): Set<Request> {
+  const inflight = new Set<Request>();
+  page.on("request", (r) => void (CODE_REQUESTS.has(r.resourceType()) && inflight.add(r)));
+  page.on("requestfinished", (r) => inflight.delete(r));
+  page.on("requestfailed", (r) => inflight.delete(r));
+  return inflight;
+}
+
+/**
+ * After load: waits for short timers (LISTENERS_SCRIPT's) and requests to
+ * finish (IDLE_MS at least, IDLE_MAX_MS at most), then for the DOM to be quiet.
+ */
+export async function waitIdle(page: Page, inflight: Set<Request>): Promise<void> {
+  const end = Date.now() + IDLE_MAX_MS;
+  await page.waitForTimeout(IDLE_MS);
+  while (Date.now() < end) {
+    const timers = await page.evaluate("window.__cbrT ? window.__cbrT.size : 0").catch(() => 0);
+    if (!timers && !inflight.size) break;
+    await page.waitForTimeout(100);
+  }
+  await page.evaluate(quietScript(200, Math.max(40, Math.min(1_000, end - Date.now())))).catch(() => {});
+}
+
+/** After an action: until its requests and DOM changes stop (SETTLE_MAX_MS at most), then a settled frame. */
+export async function settleAction(page: Page, inflight: Set<Request>): Promise<void> {
+  const end = Date.now() + SETTLE_MAX_MS;
+  for (let round = 0; round < 3 && Date.now() < end; round++) {
+    await page.evaluate(quietScript(200, Math.max(40, end - Date.now()))).catch(() => {});
+    if (!inflight.size) break;
+    while (inflight.size && Date.now() < end) await new Promise((r) => setTimeout(r, 40));
+  }
+  await page.evaluate(SETTLE_SCRIPT).catch(() => {});
 }
 
 export async function newProfileContext(browser: Browser, p: Profile, opts: { initScript?: boolean; listeners?: boolean } = {}): Promise<BrowserContext> {

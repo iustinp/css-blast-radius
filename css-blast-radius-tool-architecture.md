@@ -1052,8 +1052,30 @@ index or edit revisions.
   `exact` on pages where it ran only after an interaction
   (`script-runs-after`, with the fewest steps found as an example), and a
   page whose interactions were tried without reaching it is
-  `script-not-reached` instead of `script-not-run`. Page diffs don't replay
-  the steps yet (J3b).
+  `script-not-reached` instead of `script-not-run`.
+- **Interaction replay (J3b)** — a page diff with script edits also does
+  again, on both sides, up to 3 recorded paths (action chains from the loaded
+  page through `parent`) whose actions ran the base code the picked hunks
+  replace: the page's own actions before inherited ones, the shortest first,
+  none the start of another. An inherited action's outcome is what its
+  whole subtree ran, so its path is taken from a page loading the same
+  version that tried it itself (the shortest chain below it reaching the
+  code); with none, the action alone is done and no change after it is
+  inconclusive, not unchanged. An assessment does 1. The load context gets the
+  listener script, so the short timers are waited for as when exploring;
+  once the steps start, main-frame navigations get 204, non-GET requests are
+  aborted and popups closed. After each step and its settle both sides are
+  snapshotted and compared like the load, with errors counted per step. The
+  first path rides on the load's three loads; other paths get loads of their
+  own (the second base load only when the sides differ), and none starts
+  after 45 s. A step that fails (a timeout) is inconclusive and an extra path
+  that fails is a warning: what was compared before stands. A step the base page can't do is inconclusive and ends the
+  path; one only the edited page can't do (its target gone, hidden or
+  covered) is a change, unless the second base load can't do it either.
+  `PageDiffView.steps` carries status, zones, screenshots and errors per
+  step; the viewer lists them under the edits and opens on the first changed
+  step when the load doesn't change. An assessment counts a page changed when
+  its load or any step is, with the most elements changed at any one point.
 - **Build pipelines without an adapter** — unavailable for their files until
   one exists.
 - **Cross-origin stylesheets and iframes, stylesheets inside shadow roots** —
