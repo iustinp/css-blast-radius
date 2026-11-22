@@ -41,6 +41,19 @@ export interface PageRow {
    * together): path → blob hash of the ran offsets (`Segments` JSON).
    */
   coverage?: Record<string, string>;
+  /**
+   * Interactions tried after load (#5, J2), when the scan explored them:
+   * the same-site scripts' code that ran after any (path → coverage blob
+   * hash, all variants together) and the actions (blob of `ExploredAction[]`).
+   */
+  explored?: {
+    coverage: Record<string, string>;
+    actions: string;
+    tried: number;
+    found: number;
+    ms: number;
+    stopped?: "actions" | "time";
+  };
   /** Shell box agreement on the fidelity sample (0..1), when checked. */
   fidelity?: number;
   capturedAt: string;

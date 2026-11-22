@@ -73,7 +73,7 @@ Every tab compares your CSS with the pages as last scanned, so the scan should m
 - **Page edits**: it reads the site's `/query-index.json` and each fragment's date (`/nav.plain.html`, …), and rescans a page edited after its scan, or showing an edited fragment.
 - **New pages**: a page that appears in `/query-index.json` joins a sitemap group and is scanned. The group is picked by the page's address: from the page's own folder up, the first folder where a sitemap group has pages (siblings, the folder's own page, or pages deeper in it), and there the group with the most pages. With no shared folder, only a group with top-level pages (`/`, `/about`) takes it, so a `/blog/*` group doesn't collect `/careers/x`. A group's path filter is respected; hand-picked lists (pasted or CSV) and excluded pages are left alone, as are fragments (`/nav`, `/footer`, …) and hidden paths (`/.da/…`). A page joining a paused group is scanned when the group resumes. Pages already on the site when this started are never added. Turn it off with the **New pages** switch.
 
-The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/sites/:id/watch {enabled, intervalSec, repo, newPages}`, `POST /api/sites/:id/watch/check`.
+The setup page and the panel show where the scan stands: `Scan matches main (6d62928) · up to date`, or how many commits behind it is while it catches up. A first check after an older scan usually rescans most pages once. Limits: it only checks while the server runs (it catches up on the next start); content outside the query index and fragments (placeholders, spreadsheets) isn't followed; a page whose scripts the site serves differently from git is rescanned once per commit at most. API: `PUT /api/sites/:id/watch {enabled, intervalSec, repo, newPages}`, `POST /api/sites/:id/watch/check`, `PUT /api/sites/:id/explore {enabled, depth, actions}`.
 
 ### 3. Link your project in VS Code (once per project)
 
@@ -121,7 +121,7 @@ In a git repository, only **your branch's changes** count: if `main` has moved o
   - **N** jumps to the next change;
   - **Check on the live page** loads the real page instead of the stored copy;
   - **Open in browser** opens the same view outside VS Code.
-- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, compared with the version the scan saw (read from git by its blob id). The scan records which code ran while each page loaded (V8 block coverage), so each changed run of lines shows `◀ runs on 12 pages · loaded by 40`: **exact** where the code it replaces ran at load, **possible** on the other pages that load the script (it may run after a click, or the scan predates coverage: rescan). A page's before/after view with script edits loads the live page twice, without and with the edits you picked (the rest of the site's responses are replayed, and dates and random numbers are fixed, so both loads see the same thing), and shows the elements whose styles, text or attributes change, plus errors the edit adds (`✖ New error`) or fixes. Elements that change by themselves between two loads of the unedited page are left out with a warning. *Assess impact* does the same for every page, so it takes 2–3 loads per page. Code that runs only on interaction isn't checked yet ([#5](https://github.com/iustinp/css-blast-radius/issues/5)). With both kinds edited, the panel's **CSS** and **JS** chips (next to *All edits*) pick or unpick each kind like the edit chips, so you can look at CSS only, JS only or both, and the status bar shows the two counts apart.
+- **JavaScript files** (`.js`, `.mjs`, `.cjs`) count too, compared with the version the scan saw (read from git by its blob id). The scan records which code ran while each page loaded (V8 block coverage), so each changed run of lines shows `◀ runs on 12 pages · loaded by 40`: **exact** where the code it replaces ran at load, or after a click, hover or typing the scan tried (`runs on 21 pages (9 after interaction)`), **possible** on the other pages that load the script (an interaction not tried may run it, or the scan predates coverage: rescan). The scan tries each page's interactions (the setup page's **Interactions** card: on by default, up to 20 per page, 3 in a row, about a second each at most; links never leave the page and forms are never sent), and the hover shows the steps that ran the code on one page (`Runs after: click “Menu” → click “More” on /about`). A header repeated on many pages is tried on a few and reused for the rest. A page's before/after view with script edits loads the live page twice, without and with the edits you picked (the rest of the site's responses are replayed, and dates and random numbers are fixed, so both loads see the same thing), and shows the elements whose styles, text or attributes change, plus errors the edit adds (`✖ New error`) or fixes. Elements that change by themselves between two loads of the unedited page are left out with a warning. *Assess impact* does the same for every page, so it takes 2–3 loads per page. The before/after view doesn't replay the interactions yet ([#5](https://github.com/iustinp/css-blast-radius/issues/5)). With both kinds edited, the panel's **CSS** and **JS** chips (next to *All edits*) pick or unpick each kind like the edit chips, so you can look at CSS only, JS only or both, and the status bar shows the two counts apart.
 - If CSS files change outside the editor (a pull, a branch switch, another tool) and that moves the total, a notice says how: `now 40 pages affected (was 12 pages)`. Undoing back to the saved text isn't such a change.
 
 ### 5. See which CSS isn't on the live site yet
@@ -158,6 +158,7 @@ Settings: `cssBlastRadius.server` (default `http://127.0.0.1:4317`), `autoStartS
   - Surfaces: count next to the cursor, status bar, hover, Problems (lost pages), page panel, diff tab, and an outside-editor change notice.
 - **`fixtures/generate-large-site.mjs`**: deterministic generator for a large test site (default 400 pages plus index). Includes templates, copy pages that drift from them, legacy CSS, media/container queries, custom properties and animations.
 - **`fixtures/site`**: a 3-page site used by unit tests.
+- **`fixtures/explore`**: 5 pages with menus, fields, a POST button and a form, for the interaction tests.
 
 ### Command line without the server
 
@@ -178,15 +179,16 @@ node packages/backend/dist/cli.js assess  --workspace /tmp/cbr-ws --data /tmp/cb
 - `profiles`, `recipes` (click/hover/fill steps captured as extra states).
 - `stylesheets` (`{ urlPrefix, dir }` mappings).
 - `capture`, `dataDir`.
+  - `capture.explore`: `true` or `{ "depth": 3, "actions": 20, "timeMs": 20000 }` to try each page's interactions while capturing (off unless set; the server sets it from its Interactions settings).
   - `capture.block`: requests to abort during the capture, as regular expressions tested case-insensitively against each request URL. Use it for scripts that keep the CPU busy and slow every page down without changing which styles apply, such as a proof-of-work captcha: `"block": ["/altcha/", "/captcha/"]`. The page document itself is never blocked. The server reads the same list from `block` in the site's `settings.json` (`<data>/sites/<id>/`), and the setup page keeps it when you save.
 
 ## Tests
 
 ```bash
-npm test                                         # backend (199) + extension (35) unit tests
+npm test                                         # backend (215) + extension (37) unit tests
 npm run bench --workspace packages/backend       # L0/L1 latency gates (100 / 250 ms p95)
 npm run smoke --workspace packages/backend       # daemon over the socket, L0–L3 (20 checks)
-node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (16 checks)
+node packages/vscode-extension/scripts/e2e.cjs   # extension vs. a real server on a temp site, stubbed vscode API (17 checks)
 ```
 
 `test/server.test.ts` drives the server end to end: setup, sitemap/pasted groups, scanning, linked-group counts over the editor connection, the before/after diff, live events, exclusions, undo, and the outside-editor change notice. `test/watch.test.ts` keeps a scan up to date against a local git remote and a local site: script, stylesheet (waiting for the site, then rescanning only reached pages), page and nav edits. Bench and smoke need the captured `/tmp/cbr-ws` + `/tmp/cbr-data` from above. Set `CBR_NO_BROWSER=1` to skip the Chromium-backed unit tests.
@@ -202,7 +204,7 @@ Not yet implemented:
 - Login, for hosting the server for a team.
 - Shared team index.
 - Source maps and build adapters (Sass, PostCSS, CSS-in-JS).
-- JavaScript beyond page load ([#5](https://github.com/iustinp/css-blast-radius/issues/5)): code that runs only after clicks and other interactions.
+- Before/after views of what a script edit changes after interactions ([#5](https://github.com/iustinp/css-blast-radius/issues/5)): the counts include interactions, the page diffs only the load.
 
 Known limitations:
 - **Not captured:** Shadow DOM and iframes, and new pages missing from `/query-index.json` or not near a sitemap group (rescan the group).

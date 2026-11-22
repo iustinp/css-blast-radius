@@ -1026,9 +1026,34 @@ index or edit revisions.
   warning, and only errors (`pageerror` and `console.error`) that the second
   base load doesn't throw count as new. That is 2–3 loads per page and device,
   so an assessment with script edits costs about that much more. Pages that
-  don't load an edited script take the normal stylesheet path. Code run only
-  by interactions is epic #5 (J2–J3b). A syntax error breaks every loading
-  page but counts like any edit.
+  don't load an edited script take the normal stylesheet path. A syntax error
+  breaks every loading page but counts like any edit.
+- **Interactions (J2)** — when `capture.explore` is set (the server sets it
+  unless the setup page's *Interactions* switch is off; 3 deep, 20 per page
+  and device by default, about a second each at most), capture tries each
+  page's interactions after the load: an init script notes which elements get
+  click and hover listeners and which short timers (≤ 4 s) are pending; those
+  timers and the requests they make finish first, so their code counts as
+  load. Candidates (buttons, summaries, elements with listeners or ARIA
+  controls, text fields, selects, hover targets; never secrets, submits,
+  downloads or new tabs) are tried best first, each followed by a settle (DOM
+  quiet, script and fetch requests done, 2 s at most); the precise-coverage
+  delta after each is what it ran. Every main-frame navigation is answered
+  with 204 and every non-GET request aborted, so links and forms never leave
+  or change anything. A depth-first walk goes into what an action reveals
+  (a new DOM state hash; re-clicking the same element goes last), skips
+  families of alike elements after 3 dry tries, and reloads and replays the
+  chain when a candidate needs a cleaner state (5 times at most). A page's
+  first-level outcome (the subtree's code beyond load) is reused on later
+  pages of the same scan once 3 pages agree and the script versions match,
+  so a shared header is tried a few times, not on every page.
+  `PageRow.explored` keeps the union coverage per script and the actions
+  (blob: target, label, parent, depth, ran). A changed run of lines is then
+  `exact` on pages where it ran only after an interaction
+  (`script-runs-after`, with the fewest steps found as an example), and a
+  page whose interactions were tried without reaching it is
+  `script-not-reached` instead of `script-not-run`. Page diffs don't replay
+  the steps yet (J3b).
 - **Build pipelines without an adapter** — unavailable for their files until
   one exists.
 - **Cross-origin stylesheets and iframes, stylesheets inside shadow roots** —

@@ -29,6 +29,8 @@ export interface ChangeAnswer {
   reasons: string[];
   hint?: string;
   detail?: string;
+  /** Script edits: the pages counted because the code ran only after an interaction tried (J2), with the interactions that ran it on one. */
+  after?: { pages: number; example?: { url: string; steps: string[] } };
 }
 
 export interface RuleCount {
@@ -157,8 +159,12 @@ export const REASON = {
   scriptNotLoaded: "script-not-loaded",
   /** The edited code ran while these pages loaded (scan coverage, J1). */
   scriptRuns: "script-runs",
-  /** These pages load the script, but the edited code didn't run while they loaded (it may on a click…). */
+  /** The edited code ran on these pages only after an interaction the scan tried (J2). */
+  scriptRunsAfter: "script-runs-after",
+  /** These pages load the script, but the edited code didn't run while they loaded (their interactions weren't tried). */
   scriptNotRun: "script-not-run",
+  /** These pages load the script, but the edited code ran neither at load nor after the interactions tried (it may after others). */
+  scriptNotReached: "script-not-reached",
   /** These pages load the script, with no coverage of the version edited (older scan, other version). */
   scriptNoCoverage: "script-no-coverage",
 } as const;

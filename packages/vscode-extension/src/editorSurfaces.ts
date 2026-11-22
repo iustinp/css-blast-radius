@@ -325,9 +325,11 @@ export class EditorSurfaces implements vscode.Disposable, vscode.CodeLensProvide
     else if (ch.kind === "removed" && ch.lost) md.appendMarkdown(`Pages that lose the rule: ${countLine(ch.lost)}\n\n`);
     if (ch.conditions.length) md.appendMarkdown(`Conditions: ${ch.conditions.map((c) => `\`${c}\``).join(", ")}\n\n`);
     for (const r of ch.reasons) md.appendMarkdown(`- ${reasonText(r)}\n`);
+    const ex = ch.after?.example;
+    if (ex) md.appendMarkdown(`\nRuns after: ${ex.steps.map((s) => s.replace(/[\\`*_[\]<>]/g, "\\$&")).join(" → ")} on \`${ex.url}\`\n`);
     if (ch.hint) md.appendMarkdown(`\n${ch.hint}\n`);
     if (ch.detail) md.appendMarkdown(`\n${ch.detail}\n`);
-    md.appendMarkdown(ch.kind === "script" ? `\n\n_"Runs on" counts the pages where the edited code ran while they loaded. A page diff loads the live page with and without your edit (clicks and other interactions aren't tried yet)._\n\n` : `\n\n_Open a page to see what actually changes._\n\n`);
+    md.appendMarkdown(ch.kind === "script" ? `\n\n_"Runs on" counts the pages where the edited code ran while they loaded, or after the clicks, hovers and typing the scan tried. A page diff loads the live page with and without your edit (interactions aren't replayed there yet)._\n\n` : `\n\n_Open a page to see what actually changes._\n\n`);
     md.appendMarkdown(this.footer(a));
     const sides = editSides(ch);
     const base = { path: a.file, changeId: ch.id, sides: sides.length > 1 ? sides : undefined };

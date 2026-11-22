@@ -37,6 +37,27 @@ export function unionSegments(a: Segments, b: Segments): Segments {
   return out;
 }
 
+/** The offsets in `a` that aren't in `b`. */
+export function subtractSegments(a: Segments, b: Segments): Segments {
+  if (!a.length || !b.length) return a;
+  const out: Segments = [];
+  let j = 0;
+  for (let i = 0; i < a.length; i += 2) {
+    let s = a[i];
+    const e = a[i + 1];
+    while (j < b.length && b[j + 1] <= s) j += 2;
+    for (let k = j; s < e; k += 2) {
+      if (k >= b.length || b[k] >= e) {
+        out.push(s, e);
+        break;
+      }
+      if (b[k] > s) out.push(s, b[k]);
+      s = Math.max(s, b[k + 1]);
+    }
+  }
+  return out;
+}
+
 /** Whether any offset in [start, end) ran (end = start: the code at `start`). */
 export function ranIn(segs: Segments, start: number, end: number): boolean {
   const to = Math.max(end, start + 1);

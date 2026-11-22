@@ -56,6 +56,8 @@ export interface ChangeAnswer {
   reasons: string[];
   hint?: string;
   detail?: string;
+  /** Script edits: the pages counted because the code ran only after an interaction the scan tried, with the steps on one. */
+  after?: { pages: number; example?: { url: string; steps: string[] } };
 }
 
 /** analysis/getChange: one edit's rule, every declaration in file order (newer servers). */

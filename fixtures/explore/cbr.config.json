@@ -1,0 +1,3 @@
+{
+  "capture": { "concurrency": 1, "fidelitySample": 0, "explore": { "depth": 3, "actions": 30 } }
+}

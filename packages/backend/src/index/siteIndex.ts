@@ -2,6 +2,7 @@
 // capture run fills and writes. Queries (L0/L1) only read SiteIndex; they
 // never see a revision that is still building.
 
+import type { ExploredAction } from "../capture/explore.js";
 import type { Segments } from "../util/coverage.js";
 import { PageSet } from "../util/pageSet.js";
 import type { PageRow, RevisionRow, Store, VariantInfo } from "./store.js";
@@ -22,8 +23,10 @@ export const SCRIPT_PATH = /\.[mc]?js$/i;
 export interface ScriptEntry {
   pages: PageSet;
   blobs: Map<string, number>;
-  /** Served blob id → coverage hash → the pages where that code ran. */
+  /** Served blob id → coverage hash → the pages where that code ran at load. */
   coverage: Map<string, Map<string, PageSet>>;
+  /** The same, for the code that ran after the interactions tried (J2). */
+  after: Map<string, Map<string, PageSet>>;
 }
 
 export interface MatcherCheck {
@@ -49,6 +52,8 @@ export class SiteIndex {
   readonly ok: PageSet;
   readonly failed: PageSet;
   readonly quirks: PageSet;
+  /** Pages whose interactions the scan tried (J2). */
+  readonly explored: PageSet;
   readonly tokens = new Map<string, PageSet>();
   readonly runtimeTokens = new Map<string, PageSet>();
   readonly usage = new Map<string, PageSet>();
@@ -58,6 +63,7 @@ export class SiteIndex {
   private sheetsLower?: Map<string, string>;
   private scriptIndex?: SiteIndex["scripts"];
   private readonly coverageCache = new Map<string, Segments | null>();
+  private readonly actionsCache = new Map<string, ExploredAction[]>();
   readonly matcherChecks: MatcherCheck[];
   readonly unsupportedFeatures = new Set<string>();
   private readonly selectorCache = new Map<string, SelectorEntry | null>();
@@ -74,6 +80,7 @@ export class SiteIndex {
     this.ok = PageSet.empty(this.size);
     this.failed = PageSet.empty(this.size);
     this.quirks = PageSet.empty(this.size);
+    this.explored = PageSet.empty(this.size);
     for (const p of this.pages) {
       this.byUrl.set(p.url, p.id);
       if (p.status === "removed") continue;
@@ -81,6 +88,7 @@ export class SiteIndex {
       if (p.status === "ok") this.ok.add(p.id);
       else this.failed.add(p.id);
       if (p.quirks) this.quirks.add(p.id);
+      if (p.explored) this.explored.add(p.id);
     }
     const db = store.db;
     for (const r of db.prepare("SELECT token, runtime, pages FROM token_posting WHERE rev = ?").iterate(rev) as Iterable<any>) {
@@ -120,14 +128,10 @@ export class SiteIndex {
   }
 
   /**
-   * Same-site scripts the pages loaded (`PageRow.loaded`), by URL path: the
-   * pages and the git blob ids served, with how many pages got each.
-   * `known`: some page records what it loaded (scans before that don't).
-   */
-  /**
    * Same-site scripts by URL path: the pages that load each, the blob ids
    * served (with how many pages got each), and per served blob the pages
-   * grouped by what ran at load (coverage blob hash; J1).
+   * grouped by what ran at load (coverage blob hash; J1) and after the
+   * interactions tried (J2). `known`: some page records what it loaded.
    */
   get scripts(): { known: boolean; byPath: Map<string, ScriptEntry> } {
     if (this.scriptIndex) return this.scriptIndex;
@@ -139,16 +143,17 @@ export class SiteIndex {
       for (const [path, blob] of Object.entries(p.loaded)) {
         if (!SCRIPT_PATH.test(path)) continue;
         let e = byPath.get(path);
-        if (!e) byPath.set(path, (e = { pages: PageSet.empty(this.size), blobs: new Map(), coverage: new Map() }));
+        if (!e) byPath.set(path, (e = { pages: PageSet.empty(this.size), blobs: new Map(), coverage: new Map(), after: new Map() }));
         e.pages.add(p.id);
         e.blobs.set(blob, (e.blobs.get(blob) ?? 0) + 1);
-        const cov = p.coverage?.[path];
-        if (!cov) continue;
-        let byCov = e.coverage.get(blob);
-        if (!byCov) e.coverage.set(blob, (byCov = new Map()));
-        let set = byCov.get(cov);
-        if (!set) byCov.set(cov, (set = PageSet.empty(this.size)));
-        set.add(p.id);
+        for (const [cov, into] of [[p.coverage?.[path], e.coverage], [p.explored?.coverage[path], e.after]] as const) {
+          if (!cov) continue;
+          let byCov = into.get(blob);
+          if (!byCov) into.set(blob, (byCov = new Map()));
+          let set = byCov.get(cov);
+          if (!set) byCov.set(cov, (set = PageSet.empty(this.size)));
+          set.add(p.id);
+        }
       }
     }
     return (this.scriptIndex = { known, byPath });
@@ -166,6 +171,23 @@ export class SiteIndex {
       this.coverageCache.set(hash, segs);
     }
     return this.coverageCache.get(hash) ?? undefined;
+  }
+
+  /** The interactions tried on a page (empty: not explored, or unreadable). */
+  actions(page: PageRow): ExploredAction[] {
+    const hash = page.explored?.actions;
+    if (!hash) return [];
+    let out = this.actionsCache.get(hash);
+    if (!out) {
+      try {
+        out = JSON.parse(this.store.getBlob(hash).toString("utf8")) as ExploredAction[];
+      } catch {
+        out = [];
+      }
+      if (this.actionsCache.size > 2_000) this.actionsCache.clear();
+      this.actionsCache.set(hash, out);
+    }
+    return out;
   }
 
   static load(store: Store, revisionId?: number): SiteIndex | undefined {

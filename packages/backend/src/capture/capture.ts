@@ -2,7 +2,7 @@
 // relaxed site selectors natively, and record what L0/L1/L2 need. Writes a new
 // index revision and publishes it atomically.
 
-import { chromium, type Browser, type BrowserContext, type CDPSession, type Page, type Route } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page, type Request, type Route } from "playwright-core";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -17,7 +17,8 @@ import { executedSegments, unionSegments, type Segments, type V8Function } from 
 import type { PageRow, Store, VariantInfo } from "../index/store.js";
 import { decodeTree, firstMatch, type CompactTree } from "../l1/tree.js";
 import { assetKey, openShell } from "../l2/shell.js";
-import { BOXES_SCRIPT, COLLECT_SCRIPT, INIT_SCRIPT, SETTLE_SCRIPT, evalSelectorsScript } from "./inPage.js";
+import { explore, ExploreMemo, type ExploredAction } from "./explore.js";
+import { BOXES_SCRIPT, COLLECT_SCRIPT, INIT_SCRIPT, LISTENERS_SCRIPT, SETTLE_SCRIPT, evalSelectorsScript, quietScript } from "./inPage.js";
 
 export interface CaptureProgress {
   done: number;
@@ -94,6 +95,35 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 const RECORDED_TYPES = new Set(["stylesheet", "image", "font"]);
+/** Requests a page may still send while it's explored (others are aborted). */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const CODE_REQUESTS = new Set(["document", "script", "fetch", "xhr", "eventsource", "websocket", "other"]);
+/** After load, how long timers and requests get before what runs counts as after an interaction (at least, at most). */
+const IDLE_MS = 500;
+const IDLE_MAX_MS = 4_000;
+/** Longest wait for an action's requests and DOM changes to stop. */
+const SETTLE_MAX_MS = 2_000;
+
+/** Exploring one page variant: requests to let through. */
+interface Guard {
+  exploring: boolean;
+  /** Our own reload of the page. */
+  reload: boolean;
+}
+
+/** One page's exploration, all variants together. */
+interface PageExplore {
+  coverage: Map<string, Segments>;
+  actions: ExploredAction[];
+  tried: number;
+  found: number;
+  ms: number;
+  stopped?: "actions" | "time";
+}
+
+function mergeCoverage(into: Map<string, Segments>, from: Map<string, Segments>): void {
+  for (const [path, segs] of from) into.set(path, unionSegments(into.get(path) ?? [], segs));
+}
 
 export function buildVariants(cfg: CbrConfig): Array<VariantInfo & { profileDef: Profile; recipeDef?: Recipe }> {
   const out: Array<VariantInfo & { profileDef: Profile; recipeDef?: Recipe }> = [];
@@ -182,6 +212,8 @@ export class Capturer {
   private readonly variants;
   private unsupportedSyntax = 0;
   private readonly fidelity: number[] = [];
+  private readonly memo = new ExploreMemo();
+  private readonly explored = { pages: 0, tried: 0, found: 0, inherited: 0, resets: 0, ms: 0 };
 
   constructor(
     private readonly cfg: CbrConfig,
@@ -213,16 +245,11 @@ export class Capturer {
     try {
       if (targets.length) {
         this.browser = await chromium.launch({ headless: true });
-        const contexts = new Map<string, BrowserContext>();
-        for (const v of this.variants) {
-          if (contexts.has(v.profile)) continue;
-          contexts.set(v.profile, await this.newContext(v.profileDef));
-        }
         const queue = [...targets];
         const worker = async () => {
           for (let url = queue.shift(); url !== undefined; url = queue.shift()) {
             if (opts.signal?.aborted) throw new Error("capture cancelled");
-            const ok = await this.capturePage(url, builder, contexts);
+            const ok = await this.capturePage(url, builder);
             if (!ok) failed++;
             opts.onProgress?.({ done: ++done, total: targets.length, url, ok });
           }
@@ -239,6 +266,7 @@ export class Capturer {
           ? { sampled: this.fidelity.length, min: Math.min(...this.fidelity), mean: this.fidelity.reduce((a, b) => a + b, 0) / this.fidelity.length }
           : null,
         mode: this.cfg.siteRoot ? "root" : "live",
+        explore: this.cfg.capture.explore ? { ...this.cfg.capture.explore, ...this.explored } : null,
       };
       builder.publish(this.store, rev, notes);
       this.store.pruneRevisions([rev, ...(prev ? [prev.revision.id] : []), ...(opts.keep ?? [])]);
@@ -252,11 +280,7 @@ export class Capturer {
     }
   }
 
-  private newContext(p: Profile): Promise<BrowserContext> {
-    return newProfileContext(this.browser!, p);
-  }
-
-  private async capturePage(url: string, builder: IndexBuilder, contexts: Map<string, BrowserContext>): Promise<boolean> {
+  private async capturePage(url: string, builder: IndexBuilder): Promise<boolean> {
     const id = builder.id(url);
     const row: PageRow = {
       id,
@@ -271,10 +295,12 @@ export class Capturer {
     };
     const notes: string[] = [];
     const coverage = new Map<string, Segments>();
+    const ex: PageExplore = { coverage: new Map(), actions: [], tried: 0, found: 0, ms: 0 };
+    let explored = false;
     for (const v of this.variants) {
       if (v.recipeDef?.urls && !new RegExp(v.recipeDef.urls).test(url)) continue;
       try {
-        await this.captureVariant(url, id, v, contexts.get(v.profile)!, builder, row, coverage);
+        explored = (await this.captureVariant(url, id, v, builder, row, coverage, ex)) || explored;
       } catch (err: any) {
         const msg = String(err?.message ?? err).split("\n")[0];
         if (v.recipe) notes.push(`${v.name}: ${msg}`);
@@ -286,27 +312,53 @@ export class Capturer {
       }
     }
     if (notes.length) row.error = notes.join("; ");
-    if (coverage.size) row.coverage = Object.fromEntries([...coverage].map(([p, segs]) => [p, this.store.putBlob(JSON.stringify(segs))]));
+    const blobs = (m: Map<string, Segments>) => Object.fromEntries([...m].map(([p, segs]) => [p, this.store.putBlob(JSON.stringify(segs))]));
+    if (coverage.size) row.coverage = blobs(coverage);
+    if (explored) {
+      row.explored = { coverage: blobs(ex.coverage), actions: this.store.putBlob(JSON.stringify(ex.actions)), tried: ex.tried, found: ex.found, ms: ex.ms, ...(ex.stopped ? { stopped: ex.stopped } : {}) };
+      this.explored.pages++;
+    }
     builder.setPage(row);
     return row.status === "ok";
   }
 
+  /** Captures one variant of a page; true when its interactions were explored. */
   private async captureVariant(
     url: string,
     id: number,
     v: (typeof this.variants)[number],
-    ctx: BrowserContext,
     builder: IndexBuilder,
     row: PageRow,
     coverage: Map<string, Segments>,
-  ): Promise<void> {
+    ex: PageExplore,
+  ): Promise<boolean> {
     const cfg = this.cfg;
     const full = new URL(url, cfg.origin).href;
-    const page = await ctx.newPage();
+    const limits = v.recipeDef ? undefined : cfg.capture.explore;
+    // A context per page: what one page's visit (or exploration) leaves in cookies and storage doesn't reach the next.
+    const ctx = await newProfileContext(this.browser!, v.profileDef, { listeners: !!limits });
     const cssTexts = new Map<string, string>();
+    const guard: Guard = { exploring: false, reload: false };
+    let cdp: CDPSession | undefined;
     try {
-      await page.route("**/*", (route) => this.serve(route, row, cssTexts));
-      const cdp = await startCoverage(page);
+      const page = await ctx.newPage();
+      // Requests code may wait on (images and fonts run none).
+      const inflight = new Set<Request>();
+      page.on("request", (r) => void (CODE_REQUESTS.has(r.resourceType()) && inflight.add(r)));
+      page.on("requestfinished", (r) => inflight.delete(r));
+      page.on("requestfailed", (r) => inflight.delete(r));
+      page.on("popup", (p) => void p.close().catch(() => {}));
+      // On the context, so popups an interaction opens are guarded too: their requests never go out.
+      await ctx.route("**/*", (route) => {
+        let mine = true;
+        try {
+          mine = route.request().frame().page() === page;
+        } catch {
+          /* no frame */
+        }
+        return mine ? this.serve(route, row, cssTexts, guard) : route.abort().catch(() => {});
+      });
+      cdp = await startCoverage(page);
       const resp = await page.goto(full, { waitUntil: "load", timeout: cfg.capture.timeoutMs });
       if (!resp || resp.status() >= 400) throw new Error(`HTTP ${resp?.status() ?? "no response"}`);
       await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
@@ -315,7 +367,8 @@ export class Capturer {
         await runRecipe(page, v.recipeDef);
         await page.evaluate(SETTLE_SCRIPT);
       }
-      if (cdp) await this.takeCoverage(cdp, coverage);
+      const load = cdp ? await this.readCoverage(cdp) : new Map<string, Segments>();
+      mergeCoverage(coverage, load);
       let c = (await page.evaluate(COLLECT_SCRIPT)) as Collected;
 
       // Stylesheets → models → the relaxed selectors this page must evaluate.
@@ -399,13 +452,79 @@ export class Capturer {
         row.fidelity = Math.min(row.fidelity ?? 1, f);
         this.fidelity.push(f);
       }
+
+      if (!limits || !cdp) return false;
+      const session = cdp;
+      // Timers that fire soon after load (and what they fetch) count as load.
+      const idle = async () => {
+        const end = Date.now() + IDLE_MAX_MS;
+        await page.waitForTimeout(IDLE_MS);
+        while (Date.now() < end) {
+          const timers = await page.evaluate("window.__cbrT ? window.__cbrT.size : 0").catch(() => 0);
+          if (!timers && !inflight.size) break;
+          await page.waitForTimeout(100);
+        }
+        await page.evaluate(quietScript(200, Math.max(40, Math.min(1_000, end - Date.now())))).catch(() => {});
+      };
+      await idle();
+      const idleRan = await this.readCoverage(session);
+      mergeCoverage(coverage, idleRan);
+      mergeCoverage(load, idleRan);
+      guard.exploring = true;
+      const res = await explore({
+        page,
+        variant: v.id,
+        profile: v.profile,
+        limits,
+        base: load,
+        loaded: row.loaded!,
+        memo: this.memo,
+        delta: () => this.readCoverage(session),
+        settle: async () => {
+          const end = Date.now() + SETTLE_MAX_MS;
+          for (let round = 0; round < 3 && Date.now() < end; round++) {
+            await page.evaluate(quietScript(200, Math.max(40, end - Date.now()))).catch(() => {});
+            if (!inflight.size) break;
+            while (inflight.size && Date.now() < end) await new Promise((r) => setTimeout(r, 40));
+          }
+          await page.evaluate(SETTLE_SCRIPT).catch(() => {});
+        },
+        reload: async () => {
+          guard.reload = true;
+          try {
+            const r = await page.goto(full, { waitUntil: "load", timeout: cfg.capture.timeoutMs });
+            if (!r || r.status() >= 400) return false;
+          } catch {
+            return false;
+          } finally {
+            guard.reload = false;
+          }
+          // Timers firing later run code the first load ran: not counted as new.
+          await page.waitForLoadState("networkidle", { timeout: 2_000 }).catch(() => {});
+          await page.evaluate(SETTLE_SCRIPT).catch(() => {});
+          return true;
+        },
+      });
+      const offset = ex.actions.length;
+      for (const a of res.actions) {
+        ex.actions.push({ ...a, parent: a.parent < 0 ? -1 : a.parent + offset });
+        mergeCoverage(ex.coverage, new Map(Object.entries(a.ran)));
+      }
+      ex.tried += res.stats.tried;
+      ex.found += res.stats.found;
+      ex.ms += res.stats.ms;
+      ex.stopped ??= res.stats.stopped;
+      for (const k of ["tried", "found", "inherited", "resets", "ms"] as const) this.explored[k] += res.stats[k];
+      return true;
     } finally {
-      await page.close().catch(() => {});
+      await cdp?.detach().catch(() => {});
+      await ctx.close().catch(() => {});
     }
   }
 
-  /** The same-site scripts' code that ran, added to the page's (other variants'). */
-  private async takeCoverage(cdp: CDPSession, into: Map<string, Segments>): Promise<void> {
+  /** The same-site scripts' code that ran since coverage started or was last read. */
+  private async readCoverage(cdp: CDPSession): Promise<Map<string, Segments>> {
+    const into = new Map<string, Segments>();
     try {
       const { result } = (await cdp.send("Profiler.takePreciseCoverage")) as { result: Array<{ url: string; functions: V8Function[] }> };
       for (const sc of result) {
@@ -422,9 +541,8 @@ export class Capturer {
       }
     } catch {
       /* not Chromium, or the page went away: no coverage, the counts fall back to "loaded by" */
-    } finally {
-      await cdp.detach().catch(() => {});
     }
+    return into;
   }
 
   private sheet(key: string, text: string): SheetInfo {
@@ -444,8 +562,20 @@ export class Capturer {
   }
 
   /** Serves a request (disk in root mode, network in live mode) and records it. */
-  private async serve(route: Route, row: PageRow, cssTexts: Map<string, string>): Promise<void> {
+  private async serve(route: Route, row: PageRow, cssTexts: Map<string, string>, guard?: Guard): Promise<void> {
     const req = route.request();
+    if (guard?.exploring) {
+      // Exploring must not leave the page or change anything on the site: navigations get an
+      // empty answer (the page stays as it is), and only reading requests go out.
+      let main = false;
+      try {
+        main = req.isNavigationRequest() && req.frame().parentFrame() === null;
+      } catch {
+        /* no frame */
+      }
+      if (main && !guard.reload) return void (await route.fulfill({ status: 204, body: "" }).catch(() => {}));
+      if (!main && !SAFE_METHODS.has(req.method())) return void (await route.abort().catch(() => {}));
+    }
     const url = assetKey(req.url());
     const r = await serveSite(this.cfg, route);
     if (!r) return;
@@ -458,7 +588,7 @@ export class Capturer {
         /* not a URL */
       }
     }
-    if (r.status < 400 && (RECORDED_TYPES.has(type) || r.ct.includes("text/css"))) {
+    if (!guard?.exploring && r.status < 400 && (RECORDED_TYPES.has(type) || r.ct.includes("text/css"))) {
       row.assets[url] = `${this.store.putBlob(r.body)} ${r.ct}`;
       if (type === "stylesheet" || r.ct.includes("text/css")) cssTexts.set(url, r.body.toString("utf8"));
     }
@@ -524,7 +654,7 @@ async function startCoverage(page: Page): Promise<CDPSession | undefined> {
   }
 }
 
-export async function newProfileContext(browser: Browser, p: Profile, opts: { initScript?: boolean } = {}): Promise<BrowserContext> {
+export async function newProfileContext(browser: Browser, p: Profile, opts: { initScript?: boolean; listeners?: boolean } = {}): Promise<BrowserContext> {
   const ctx = await browser.newContext({
     viewport: { width: p.width, height: p.height },
     deviceScaleFactor: p.deviceScaleFactor ?? 1,
@@ -538,6 +668,7 @@ export async function newProfileContext(browser: Browser, p: Profile, opts: { in
     serviceWorkers: "block",
   });
   if (opts.initScript !== false) await ctx.addInitScript({ content: INIT_SCRIPT });
+  if (opts.listeners) await ctx.addInitScript({ content: LISTENERS_SCRIPT });
   return ctx;
 }
 

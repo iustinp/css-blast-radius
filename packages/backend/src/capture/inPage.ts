@@ -135,3 +135,150 @@ export const BOXES_SCRIPT = `(() => {
   }
   return boxes;
 })()`;
+
+// ---------------------------------------------------------------- exploring
+// Interactions tried after load (#5, J2): which elements react to what, what
+// can be done on the page now, and a fingerprint of its visible state.
+
+/** Records the event types each element listens to (init script; exploring only). */
+export const LISTENERS_SCRIPT = `(() => {
+  if (window.__cbrL) return;
+  const L = new WeakMap();
+  window.__cbrL = L;
+  const note = (t, type) => { if (!t || typeof t !== 'object') return; let s = L.get(t); if (!s) L.set(t, (s = new Set())); s.add(String(type).toLowerCase()); };
+  const add = EventTarget.prototype.addEventListener;
+  Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+    value: function addEventListener(type, fn, opts) { try { note(this, type); } catch {} return add.call(this, type, fn, opts); },
+    writable: true, configurable: true, enumerable: false,
+  });
+  for (const p of ['onclick', 'onmousedown', 'onmouseup', 'onpointerdown', 'onpointerup', 'onmouseover', 'onmouseenter', 'onpointerenter', 'onpointerover']) {
+    const d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, p);
+    if (!d || !d.set) continue;
+    Object.defineProperty(HTMLElement.prototype, p, { ...d, set(v) { if (v) note(this, p.slice(2)); return d.set.call(this, v); } });
+  }
+  // Pending short timers (a script loaded 3 s after load…): waited for before exploring.
+  const T = new Set();
+  window.__cbrT = T;
+  const st = window.setTimeout, ct = window.clearTimeout;
+  window.setTimeout = function setTimeout(fn, ms, ...args) {
+    if (typeof fn !== 'function' || !(Number(ms) <= 4000)) return st.call(this, fn, ms, ...args);
+    const id = st.call(this, function () { T.delete(id); return fn.apply(this, arguments); }, ms, ...args);
+    T.add(id);
+    return id;
+  };
+  window.clearTimeout = function clearTimeout(id) { T.delete(id); return ct.call(this, id); };
+})();`
+
+/**
+ * What can be done on the page now: [kind, target selector, label, family, score][],
+ * best first. Never secrets, submits, uploads, new tabs or downloads.
+ */
+export const CANDIDATES_SCRIPT = `(() => {
+  const L = window.__cbrL;
+  const types = (el) => (L && L.get(el)) || null;
+  const CLICK = ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'];
+  const HOVER = ['mouseover', 'mouseenter', 'pointerenter', 'pointerover'];
+  const ROLES = new Set(['button', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'switch', 'checkbox', 'radio', 'option', 'combobox', 'treeitem', 'link']);
+  const SECRET = /(^|[^a-z])(cc-|card|cvc|cvv|iban|pass|pin|ssn|secur|otp|token)/i;
+  const TEXT = new Set(['', 'text', 'search']);
+  const esc = (s) => CSS.escape(s);
+  const vw = innerWidth, vh = innerHeight;
+  const uniqueId = (e) => e.id && document.querySelectorAll('#' + esc(e.id)).length === 1;
+  const selectorOf = (el) => {
+    const parts = [];
+    for (let e = el; e && e !== document.documentElement; e = e.parentElement) {
+      if (uniqueId(e)) { parts.unshift('#' + esc(e.id)); return parts.join(' > '); }
+      let i = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) i++;
+      parts.unshift(esc(e.localName) + ':nth-of-type(' + i + ')');
+    }
+    parts.unshift('html');
+    return parts.join(' > ');
+  };
+  const family = (kind, el) => {
+    const parts = [];
+    for (let e = el, k = 0; e && e !== document.body && k < 4; e = e.parentElement, k++) {
+      parts.unshift(e.localName + Array.from(e.classList).slice(0, 3).map((c) => '.' + c).join(''));
+    }
+    return kind + '|' + parts.join('>');
+  };
+  const clip = (s) => String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+  const labelOf = (el) => {
+    const lab = el.labels && el.labels[0] ? el.labels[0].innerText : '';
+    const img = el.querySelector && el.querySelector('img[alt]');
+    return clip(el.getAttribute('aria-label') || lab || el.getAttribute('title') || (el.localName === 'select' || el.localName === 'input' || el.localName === 'textarea' ? '' : el.innerText)
+      || el.getAttribute('placeholder') || el.getAttribute('alt') || (img && img.alt) || el.getAttribute('name') || el.id || el.localName);
+  };
+  const secret = (el) => SECRET.test([el.getAttribute('autocomplete'), el.getAttribute('name'), el.id, el.getAttribute('aria-label')].join(' '));
+  const out = [];
+  const keys = new Set();
+  for (const el of document.body ? document.body.getElementsByTagName('*') : []) {
+    const tag = el.localName;
+    const t = types(el);
+    const listens = (list) => !!t && list.some((x) => t.has(x));
+    const role = el.getAttribute('role');
+    let kind = null, score = 0;
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (el.readOnly || secret(el)) continue;
+      if (TEXT.has(type)) (kind = 'type'), (score = 3);
+      else if (type === 'checkbox' || type === 'radio') (kind = 'click'), (score = 2);
+      else continue;
+    } else if (tag === 'textarea') {
+      if (el.readOnly || secret(el)) continue;
+      (kind = 'type'), (score = 2);
+    } else if (tag === 'select') {
+      if (el.options.length < 2 || el.multiple || secret(el)) continue;
+      (kind = 'select'), (score = 3);
+    } else if (tag === 'button') {
+      if (el.form && (el.getAttribute('type') || 'submit').toLowerCase() === 'submit') continue;
+      (kind = 'click'), (score = 4);
+    } else if (tag === 'a' && el.hasAttribute('href')) {
+      const href = el.getAttribute('href').trim();
+      if (el.target === '_blank' || el.hasAttribute('download') || /^(mailto|tel|sms):/i.test(href)) continue;
+      (kind = 'click'), (score = listens(CLICK) || el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls') || /^javascript:/i.test(href) ? 3 : href.startsWith('#') ? 1 : 0.5);
+    } else if (tag === 'summary') (kind = 'click'), (score = 5);
+    else if ((role && ROLES.has(role)) || el.hasAttribute('onclick') || listens(CLICK)) (kind = 'click'), (score = 3);
+    else if (listens(HOVER)) (kind = 'hover'), (score = 2);
+    if (!kind) continue;
+    if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls') || el.hasAttribute('aria-haspopup')) score += 2;
+    if (kind === 'click' && listens(HOVER) && !listens(CLICK)) score -= 1;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true' || el.closest('[inert],fieldset[disabled]')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || r.right <= 0 || r.left >= vw) continue;
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) continue;
+    if (getComputedStyle(el).pointerEvents === 'none') continue;
+    const label = labelOf(el);
+    const fam = family(kind, el);
+    const key = fam + '|' + label;
+    if (keys.has(key)) continue;
+    keys.add(key);
+    if (r.top < vh) score += 2;
+    out.push([kind, selectorOf(el), label, fam, score]);
+    if (out.length >= 400) break;
+  }
+  return out.map((c, i) => [c, i]).sort((a, b) => b[0][4] - a[0][4] || a[1] - b[1]).slice(0, 150).map((x) => x[0]);
+})()`;
+
+/** A fingerprint of the page's visible structure (not its text): has an action changed anything? */
+export const STATE_SCRIPT = `(() => {
+  let h = 0x811c9dc5;
+  const mix = (s) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } h ^= 124; h = Math.imul(h, 0x01000193); };
+  for (const el of document.body ? document.body.getElementsByTagName('*') : []) {
+    mix(el.localName + '#' + el.id + '.' + el.getAttribute('class') + '|' + el.getAttribute('aria-expanded') + el.getAttribute('aria-selected') + el.getAttribute('aria-hidden')
+      + (el.hasAttribute('open') ? 'o' : '') + (el.hidden ? 'h' : '') + (el.checkVisibility ? (el.checkVisibility() ? 'v' : '-') : ''));
+  }
+  return (h >>> 0).toString(36);
+})()`;
+
+/** Resolves once the DOM hasn't changed for `ms` (at most `max` ms). */
+export function quietScript(ms: number, max: number): string {
+  return `new Promise((done) => {
+  const start = performance.now();
+  let last = start;
+  const mo = new MutationObserver(() => { last = performance.now(); });
+  mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  const tick = () => { const now = performance.now(); if (now - last >= ${ms} || now - start >= ${max}) { mo.disconnect(); done(true); } else setTimeout(tick, 40); };
+  setTimeout(tick, 40);
+})`;
+}

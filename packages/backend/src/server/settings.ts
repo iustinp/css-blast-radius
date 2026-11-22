@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { ROOT_ORIGIN, type CbrConfig, type Profile } from "../config.js";
+import { exploreLimits, ROOT_ORIGIN, type CbrConfig, type Profile } from "../config.js";
 
 export type Device = "desktop" | "mobile" | "tablet";
 
@@ -24,6 +24,25 @@ export interface SiteSettings {
   block?: string[];
   /** Keeping the scan up to date with the site (absent: on, every minute). */
   watch?: WatchSettings;
+  /** Trying each page's clicks, hovers and typing while scanning, for script edits (absent: on, 3 deep, 20 per page). */
+  explore?: ExploreSettings;
+}
+
+export interface ExploreSettings {
+  enabled: boolean;
+  /** Interactions in a row (a click that opens a menu, then one in it…). */
+  depth: number;
+  /** Interactions tried per page and device. */
+  actions: number;
+}
+
+export const DEFAULT_EXPLORE: ExploreSettings = { enabled: true, depth: 3, actions: 20 };
+
+/** The interaction settings, with depth and actions kept in range. */
+export function exploreSettings(s: SiteSettings): ExploreSettings {
+  const e = s.explore ?? DEFAULT_EXPLORE;
+  const { depth, actions } = exploreLimits({ depth: e.depth ?? DEFAULT_EXPLORE.depth, actions: e.actions ?? DEFAULT_EXPLORE.actions });
+  return { enabled: e.enabled !== false, depth, actions };
 }
 
 export interface WatchSettings {
@@ -142,6 +161,7 @@ export function siteKey(s: SiteSettings): string {
 
 /** The capture/analysis config for the site; workspaceRoot is set per project. */
 export function buildConfig(s: SiteSettings, dataDir: string, urls: string[] = []): CbrConfig {
+  const explore = exploreSettings(s);
   return {
     workspaceRoot: dataDir,
     siteRoot: s.siteFolder || undefined,
@@ -153,6 +173,7 @@ export function buildConfig(s: SiteSettings, dataDir: string, urls: string[] = [
     stylesheets: [],
     capture: {
       concurrency: 6, timeoutMs: 20_000, fidelitySample: 0.1, matcherSample: 0.1, block: s.block ?? [],
+      ...(explore.enabled ? { explore: exploreLimits(explore) } : {}),
     },
     dataDir,
   };

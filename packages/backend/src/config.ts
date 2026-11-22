@@ -3,6 +3,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { ExploreLimits } from "./capture/explore.js";
 
 export interface Profile {
   name: string;
@@ -63,6 +64,8 @@ export interface CbrConfig {
      * while the page is open. The page document itself is never blocked.
      */
     block: string[];
+    /** Trying each page's interactions after load (#5, J2); absent: not explored. */
+    explore?: ExploreLimits;
   };
   dataDir: string;
 }
@@ -108,9 +111,18 @@ export function loadConfig(workspaceRoot: string, overrides: Partial<{ siteRoot:
       fidelitySample: raw.capture?.fidelitySample ?? 0.1,
       matcherSample: raw.capture?.matcherSample ?? 0.1,
       block: raw.capture?.block ?? [],
+      ...(raw.capture?.explore ? { explore: exploreLimits(raw.capture.explore === true ? {} : raw.capture.explore) } : {}),
     },
     dataDir: overrides.dataDir ? abs(overrides.dataDir) : abs(raw.dataDir ?? ".css-blast-radius"),
   };
+}
+
+/** Exploration budgets, with defaults: 3 actions deep, 20 actions and about a second per action. */
+export function exploreLimits(o: { depth?: number; actions?: number; timeMs?: number }): ExploreLimits {
+  const int = (n: unknown, d: number, lo: number, hi: number) => (Number.isFinite(Number(n)) ? Math.min(hi, Math.max(lo, Math.round(Number(n)))) : d);
+  const depth = int(o.depth, 3, 1, 6);
+  const actions = int(o.actions, 20, 1, 200);
+  return { depth, actions, timeMs: int(o.timeMs, Math.max(10_000, actions * 1_000), 1_000, 600_000) };
 }
 
 /** Workspace file → stylesheet URL path(s) it is served as. */

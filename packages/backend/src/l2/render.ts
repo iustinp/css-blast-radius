@@ -477,7 +477,7 @@ export class Renderer {
     try {
       const before = await load("base", true);
       const edited = await load("edited");
-      if (!before.hits && !edited.hits) return done("inconclusive", "this page didn't load the edited files");
+      if (!before.hits && !edited.hits) return done("inconclusive", "this page didn't load the edited files while it loaded (it may after an interaction, which page diffs don't try yet)");
       const after = alignTo(before.snap, edited.snap);
       const first = compareElements(before.snap, after, props, true);
       let added = edited.errors.filter((e) => !before.errors.includes(e));

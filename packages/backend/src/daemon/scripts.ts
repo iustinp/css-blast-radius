@@ -1,22 +1,25 @@
-// JavaScript edits (#5, J0–J1): which pages the edited script code reaches.
+// JavaScript edits (#5, J0–J2): which pages the edited script code reaches.
 // Scans record every same-site file a page loaded with its git blob id
 // (`PageRow.loaded`), so a workspace script is matched to those URL paths by
 // name and its live version is read from git by that blob id. Scans also
-// record which code ran while each page loaded (`PageRow.coverage`): a changed
-// run of lines counts as exact on the pages where the code it replaces ran,
-// and as possible on the other pages that load the script (it may run after a
-// click; or there is no coverage of the version edited). What the edit does
-// at load is shown by loading a page with and without it (l2/render.ts,
-// measureLoads); what it does after clicks isn't checked yet.
+// record which code ran while each page loaded (`PageRow.coverage`) and,
+// when the scan tries the pages' interactions, after each click, hover or
+// typing (`PageRow.explored`). A changed run of lines counts as exact on the
+// pages where the code it replaces ran, at load or after an interaction, and
+// as possible on the other pages that load the script (an interaction not
+// tried may run it; or there is no coverage of the version edited). What the
+// edit does at load is shown by loading a page with and without it
+// (l2/render.ts, measureLoads); what it does after interactions isn't yet.
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { diffLines } from "diff";
 import fg from "fast-glob";
+import { stepText } from "../capture/explore.js";
 import { REASON, Sets, type ChangeAnswer, type Count, type FileAnswer, type RuleCount } from "../engine/contract.js";
 import { SCRIPT_PATH, type SiteIndex } from "../index/siteIndex.js";
 import type { LiveEdit } from "../rpc/protocol.js";
-import { ranIn } from "../util/coverage.js";
+import { ranIn, type Segments } from "../util/coverage.js";
 import { PageSet } from "../util/pageSet.js";
 import { Doc, sha256, type TextChange } from "./documents.js";
 import { blobId, readText, type BaseText, type BranchPoint, type Git, type Tab } from "./diffBase.js";
@@ -113,27 +116,31 @@ export class ScriptTracker {
 
   /**
    * Pages that load the file (before the scope), the blob ids served (most
-   * pages first), and per served blob the pages grouped by coverage hash.
+   * pages first), and per served blob the pages grouped by coverage hash, at
+   * load and after interactions.
    */
-  private loadedBy(path: string): { pages: PageSet; blobs: string[]; coverage: Map<string, Map<string, PageSet>> } | undefined {
+  private loadedBy(path: string): { pages: PageSet; blobs: string[]; coverage: Map<string, Map<string, PageSet>>; after: Map<string, Map<string, PageSet>> } | undefined {
     const idx = this.host.index();
     const keys = this.keysFor(path);
     if (!idx || !keys.length) return undefined;
     const pages = PageSet.empty(idx.size);
     const blobs = new Map<string, number>();
     const coverage = new Map<string, Map<string, PageSet>>();
+    const after = new Map<string, Map<string, PageSet>>();
     for (const k of keys) {
       const e = idx.scripts.byPath.get(k);
       if (!e) continue;
       pages.orInPlace(e.pages);
       for (const [b, n] of e.blobs) blobs.set(b, (blobs.get(b) ?? 0) + n);
-      for (const [b, byCov] of e.coverage) {
-        let into = coverage.get(b);
-        if (!into) coverage.set(b, (into = new Map()));
-        for (const [h, set] of byCov) into.set(h, into.has(h) ? into.get(h)!.or(set) : set);
+      for (const [from, to] of [[e.coverage, coverage], [e.after, after]] as const) {
+        for (const [b, byCov] of from) {
+          let into = to.get(b);
+          if (!into) to.set(b, (into = new Map()));
+          for (const [h, set] of byCov) into.set(h, into.has(h) ? into.get(h)!.or(set) : set);
+        }
       }
     }
-    return { pages, blobs: [...blobs].sort((a, b) => b[1] - a[1]).map(([b]) => b), coverage };
+    return { pages, blobs: [...blobs].sort((a, b) => b[1] - a[1]).map(([b]) => b), coverage, after };
   }
 
   // ------------------------------------------------------------ documents
@@ -364,31 +371,74 @@ export class ScriptTracker {
   }
 
   /**
-   * One hunk's pages: exact where the code it replaces ran at load (the
-   * coverage of the base version), possible on the other pages loading it.
+   * One hunk's pages: exact where the code it replaces ran (the coverage of
+   * the base version) at load or after an interaction tried, possible on the
+   * other pages loading it. `after`: the pages where it ran only after one,
+   * with the interactions that ran it on one of them.
    */
-  private hunkPages(h: Hunk, base: BaseText | undefined, lines: number[], loaders: PageSet, by: ReturnType<ScriptTracker["loadedBy"]>): { sets: Sets; reasons: string[] } {
+  private hunkPages(
+    path: string,
+    h: Hunk,
+    base: BaseText | undefined,
+    lines: number[],
+    loaders: PageSet,
+    by: ReturnType<ScriptTracker["loadedBy"]>,
+  ): { sets: Sets; reasons: string[]; after?: ChangeAnswer["after"] } {
     const idx = this.host.index()!;
     const sets = Sets.empty(idx.size);
     const covered = PageSet.empty(idx.size);
+    const atLoad = PageSet.empty(idx.size);
+    const afterHit = PageSet.empty(idx.size);
     const text = base?.text;
-    const byCov = text !== undefined && base?.kind === "production" ? by?.coverage.get(blobId(Buffer.from(text))) : undefined;
-    if (byCov && text !== undefined) {
-      const spans = baseSpans(text, lines, h);
+    const blob = text !== undefined && base?.kind === "production" ? blobId(Buffer.from(text)) : undefined;
+    const spans = blob && text !== undefined ? baseSpans(text, lines, h) : [];
+    const hits = (segs: Segments): boolean => spans.some(([a, b]) => ranIn(segs, a, b));
+    for (const [byCov, into] of [[blob && by?.coverage.get(blob), atLoad], [blob && by?.after.get(blob), afterHit]] as const) {
+      if (!byCov) continue;
       for (const [hash, pages] of byCov) {
         const segs = idx.coverage(hash);
         if (!segs) continue;
         const p = pages.and(loaders);
         covered.orInPlace(p);
-        if (spans.some(([a, b]) => ranIn(segs, a, b))) sets.exact.orInPlace(p);
+        if (hits(segs)) into.orInPlace(p);
       }
     }
+    const afterOnly = afterHit.andNot(atLoad);
+    sets.exact = atLoad.or(afterOnly);
     sets.possible = loaders.andNot(sets.exact);
     const reasons: string[] = [];
-    if (!sets.exact.isEmpty()) reasons.push(REASON.scriptRuns);
-    if (!covered.andNot(sets.exact).isEmpty()) reasons.push(REASON.scriptNotRun);
+    if (!atLoad.isEmpty()) reasons.push(REASON.scriptRuns);
+    if (!afterOnly.isEmpty()) reasons.push(REASON.scriptRunsAfter);
+    const notRun = covered.andNot(sets.exact);
+    if (!notRun.and(idx.explored).isEmpty()) reasons.push(REASON.scriptNotReached);
+    if (!notRun.andNot(idx.explored).isEmpty()) reasons.push(REASON.scriptNotRun);
     if (!loaders.andNot(covered).isEmpty()) reasons.push(covered.isEmpty() ? REASON.scriptLoaded : REASON.scriptNoCoverage);
-    return { sets, reasons };
+    if (afterOnly.isEmpty()) return { sets, reasons };
+    return { sets, reasons, after: { pages: afterOnly.count(), example: this.afterExample(path, blob!, afterOnly, hits) } };
+  }
+
+  /** The fewest interactions found to run the edited code, on one of the first pages where they do. */
+  private afterExample(path: string, blob: string, pages: PageSet, hits: (s: Segments) => boolean): { url: string; steps: string[] } | undefined {
+    const idx = this.host.index()!;
+    const keys = this.keysFor(path);
+    let best: { url: string; steps: string[] } | undefined;
+    let n = 0;
+    for (const id of pages.ids()) {
+      if (++n > 10) break;
+      const row = idx.pages[id];
+      if (!row) continue;
+      const own = keys.filter((k) => row.loaded?.[k] === blob);
+      const actions = idx.actions(row);
+      for (const a of actions) {
+        if (a.inherited || (best && a.depth >= best.steps.length)) continue;
+        if (!own.some((k) => a.ran[k] && hits(a.ran[k]))) continue;
+        const chain: string[] = [];
+        for (let x: (typeof actions)[number] | undefined = a; x; x = x.parent >= 0 ? actions[x.parent] : undefined) chain.unshift(stepText(x));
+        best = { url: row.url, steps: chain };
+      }
+      if (best?.steps.length === 1) break;
+    }
+    return best;
   }
 
   private result(s: ScriptState, tab: Tab): ScriptResult {
@@ -401,12 +451,14 @@ export class ScriptTracker {
     const hunks = s.base ? diffHunks(s.base.text ?? "", text) : [];
     const { pages: loaders, reason, urls, by } = this.pagesOf(s.path);
     const lines = lineStarts(s.base?.text ?? "");
-    const per = hunks.map((h) => (idx && !reason ? this.hunkPages(h, s.base, lines, loaders, by) : { sets: Sets.empty(idx?.size ?? 0), reasons: [reason!] }));
+    const per = hunks.map((h): ReturnType<ScriptTracker["hunkPages"]> =>
+      idx && !reason ? this.hunkPages(s.path, h, s.base, lines, loaders, by) : { sets: Sets.empty(idx?.size ?? 0), reasons: [reason!] },
+    );
     const sets = Sets.empty(idx?.size ?? 0);
     for (const p of per) sets.orInPlace(p.sets);
     const countOf = (x: Sets): Count => (idx ? { ...x.count(false), complete: true } : { ...ZERO, complete: false });
     const count = countOf(sets);
-    const changes: ChangeAnswer[] = hunks.map((h, i) => ({ id: h.id, kind: "script", line: Math.max(1, Math.min(h.start, h.end)), selector: hunkLabel(h), pages: countOf(per[i].sets), conditions: [], reasons: per[i].reasons }));
+    const changes: ChangeAnswer[] = hunks.map((h, i) => ({ id: h.id, kind: "script", line: Math.max(1, Math.min(h.start, h.end)), selector: hunkLabel(h), pages: countOf(per[i].sets), conditions: [], reasons: per[i].reasons, ...(per[i].after ? { after: per[i].after } : {}) }));
     const totalReasons = reason ? [reason] : [...new Set(per.flatMap((p) => p.reasons))];
     if (s.base?.note) totalReasons.push(`diff-base:${s.base.kind} (${s.base.note})`);
     if (!hunks.length) totalReasons.push(REASON.noEffectiveChange);

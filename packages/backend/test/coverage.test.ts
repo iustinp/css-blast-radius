@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executedSegments, ranIn, unionSegments } from "../src/util/coverage.js";
+import { executedSegments, ranIn, subtractSegments, unionSegments } from "../src/util/coverage.js";
 
 describe("script coverage segments", () => {
   // script [0,100) ran; f [10,40) ran, with a branch [20,30) that didn't; g [50,80) never ran.
@@ -22,5 +22,13 @@ describe("script coverage segments", () => {
   it("joins the variants of a page", () => {
     expect(unionSegments([0, 10, 30, 40], [5, 20, 50, 60])).toEqual([0, 20, 30, 40, 50, 60]);
     expect(unionSegments([], [1, 2])).toEqual([1, 2]);
+  });
+
+  it("keeps what ran that hadn't before", () => {
+    expect(subtractSegments([0, 100], [10, 20, 30, 40])).toEqual([0, 10, 20, 30, 40, 100]);
+    expect(subtractSegments([10, 20, 50, 60], [0, 30])).toEqual([50, 60]);
+    expect(subtractSegments([10, 20], [15, 25])).toEqual([10, 15]);
+    expect(subtractSegments([10, 20], [10, 20])).toEqual([]);
+    expect(subtractSegments([10, 20], [])).toEqual([10, 20]);
   });
 });

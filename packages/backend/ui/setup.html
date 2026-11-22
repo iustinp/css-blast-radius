@@ -693,6 +693,26 @@ function watchCard() {
   return `<div class="card">${head}${code}${content}${checked}</div>`;
 }
 
+function exploreCard() {
+  const e = cur().explore;
+  if (!e) return "";
+  const opt = (list, v, unit) => {
+    if (!list.includes(v)) list = [...list, v].sort((a, b) => a - b);
+    return list.map((n) => `<option value="${n}" ${n === v ? "selected" : ""}>${n}${unit ? ` ${unit}` : ""}</option>`).join("");
+  };
+  const head = `<div class="card-h">
+      <label class="switch" title="${e.enabled ? "Stop trying interactions" : "Try interactions"}"><input type="checkbox" id="exploreToggle" ${e.enabled ? "checked" : ""}><span></span></label>
+      <h2>Interactions</h2>
+      <span class="muted small">While scanning, tries each page's clicks, hovers and typing, to see which script code runs after them.</span>
+      <span class="sp"></span>
+      ${e.enabled ? `<span class="small muted">Up to <select id="exploreActions">${opt([10, 20, 40, 80], e.actions)}</select> per page, <select id="exploreDepth">${opt([1, 2, 3, 4, 5], e.depth)}</select> in a row</span>` : ""}
+    </div>`;
+  const note = e.enabled
+    ? "Links don't leave the page and forms aren't sent. Each page takes longer to scan (up to about a second per interaction). Changes apply from the next scan."
+    : "Off: script edits count only the code that runs while pages load. Changes apply from the next scan.";
+  return `<div class="card">${head}<div class="watch-row"><span class="muted small">${note}</span></div></div>`;
+}
+
 function renderList() {
   const site = cur();
   const groups = site.groups || [];
@@ -724,7 +744,7 @@ function renderList() {
       <h1>${esc(site.name)}</h1>
       <span class="sp"></span>
       <button class="btn danger" id="delSite">Delete site</button>
-    </div>` + siteCard() + watchCard() + `
+    </div>` + siteCard() + watchCard() + exploreCard() + `
     <div class="card">
       <div class="card-h">
         <h2>Page groups</h2>
@@ -1287,6 +1307,11 @@ document.addEventListener("change", async (e) => {
   if (t.id === "watchToggle" || t.id === "watchInterval" || t.id === "watchNewPages") {
     const body = t.id === "watchToggle" ? { enabled: t.checked } : t.id === "watchNewPages" ? { newPages: t.checked } : { intervalSec: Number(t.value) };
     try { applyState(await api(sp("/watch", sid), { method: "PUT", body: JSON.stringify(body) })); } catch (err) { toast(err.message, null, null, true); }
+    return;
+  }
+  if (t.id === "exploreToggle" || t.id === "exploreActions" || t.id === "exploreDepth") {
+    const body = t.id === "exploreToggle" ? { enabled: t.checked } : t.id === "exploreActions" ? { actions: Number(t.value) } : { depth: Number(t.value) };
+    try { applyState(await api(sp("/explore", sid), { method: "PUT", body: JSON.stringify(body) })); } catch (err) { toast(err.message, null, null, true); }
     return;
   }
   if (t.dataset.toggle) {

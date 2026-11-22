@@ -38,6 +38,10 @@ describe("formatChange", () => {
     expect(formatChange(change({ kind: "script", pages: c(1, 2), reasons: ["script-runs", "script-not-run"] }))).toBe("runs on 1 page · loaded by 3");
     expect(formatChange(change({ kind: "script", pages: c(3), reasons: ["script-runs"] }))).toBe("runs on 3 pages");
     expect(formatChange(change({ kind: "script", pages: c(0, 2), reasons: ["script-not-run"] }))).toBe("not run on load · loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(0, 2), reasons: ["script-not-reached"] }))).toBe("not run on load or interaction · loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(0, 2), reasons: ["script-not-reached", "script-not-run"] }))).toBe("not run on load · loaded by 2 pages");
+    expect(formatChange(change({ kind: "script", pages: c(5, 3), reasons: ["script-runs", "script-runs-after"], after: { pages: 2 } }))).toBe("runs on 5 pages (2 after interaction) · loaded by 8");
+    expect(formatChange(change({ kind: "script", pages: c(2), reasons: ["script-runs-after"], after: { pages: 2 } }))).toBe("runs on 2 pages after interaction");
     expect(formatChange(change({ kind: "script", pages: c(0), reasons: ["script-not-loaded"] }))).toBe("0 pages · no scanned page loads this script");
   });
   it("shows gained and lost for selector changes", () => {

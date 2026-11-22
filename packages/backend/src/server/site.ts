@@ -15,7 +15,7 @@ import { Renderer } from "../l2/render.js";
 import type { GroupInfo, WatchStatus } from "../rpc/protocol.js";
 import { Groups, type Group } from "./groups.js";
 import { friendlyError, Jobs } from "./jobs.js";
-import { buildConfig, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, watchSettings, type SiteSettings } from "./settings.js";
+import { buildConfig, exploreSettings, isConfigured, loadSettings, pagePath, saveSettings, siteKey, UserError, validateSettings, watchSettings, type SiteSettings } from "./settings.js";
 import { readSitemap } from "./sitemap.js";
 import { Watcher } from "./watch.js";
 
@@ -278,6 +278,7 @@ export class Site {
       job: this.jobs.state(),
       lastResult: this.jobs.lastResult,
       watch: this.watcher.status,
+      explore: exploreSettings(this.settings),
       stylesheets,
     };
   }
@@ -341,6 +342,7 @@ export class Site {
       case "PUT /": {
         const next = validateSettings(body);
         if (this.settings.watch) next.watch = this.settings.watch;
+        if (this.settings.explore) next.explore = this.settings.explore;
         const otherSite = next.siteUrl !== this.settings.siteUrl || next.siteFolder !== this.settings.siteFolder;
         // The setup page has no field for blocked requests: keep the site's ones from settings.json.
         if (next.block === undefined && !otherSite && this.settings.block) next.block = this.settings.block;
@@ -368,6 +370,22 @@ export class Site {
         this.settings = { ...this.settings, watch: watchSettings({ ...this.settings, watch: w }) };
         saveSettings(this.dir, this.settings);
         this.watcher.reset(false);
+        this.host.changed();
+        return this.host.state();
+      }
+      case "PUT /explore": {
+        const e = exploreSettings(this.settings);
+        if (body?.enabled !== undefined) e.enabled = body.enabled === true;
+        for (const k of ["depth", "actions"] as const) {
+          if (body?.[k] === undefined) continue;
+          const n = Number(body[k]);
+          if (!Number.isFinite(n)) throw new UserError(`The ${k === "depth" ? "depth" : "number of interactions"} must be a number.`);
+          e[k] = n;
+        }
+        this.settings = { ...this.settings, explore: exploreSettings({ ...this.settings, explore: e }) };
+        saveSettings(this.dir, this.settings);
+        this.cfg = buildConfig(this.settings, this.dir);
+        this.shared.cfg = this.cfg;
         this.host.changed();
         return this.host.state();
       }
